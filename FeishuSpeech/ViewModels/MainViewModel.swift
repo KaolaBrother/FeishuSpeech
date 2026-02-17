@@ -88,6 +88,12 @@ class MainViewModel: ObservableObject {
             return
         }
         
+        guard AudioRecorder.hasInputDevice else {
+            logger.warning("No input device found")
+            status = .error("未检测到麦克风，请连接音频输入设备")
+            return
+        }
+        
         logger.info("Starting recording")
         status = .recording
         audioRecorder.startRecording()

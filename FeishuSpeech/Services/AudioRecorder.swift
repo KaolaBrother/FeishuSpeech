@@ -16,6 +16,15 @@ class AudioRecorder: NSObject, ObservableObject {
         super.init()
     }
     
+    static var hasInputDevice: Bool {
+        let discovery = AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.microphone, .external],
+            mediaType: .audio,
+            position: .unspecified
+        )
+        return !discovery.devices.isEmpty
+    }
+    
     func startRecording() {
         guard !isRecording else { return }
         
@@ -27,7 +36,7 @@ class AudioRecorder: NSObject, ObservableObject {
         let inputNode = audioEngine.inputNode
         let inputFormat = inputNode.outputFormat(forBus: 0)
         
-        logger.info("Input format: sampleRate=\(inputFormat.sampleRate), channels=\(inputFormat.channelCount)")
+        logger.info("Input format: sampleRate=\(inputFormat.sampleRate), channels=\(inputFormat.channelCount), interleaved=\(inputFormat.isInterleaved)")
         
         let targetFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: targetSampleRate, channels: 1, interleaved: true)!
         
@@ -36,10 +45,11 @@ class AudioRecorder: NSObject, ObservableObject {
             return
         }
         
-        inputNode.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, time in
+        // CRITICAL: format must be nil to avoid deinterleaved format crash on some Macs
+        inputNode.installTap(onBus: 0, bufferSize: 4096, format: nil) { [weak self] buffer, time in
             guard let self = self else { return }
             
-            let frameCount = AVAudioFrameCount(Double(buffer.frameLength) * self.targetSampleRate / inputFormat.sampleRate)
+            let frameCount = AVAudioFrameCount(Double(buffer.frameLength) * self.targetSampleRate / buffer.format.sampleRate)
             guard frameCount > 0,
                   let convertedBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: frameCount) else {
                 return
