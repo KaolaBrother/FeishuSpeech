@@ -8,6 +8,9 @@ struct FeishuSpeechApp: App {
     var body: some Scene {
         MenuBarExtra {
             MenuBarView(viewModel: viewModel)
+                .onAppear {
+                    appDelegate.setViewModel(viewModel)
+                }
         } label: {
             HStack(spacing: 4) {
                 Image(systemName: viewModel.status.icon)

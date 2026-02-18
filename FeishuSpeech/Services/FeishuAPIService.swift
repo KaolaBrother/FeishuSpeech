@@ -1,19 +1,64 @@
 import Foundation
+import Network
 import os.log
 
 private nonisolated(unsafe) let logger = Logger(subsystem: "com.feishuspeech.app", category: "API")
+
+private let requestTimeout: TimeInterval = 30
+private let maxRetries = 3
+private let retryDelay: TimeInterval = 1.0
 
 actor FeishuAPIService {
     static let shared = FeishuAPIService()
     
     private var cachedToken: String?
     private var tokenExpiry: Date?
+    private var lastNetworkError: Error?
+    private var networkMonitor: NWPathMonitor?
+    private var isNetworkAvailable = true
     
     private let authURL = URL(string: "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal")!
     private let speechURL = URL(string: "https://open.feishu.cn/open-apis/speech_to_text/v1/speech/file_recognize")!
     
     private let decoder = JSONDecoder()
     private let encoder = JSONEncoder()
+    
+    private var urlSession: URLSession {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = requestTimeout
+        config.timeoutIntervalForResource = requestTimeout * 2
+        config.waitsForConnectivity = true
+        return URLSession(configuration: config)
+    }
+    
+    private init() {
+        startNetworkMonitoring()
+    }
+    
+    private func startNetworkMonitoring() {
+        networkMonitor = NWPathMonitor()
+        networkMonitor?.pathUpdateHandler = { [weak self] path in
+            Task {
+                await self?.handleNetworkChange(path: path)
+            }
+        }
+        networkMonitor?.start(queue: DispatchQueue(label: "com.feishuspeech.network"))
+    }
+    
+    private func handleNetworkChange(path: NWPath) {
+        let wasAvailable = isNetworkAvailable
+        isNetworkAvailable = path.status == .satisfied
+        
+        if !wasAvailable && isNetworkAvailable {
+            logger.info("Network recovered, clearing token cache")
+            cachedToken = nil
+            tokenExpiry = nil
+        }
+        
+        if !isNetworkAvailable {
+            logger.warning("Network unavailable")
+        }
+    }
     
     private func generateFileId() -> String {
         let chars = "abcdefghijklmnopqrstuvwxyz0123456789"
@@ -27,9 +72,56 @@ actor FeishuAPIService {
             throw APIError.recognitionFailed("没有录到音频数据，请检查麦克风权限")
         }
         
-        let token = try await getAccessToken(appId: appId, appSecret: appSecret)
-        logger.info("Got access token")
-        return try await sendSpeechRequest(audioData: audioData, token: token)
+        if !isNetworkAvailable {
+            throw APIError.networkUnavailable
+        }
+        
+        return try await withRetry {
+            let token = try await self.getAccessToken(appId: appId, appSecret: appSecret)
+            logger.info("Got access token")
+            return try await self.sendSpeechRequest(audioData: audioData, token: token)
+        }
+    }
+    
+    private func withRetry<T>(maxAttempts: Int = maxRetries, operation: () async throws -> T) async throws -> T {
+        var lastError: Error?
+        
+        for attempt in 1...maxAttempts {
+            if !isNetworkAvailable {
+                throw APIError.networkUnavailable
+            }
+            
+            do {
+                return try await operation()
+            } catch let error as APIError {
+                lastError = error
+                logger.warning("Attempt \(attempt)/\(maxAttempts) failed: \(error.localizedDescription)")
+                
+                switch error {
+                case .networkUnavailable, .authFailed:
+                    throw error
+                default:
+                    break
+                }
+                
+                if attempt < maxAttempts {
+                    let delay = retryDelay * Double(attempt)
+                    logger.info("Retrying in \(delay)s...")
+                    try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                }
+            } catch {
+                lastError = error
+                logger.warning("Attempt \(attempt)/\(maxAttempts) failed: \(error.localizedDescription)")
+                
+                if attempt < maxAttempts {
+                    let delay = retryDelay * Double(attempt)
+                    logger.info("Retrying in \(delay)s...")
+                    try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                }
+            }
+        }
+        
+        throw lastError ?? APIError.unknown
     }
     
     private func getAccessToken(appId: String, appSecret: String) async throws -> String {
@@ -50,7 +142,12 @@ actor FeishuAPIService {
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response): (Data, URLResponse)
+        do {
+            (data, response) = try await urlSession.data(for: request)
+        } catch let error as URLError {
+            throw mapURLError(error)
+        }
         
         guard let httpResponse = response as? HTTPURLResponse else {
             throw APIError.invalidResponse
@@ -89,9 +186,14 @@ actor FeishuAPIService {
         )
         request.httpBody = try encoder.encode(speechRequest)
         
-        logger.info("Sending speech request to \(self.speechURL.absoluteString) with fileId: \(fileId)")
+        logger.info("Sending speech request with fileId: \(fileId)")
         
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response): (Data, URLResponse)
+        do {
+            (data, response) = try await urlSession.data(for: request)
+        } catch let error as URLError {
+            throw mapURLError(error)
+        }
         
         guard let httpResponse = response as? HTTPURLResponse else {
             throw APIError.invalidResponse
@@ -116,11 +218,29 @@ actor FeishuAPIService {
         return result.recognitionText
     }
     
+    private func mapURLError(_ error: URLError) -> APIError {
+        switch error.code {
+        case .notConnectedToInternet, .networkConnectionLost:
+            return .networkUnavailable
+        case .timedOut:
+            return .timeout
+        case .cannotConnectToHost, .dnsLookupFailed, .cannotFindHost:
+            return .connectionFailed
+        default:
+            return .networkError(error.localizedDescription)
+        }
+    }
+    
     enum APIError: LocalizedError {
         case invalidResponse
         case httpError(Int)
         case authFailed(String)
         case recognitionFailed(String)
+        case timeout
+        case networkUnavailable
+        case connectionFailed
+        case networkError(String)
+        case unknown
         
         var errorDescription: String? {
             switch self {
@@ -132,6 +252,16 @@ actor FeishuAPIService {
                 return "认证失败: \(msg)"
             case .recognitionFailed(let msg):
                 return "识别失败: \(msg)"
+            case .timeout:
+                return "请求超时，请检查网络"
+            case .networkUnavailable:
+                return "网络不可用，请检查网络连接"
+            case .connectionFailed:
+                return "无法连接到服务器"
+            case .networkError(let msg):
+                return "网络错误: \(msg)"
+            case .unknown:
+                return "未知错误"
             }
         }
     }
