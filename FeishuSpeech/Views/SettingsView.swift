@@ -6,17 +6,19 @@ struct SettingsView: View {
     @AppStorage("appSecret") private var appSecret = ""
     @AppStorage("autoInsert") private var autoInsert = true
     @AppStorage("playSound") private var playSound = true
-    
+    @AppStorage("launchAtLogin") private var launchAtLogin = false
+
     var body: some View {
         TabView {
             GeneralSettingsView(
+                launchAtLogin: $launchAtLogin,
                 autoInsert: $autoInsert,
                 playSound: $playSound
             )
             .tabItem {
                 Label("通用", systemImage: "gearshape")
             }
-            
+
             APISettingsView(
                 appId: $appId,
                 appSecret: $appSecret
@@ -31,6 +33,7 @@ struct SettingsView: View {
             viewModel.settings.appSecret = appSecret
             viewModel.settings.autoInsert = autoInsert
             viewModel.settings.playSound = playSound
+            viewModel.settings.launchAtLogin = launchAtLogin
             viewModel.saveSettings()
         }
         .onAppear {
@@ -38,26 +41,32 @@ struct SettingsView: View {
             appSecret = viewModel.settings.appSecret
             autoInsert = viewModel.settings.autoInsert
             playSound = viewModel.settings.playSound
+            launchAtLogin = viewModel.settings.launchAtLogin
         }
     }
 }
 
 struct GeneralSettingsView: View {
+    @Binding var launchAtLogin: Bool
     @Binding var autoInsert: Bool
     @Binding var playSound: Bool
-    
+
     var body: some View {
         Form {
+            Section("通用") {
+                Toggle("开机启动", isOn: $launchAtLogin)
+            }
+
             Section("录音") {
                 Toggle("自动插入文字", isOn: $autoInsert)
                 Toggle("播放提示音", isOn: $playSound)
             }
-            
+
             Section("使用说明") {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("• 按住 Fn 键开始录音")
-                    Text("• 松开 Fn 键自动识别")
-                    Text("• 识别结果将自动输入到当前光标位置")
+                    Text("按住 Fn 键开始录音")
+                    Text("松开 Fn 键自动识别")
+                    Text("识别结果将自动输入到当前光标位置")
                 }
                 .font(.callout)
                 .foregroundStyle(.secondary)
@@ -71,21 +80,21 @@ struct GeneralSettingsView: View {
 struct APISettingsView: View {
     @Binding var appId: String
     @Binding var appSecret: String
-    
+
     var body: some View {
         Form {
             Section("飞书开放平台") {
                 TextField("App ID", text: $appId)
                     .textFieldStyle(.roundedBorder)
-                
+
                 SecureField("App Secret", text: $appSecret)
                     .textFieldStyle(.roundedBorder)
             }
-            
+
             Section {
                 Link("前往飞书开放平台创建应用", destination: URL(string: "https://open.feishu.cn/app")!)
                     .font(.callout)
-                
+
                 Text("需要开通「语音识别」API 权限")
                     .font(.caption)
                     .foregroundStyle(.secondary)

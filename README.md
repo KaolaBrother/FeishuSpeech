@@ -63,6 +63,29 @@ cp -R build/Build/Products/Release/FeishuSpeech.app /Applications/
 4. 松开 **Fn 键**，等待识别
 5. 文字自动输入到光标位置
 
+## 常见问题
+
+### 辅助功能权限无法授权
+
+系统设置 → 隐私与安全性 → 辅助功能，找到 FeishuSpeech 并开启。如果已开启但仍提示需要授权，尝试先关闭再重新开启，或删除应用重新添加。
+
+### 录音失败 / 未检测到麦克风
+
+确认系统设置 → 隐私与安全性 → 麦克风中已允许 FeishuSpeech 访问麦克风。如果使用外接麦克风，确保设备已连接且在系统偏好设置中被选为输入设备。
+
+### HTTP 400 错误 / 识别持续失败
+
+通常是 API 凭据错误或 token 过期导致。尝试以下步骤：
+1. 点击菜单栏图标 → **重置服务**
+2. 检查设置中的 App ID 和 App Secret 是否正确
+3. 确认飞书应用已开通 `speech_to_text:read` 权限并已发布
+
+应用会在连续失败 3 次后自动重置服务状态。
+
+### 开机启动
+
+设置 → 通用 → 开启「开机启动」开关。也可以在系统设置 → 通用 → 登录项中管理。
+
 ## 项目结构
 
 ```
@@ -78,6 +101,7 @@ FeishuSpeech/
 │   ├── HotKeyService.swift      # Fn 键监听
 │   ├── AudioRecorder.swift      # 录音
 │   ├── FeishuAPIService.swift   # 飞书 API
+│   ├── LoginItemService.swift   # 开机启动
 │   ├── PermissionManager.swift  # 权限管理
 │   └── TextInputSimulator.swift # 文字输入
 ├── ViewModels/
