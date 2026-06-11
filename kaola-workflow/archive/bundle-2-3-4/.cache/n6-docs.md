@@ -1,0 +1,1 @@
+README.md updated: added one new FAQ entry "识别卡在「识别中」很久" in 常见问题 section, covering issues #2 (.waiting fast-fail), #3 (URLSession DNS fallback), #4 (30s timeout with forced cancellation, worst-case reduced from ~150s to ~30s). No other sections touched. Change is in Chinese, user-facing, minimal.

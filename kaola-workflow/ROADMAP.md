@@ -8,9 +8,6 @@ This file mirrors active unfinished work. GitHub issues are the source of truth 
 | Issue | Title | Status | Workflow Project | Next Step |
 |-------|-------|--------|------------------|-----------|
 | #1 | Stale AudioRecorder session permanently disables recording; 重置服务 cannot recover | open | — | — |
-| #2 | DirectFeishuHTTPClient ignores NWConnection .waiting state — unreachable IPs burn the full 30s timeout | open | — | — |
-| #3 | Hardcoded Feishu CDN IPs with no DNS fallback — IP rotation will break the app | open | — | — |
-| #4 | 30s transcription timeout doesn't cancel network work — app stays deaf in 识别中 for up to ~150s | open | — | — |
 | #5 | Event tap creation fails silently after 3 retries — UI shows 就绪 while the hotkey is dead | open | — | — |
 | #6 | Fn press+release during .transcribing resets the state machine — allows concurrent recording sessions | open | — | — |
 | #7 | Max-duration auto-stop desyncs HotKeyService and MainViewModel — spurious 没有录到音频数据 error on Fn release | open | — | — |
