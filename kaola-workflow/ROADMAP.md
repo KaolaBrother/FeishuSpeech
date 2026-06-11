@@ -7,9 +7,6 @@ This file mirrors active unfinished work. GitHub issues are the source of truth 
 
 | Issue | Title | Status | Workflow Project | Next Step |
 |-------|-------|--------|------------------|-----------|
-| #5 | Event tap creation fails silently after 3 retries — UI shows 就绪 while the hotkey is dead | open | — | — |
-| #9 | Event tap runs on the main run loop while session.startRunning() blocks it — dropped Fn events, stuck recording | open | — | — |
-| #10 | Secure keyboard entry is not detected — hotkey silently dead while a password field is focused | open | — | — |
 | #11 | Direct HTTP client discards fully-received responses on timeout; no Content-Length-based completion | open | — | — |
 | #12 | Token expiry hardcoded to 6000s — Feishu expire field ignored | open | — | — |
 | #13 | Clipboard restore races the synthetic Cmd+V — recognized text can be lost or replaced by old clipboard | open | — | — |

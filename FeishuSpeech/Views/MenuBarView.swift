@@ -33,8 +33,13 @@ struct MenuBarView: View {
                     }
                 }
             } else {
-                Text(viewModel.status.text)
-                    .foregroundStyle(viewModel.status.color)
+                if permissionManager.secureInputEnabled {
+                    Text("安全输入已启用，热键暂不可用")
+                        .foregroundStyle(.orange)
+                } else {
+                    Text(viewModel.status.text)
+                        .foregroundStyle(viewModel.status.color)
+                }
 
                 Divider()
 

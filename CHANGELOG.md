@@ -3,6 +3,14 @@
 ## [Unreleased]
 
 ### Added
+- 热键监控状态现在可被观察：新增 `MonitoringState`（`.stopped` / `.active` / `.failed`），菜单栏可实时反映 Event Tap 是否正常运行（issue #5）
+- 安全输入检测：终端、1Password 等程序启用安全键盘时，菜单栏显示橙色提示"安全输入已启用，热键暂不可用"（issue #10）
+
+### Fixed
+- Event Tap 从主线程移至专用后台线程，避免与 AVCaptureSession 争用主 RunLoop 导致热键丢失（issue #9）
+- Event Tap 创建失败或辅助功能权限未授予时，自动按指数退避重试（最长间隔 30 秒），不再硬限 3 次后放弃（issue #5）
+- 录音停止后重置 Fn 键状态，防止重启监控时残留的按键状态触发误录（issue #9）
+
 - 飞书 API 所有直连 IP 失败后自动回退至 URLSession DNS 解析，防止 CDN IP 轮换导致永久失效（issue #3）
 - 开机启动功能（设置 → 通用 → 开机启动）
 - 菜单栏「重置服务」按钮，手动恢复异常状态

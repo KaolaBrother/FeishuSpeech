@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import Carbon
 import Combine
 import os.log
 
@@ -8,12 +9,13 @@ private let logger = Logger(subsystem: "com.feishuspeech.app", category: "Permis
 @MainActor
 class PermissionManager: ObservableObject {
     static let shared = PermissionManager()
-    
+
     @Published var accessibilityGranted = false
     @Published var microphoneGranted = false
     @Published var isChecking = true
     @Published var allPermissionsGranted = false
-    
+    @Published var secureInputEnabled: Bool = false
+
     private init() {}
     
     func checkAllPermissions() async {
@@ -73,7 +75,24 @@ class PermissionManager: ObservableObject {
         logger.info("Refreshed accessibility status: \(self.accessibilityGranted)")
         updateAllPermissionsGranted()
     }
-    
+
+    func refreshSecureInputStatus() {
+        let current = IsSecureEventInputEnabled()
+        if secureInputEnabled != current {
+            secureInputEnabled = current
+            logger.info("Secure keyboard input changed: \(current)")
+        }
+    }
+
+    // MARK: - Test support
+
+    /// Injects a synthetic `secureInputEnabled` value for unit testing only.
+    /// This bypasses the live `IsSecureEventInputEnabled()` query so tests
+    /// can exercise the Combine publisher without needing a real password field.
+    func simulateSecureInputState(_ enabled: Bool) {
+        secureInputEnabled = enabled
+    }
+
     private func updateAllPermissionsGranted() {
         allPermissionsGranted = accessibilityGranted && microphoneGranted
     }

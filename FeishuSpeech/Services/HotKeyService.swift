@@ -7,18 +7,27 @@ private let logger = Logger(subsystem: "com.feishuspeech.app", category: "HotKey
 
 class HotKeyService: ObservableObject {
     static let shared = HotKeyService()
-    
+
     @Published private(set) var state: HotKeyState = .idle
     @Published private(set) var isMonitoring = false
-    
+    @Published private(set) var monitoringState: MonitoringState = .stopped
+
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var previousFlags: CGEventFlags = []
+    // Guards previousFlags against concurrent access between the tap thread and the main actor.
+    private let previousFlagsLock = NSLock()
     private var pendingWorkItem: DispatchWorkItem?
     private var restartRetryCount = 0
-    private let maxRestartRetries = 3
-    private var restartRetryDelay: TimeInterval = 1.0
-    
+
+    // Issue #9: the event-tap run-loop source must live on a private, long-lived thread
+    // — NOT CFRunLoopGetMain(). AVCaptureSession.startRunning() blocks the main actor, so
+    // sharing the main run loop would starve/drop Fn events. The thread starts LAZILY when
+    // the first monitoring session begins and is torn down (CFRunLoopStop + nil) on
+    // stopMonitoring().
+    private var tapThread: Thread?
+    private var tapRunLoop: CFRunLoop?
+
     let delayInterval: TimeInterval = 0.3
     
     private let unwantedModifiers: CGEventFlags = [
@@ -36,22 +45,25 @@ class HotKeyService: ObservableObject {
     
     func startMonitoring() {
         guard eventTap == nil else { return }
-        
+
         let trusted = AXIsProcessTrusted()
         logger.info("Accessibility trusted: \(trusted)")
-        
+
         if !trusted {
             logger.error("Accessibility permission not granted!")
+            DispatchQueue.main.async { [weak self] in
+                self?.monitoringState = .failed(.accessibilityNotTrusted)
+            }
             scheduleRestartRetry()
             return
         }
-        
+
         let eventMask = (1 << CGEventType.keyDown.rawValue) |
                         (1 << CGEventType.keyUp.rawValue) |
                         (1 << CGEventType.flagsChanged.rawValue) |
                         (1 << CGEventType.tapDisabledByTimeout.rawValue) |
                         (1 << CGEventType.tapDisabledByUserInput.rawValue)
-        
+
         guard let tap = CGEvent.tapCreate(
             tap: .cghidEventTap,
             place: .headInsertEventTap,
@@ -66,49 +78,104 @@ class HotKeyService: ObservableObject {
             userInfo: UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
         ) else {
             logger.error("Failed to create event tap")
+            DispatchQueue.main.async { [weak self] in
+                self?.monitoringState = .failed(.tapCreationFailed)
+            }
             scheduleRestartRetry()
             return
         }
-        
+
         eventTap = tap
         runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
+
+        // Issue #9: add the source to the private tap run loop, never CFRunLoopGetMain().
+        let runLoop = ensureTapRunLoop()
+        CFRunLoopAddSource(runLoop, runLoopSource, .commonModes)
+        // Wake the private run loop so it picks up the freshly added source immediately
+        // (it may currently be parked in CFRunLoopRun() waiting for input).
+        CFRunLoopWakeUp(runLoop)
         CGEvent.tapEnable(tap: tap, enable: true)
-        
+
         restartRetryCount = 0
-        isMonitoring = true
+        DispatchQueue.main.async { [weak self] in
+            self?.monitoringState = .active
+            self?.isMonitoring = true
+        }
         logger.info("Started monitoring keyboard events")
     }
     
     private func scheduleRestartRetry() {
-        guard restartRetryCount < maxRestartRetries else {
-            logger.error("Max restart retries reached, giving up")
-            return
-        }
-        
         restartRetryCount += 1
-        let delay = restartRetryDelay * Double(restartRetryCount)
+        let delay = min(1.0 * pow(2.0, Double(restartRetryCount - 1)), 30.0)
         let currentRetry = restartRetryCount
-        let maxRetries = maxRestartRetries
-        logger.info("Scheduling restart retry \(currentRetry)/\(maxRetries) in \(delay)s")
-        
+        logger.info("Scheduling restart retry \(currentRetry) in \(delay)s")
+
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             self?.startMonitoring()
         }
     }
     
+    /// Lazily spins up the long-lived private tap thread and returns its CFRunLoop.
+    /// The thread body parks in CFRunLoopRun(); CFRunLoopStop() (in stopMonitoring())
+    /// unwinds it. Blocks the caller until the thread has published its run loop.
+    private func ensureTapRunLoop() -> CFRunLoop {
+        if let existing = tapRunLoop {
+            return existing
+        }
+
+        let semaphore = DispatchSemaphore(value: 0)
+        let thread = Thread { [weak self] in
+            let runLoop = CFRunLoopGetCurrent()
+            self?.tapRunLoop = runLoop
+            semaphore.signal()
+            // Keep the run loop alive even with no sources by adding a no-op port,
+            // so CFRunLoopRun() does not return immediately before the tap source lands.
+            let keepAlivePort = Port()
+            RunLoop.current.add(keepAlivePort, forMode: .common)
+            CFRunLoopRun()
+            // Reached only after CFRunLoopStop(); clear the keep-alive port.
+            RunLoop.current.remove(keepAlivePort, forMode: .common)
+        }
+        thread.name = "com.feishuspeech.hotkey.tap"
+        thread.qualityOfService = .userInteractive
+        tapThread = thread
+        thread.start()
+        // Wait until the thread has published its run loop reference.
+        semaphore.wait()
+        return tapRunLoop ?? CFRunLoopGetCurrent()
+    }
+
     func stopMonitoring() {
-        guard let tap = eventTap else { return }
+        guard let tap = eventTap else {
+            previousFlagsLock.lock(); previousFlags = []; previousFlagsLock.unlock()
+            monitoringState = .stopped
+            isMonitoring = false
+            teardownTapThread()
+            return
+        }
         CGEvent.tapEnable(tap: tap, enable: false)
-        if let source = runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+        if let source = runLoopSource, let runLoop = tapRunLoop {
+            CFRunLoopRemoveSource(runLoop, source, .commonModes)
         }
         eventTap = nil
         runLoopSource = nil
         cancelPendingTransition()
         state = .idle
+        previousFlagsLock.lock(); previousFlags = []; previousFlagsLock.unlock()
+        monitoringState = .stopped
         isMonitoring = false
+        teardownTapThread()
         logger.info("Stopped monitoring")
+    }
+
+    /// Stops the private tap run loop and releases the thread reference so the next
+    /// monitoring session starts a fresh thread.
+    private func teardownTapThread() {
+        if let runLoop = tapRunLoop {
+            CFRunLoopStop(runLoop)
+        }
+        tapRunLoop = nil
+        tapThread = nil
     }
     
     private func handleEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
@@ -119,6 +186,11 @@ class HotKeyService: ObservableObject {
             if let tap = eventTap {
                 CGEvent.tapEnable(tap: tap, enable: true)
             }
+            // Issue #9: while the tap was disabled a Fn release may have been missed,
+            // leaving the machine stuck in .recording. Resync against live modifier
+            // state and fire a synthetic release if Fn is no longer held.
+            let live = CGEventSource.flagsState(.combinedSessionState)
+            resyncFnState(liveFlags: live)
             return nil
         }
         
@@ -154,21 +226,25 @@ class HotKeyService: ObservableObject {
     private func handleFlagsChanged(_ event: CGEvent) {
         let flags = event.flags
         let fnPressed = flags.contains(.maskSecondaryFn)
+        previousFlagsLock.lock()
         let wasFnPressed = previousFlags.contains(.maskSecondaryFn)
-        
+        previousFlagsLock.unlock()
+
         logger.debug("Flags changed: fnPressed=\(fnPressed), wasFnPressed=\(wasFnPressed)")
-        
+
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            
+
             if fnPressed && !wasFnPressed {
                 self.handleFnPressed(flags: flags)
             } else if !fnPressed && wasFnPressed {
                 self.handleFnReleased()
             }
         }
-        
+
+        previousFlagsLock.lock()
         previousFlags = flags
+        previousFlagsLock.unlock()
     }
     
     private func handleFnPressed(flags: CGEventFlags) {
@@ -204,6 +280,25 @@ class HotKeyService: ObservableObject {
         case .transcribing, .error, .cancelled, .idle:
             logger.info("Fn released in non-active state \(String(describing: self.state)) - ignoring")
         }
+    }
+
+    /// Issue #9: reconcile cached `previousFlags` against a live modifier snapshot.
+    /// Runs on the private tap thread (from the tapDisabledByTimeout path). If we
+    /// believed Fn was held but the live state says it is up, a release was missed
+    /// while the tap was disabled — marshal handleFnReleased() to main. Always update
+    /// `previousFlags` to mirror the live snapshot.
+    private func resyncFnState(liveFlags: CGEventFlags) {
+        let fnNow = liveFlags.contains(.maskSecondaryFn)
+        previousFlagsLock.lock()
+        let fnWas = previousFlags.contains(.maskSecondaryFn)
+        previousFlagsLock.unlock()
+        if fnWas && !fnNow {
+            logger.warning("Missed Fn release detected during tap-timeout resync")
+            DispatchQueue.main.async { [weak self] in self?.handleFnReleased() }
+        }
+        previousFlagsLock.lock()
+        previousFlags = CGEventFlags(rawValue: liveFlags.rawValue)
+        previousFlagsLock.unlock()
     }
 
     /// Test-only helper: directly set state without going through the event tap.
@@ -289,10 +384,77 @@ class HotKeyService: ObservableObject {
         cancelPendingTransition()
         state = .idle
     }
-    
+
     func setError(_ message: String) {
         logger.error("Setting error state: \(message)")
         cancelPendingTransition()
         state = .error(message)
+    }
+
+    // MARK: - Test-only simulation helpers (issue #5)
+
+    /// Simulates the accessibility-not-trusted failure branch of startMonitoring()
+    /// without calling AXIsProcessTrusted() or CGEvent.tapCreate().
+    /// This allows unit tests to verify monitoringState transitions without
+    /// requiring real system permissions.
+    func simulateStartMonitoringWithAccessibilityTrusted(_ trusted: Bool) {
+        guard !trusted else {
+            // If trusted=true, fall through to the tap-creation step.
+            simulateStartMonitoringWithTapCreationResult(true)
+            return
+        }
+        logger.info("TEST HOOK: simulating accessibility-not-trusted failure")
+        monitoringState = .failed(.accessibilityNotTrusted)
+    }
+
+    /// Simulates the tap-creation step of startMonitoring() with a controllable
+    /// result. tapCreated=true simulates success; false simulates tapCreate returning nil.
+    func simulateStartMonitoringWithTapCreationResult(_ tapCreated: Bool) {
+        if tapCreated {
+            logger.info("TEST HOOK: simulating successful tap creation")
+            restartRetryCount = 0
+            monitoringState = .active
+            isMonitoring = true
+        } else {
+            logger.info("TEST HOOK: simulating tap creation failure")
+            monitoringState = .failed(.tapCreationFailed)
+        }
+    }
+
+    // MARK: - Test-only hooks (issue #9)
+
+    /// Read access to the cached modifier flags, for verifying the stopMonitoring() reset.
+    var previousFlagsForTesting: CGEventFlags {
+        previousFlagsLock.lock()
+        defer { previousFlagsLock.unlock() }
+        return previousFlags
+    }
+
+    /// Seed `previousFlags` to simulate a believed Fn-down state.
+    func setPreviousFlagsForTesting(_ flags: CGEventFlags) {
+        previousFlagsLock.lock()
+        previousFlags = flags
+        previousFlagsLock.unlock()
+    }
+
+    /// Read access to the private tap run loop, for verifying it is NOT the main run loop.
+    var tapRunLoopForTesting: CFRunLoop? {
+        tapRunLoop
+    }
+
+    /// Drives the post-timeout Fn resync with an injected live-flags snapshot.
+    /// The resync's release marshals to DispatchQueue.main.async; tests run on the main
+    /// actor, so this hook runs the body synchronously to keep assertions deterministic.
+    func resyncFnStateForTesting(liveFlags: CGEventFlags) {
+        let fnNow = liveFlags.contains(.maskSecondaryFn)
+        previousFlagsLock.lock()
+        let fnWas = previousFlags.contains(.maskSecondaryFn)
+        previousFlagsLock.unlock()
+        if fnWas && !fnNow {
+            handleFnReleased()
+        }
+        previousFlagsLock.lock()
+        previousFlags = CGEventFlags(rawValue: liveFlags.rawValue)
+        previousFlagsLock.unlock()
     }
 }

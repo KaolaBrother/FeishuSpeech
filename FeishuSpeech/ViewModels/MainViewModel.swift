@@ -66,8 +66,16 @@ class MainViewModel: ObservableObject {
                 self?.handleHotKeyState(state)
             }
 
-        hotKeyService.startMonitoring()
+        hotKeyService.$monitoringState
+            .dropFirst()
+            .sink { [weak self] monState in
+                logger.info("HotKey monitoringState changed: \(String(describing: monState))")
+                self?.handleMonitoringState(monState)
+            }
+            .store(in: &cancellables)
+
         isMonitoring = true
+        hotKeyService.startMonitoring()
     }
 
     func stopHotKeyMonitoring() {
@@ -129,6 +137,13 @@ class MainViewModel: ObservableObject {
         audioRecorder.forceCleanup()
         status = .error(message)
         stopMaxDurationTimer()
+    }
+
+    private func handleMonitoringState(_ monState: MonitoringState) {
+        if case .failed = monState {
+            logger.error("HotKey tap failed: \(String(describing: monState))")
+            status = .error("热键不可用，请检查辅助功能权限")
+        }
     }
 
     private func canStartRecording() -> Bool {

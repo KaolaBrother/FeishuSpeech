@@ -17,6 +17,10 @@ class AudioRecorder: NSObject, ObservableObject {
     private var audioBuffer = Data(capacity: estimatedMaxBufferSize)
     private let audioQueue = DispatchQueue(label: "com.feishuspeech.audio.queue")
     private let bufferQueue = DispatchQueue(label: "com.feishuspeech.audio.buffer")
+    // Issue #9: AVCaptureSession.startRunning()/stopRunning() block synchronously, so they
+    // must never run on the main actor (which the CGEventTap formerly shared). Run them on a
+    // dedicated serial queue and flip @Published isRecording back on the main thread.
+    private let sessionQueue = DispatchQueue(label: "com.feishuspeech.audio.session")
     
     private var audioConverter: AVAudioConverter?
     private var inputFormat: AVAudioFormat?
@@ -33,8 +37,16 @@ class AudioRecorder: NSObject, ObservableObject {
         AVCaptureDevice.default(for: .audio) != nil
     }
     
+    /// Starts a recording session.
+    ///
+    /// The synchronous `Bool` return reports the result of the config-check phase
+    /// (device discovery + input/output wiring). The blocking `AVCaptureSession.startRunning()`
+    /// is dispatched onto `sessionQueue` (issue #9 — it must not block the main actor that the
+    /// CGEventTap formerly shared). The async started-confirmation is delivered via `completion`
+    /// on the main queue, and `@Published var isRecording` is flipped to mirror it. Callers that
+    /// only observe `isRecording` keep working unchanged via the default no-op closure.
     @discardableResult
-    func startRecording() -> Bool {
+    func startRecording(completion: @escaping (_ started: Bool) -> Void = { _ in }) -> Bool {
         // Always run forceCleanup() first so a stale isRecording flag (e.g. left over from a
         // cancelled or errored recording that forgot to reset state) never permanently prevents
         // a new session from starting.  forceCleanup() stops any running session and resets
@@ -51,40 +63,60 @@ class AudioRecorder: NSObject, ObservableObject {
         
         guard let microphone = AVCaptureDevice.default(for: .audio) else {
             logger.error("No microphone device available")
+            completion(false)
             return false
         }
-        
+
         do {
             let input = try AVCaptureDeviceInput(device: microphone)
-            
+
             let session = AVCaptureSession()
-            
+
             guard session.canAddInput(input) else {
                 logger.error("Cannot add audio input to session")
+                completion(false)
                 return false
             }
             session.addInput(input)
-            
+
             let output = AVCaptureAudioDataOutput()
             output.setSampleBufferDelegate(self, queue: audioQueue)
-            
+
             guard session.canAddOutput(output) else {
                 logger.error("Cannot add audio output to session")
+                completion(false)
                 return false
             }
             session.addOutput(output)
-            
+
             captureSession = session
             audioDataOutput = output
-            
-            session.startRunning()
+
+            // Issue #9: startRunning() blocks — never on the main actor. Dispatch onto
+            // sessionQueue, then flip @Published isRecording + deliver completion on main.
+            // Set isRecording optimistically before the dispatch so quick-release (Fn up
+            // arriving before startRunning() returns) sees the recording state in time.
             isRecording = true
-            logger.info("Recording started successfully")
+            sessionQueue.async { [weak self] in
+                session.startRunning()
+                let started = session.isRunning
+                DispatchQueue.main.async {
+                    if !started {
+                        self?.isRecording = false
+                        logger.error("AVCaptureSession failed to start running")
+                    } else {
+                        logger.info("Recording started successfully")
+                    }
+                    completion(started)
+                }
+            }
+            // Synchronous config-check phase succeeded.
             return true
-            
+
         } catch {
             logger.error("Failed to create audio input: \(error.localizedDescription)")
             forceCleanup()
+            completion(false)
             return false
         }
     }
@@ -104,29 +136,33 @@ class AudioRecorder: NSObject, ObservableObject {
     
     func forceCleanup() {
         logger.info("Force cleanup - releasing all audio resources")
-        
+
+        // Issue #9: session.stopRunning() blocks — tear the session down on sessionQueue,
+        // never on the main actor. Hand off the captured session before nil'ing references.
         if let session = captureSession {
-            if session.isRunning {
-                session.stopRunning()
-            }
-            for input in session.inputs {
-                session.removeInput(input)
-            }
-            for output in session.outputs {
-                session.removeOutput(output)
+            sessionQueue.async {
+                if session.isRunning {
+                    session.stopRunning()
+                }
+                for input in session.inputs {
+                    session.removeInput(input)
+                }
+                for output in session.outputs {
+                    session.removeOutput(output)
+                }
             }
         }
-        
+
         captureSession = nil
         audioDataOutput = nil
         audioConverter = nil
         inputFormat = nil
         outputFormat = nil
-        
+
         bufferQueue.sync {
             audioBuffer.removeAll(keepingCapacity: true)
         }
-        
+
         isRecording = false
         logger.info("Audio resources fully released")
     }

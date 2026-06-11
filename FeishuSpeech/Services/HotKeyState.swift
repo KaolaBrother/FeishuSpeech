@@ -1,5 +1,20 @@
 import Foundation
 
+// MARK: - Monitoring state (issue #5)
+
+enum TapFailureReason: Equatable {
+    case accessibilityNotTrusted
+    case tapCreationFailed
+}
+
+enum MonitoringState: Equatable {
+    case stopped
+    case active
+    case failed(TapFailureReason)
+}
+
+// MARK: - HotKey state machine
+
 enum HotKeyState: Equatable {
     case idle
     case pending(startTime: Date)

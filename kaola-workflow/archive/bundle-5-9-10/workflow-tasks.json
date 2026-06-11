@@ -1,0 +1,48 @@
+{
+  "source_plan_hash": "bdc93ee7de443de1c513a9918e59e2ab7e62e32e93dfae74c5b963dcf6072ad0",
+  "tasks": [
+    {
+      "id": "node1",
+      "role": "code-architect",
+      "status": "pending",
+      "ledger_status": "pending"
+    },
+    {
+      "id": "node2",
+      "role": "tdd-guide",
+      "status": "pending",
+      "ledger_status": "pending"
+    },
+    {
+      "id": "node3",
+      "role": "tdd-guide",
+      "status": "pending",
+      "ledger_status": "pending"
+    },
+    {
+      "id": "node4",
+      "role": "tdd-guide",
+      "status": "pending",
+      "ledger_status": "pending"
+    },
+    {
+      "id": "node5",
+      "role": "code-reviewer",
+      "status": "pending",
+      "ledger_status": "pending"
+    },
+    {
+      "id": "node6",
+      "role": "doc-updater",
+      "status": "pending",
+      "ledger_status": "pending"
+    },
+    {
+      "id": "node7",
+      "role": "finalize",
+      "status": "pending",
+      "ledger_status": "pending"
+    }
+  ],
+  "last_synced_from_ledger": "2026-06-11T15:10:31.906Z"
+}
