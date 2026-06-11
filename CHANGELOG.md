@@ -14,6 +14,9 @@
 - Kaola-Workflow scaffolding (CLAUDE.md, AGENTS.md redirect, docs/, roadmap)
 
 ### Fixed
+- Fn 键在转录进行中松开不再启动新的录音会话（issue #6）
+- 录音达到最大时长自动停止后，再松开 Fn 键不再产生「无音频数据」错误（issue #7）
+- 在权限提示期间多次按下/松开 Fn 键不再导致重复的热键事件处理（issue #8）
 - 「重置服务」现在能正确恢复卡住的麦克风：取消或出错后不再出现永久录音失败；`startRecording()` 在启动前重置任何残留会话状态（issue #1）
 - NWConnection `.waiting` 状态忽略导致每个不可达 IP 等待 30–75 秒（issue #2）
 - 识别中卡死长达 ~150s：30s 超时未正确取消 NWConnection，现使用 `withTaskCancellationHandler` 确保任务取消即时传播（issue #4）

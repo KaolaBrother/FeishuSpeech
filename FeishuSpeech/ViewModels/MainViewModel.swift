@@ -19,6 +19,12 @@ class MainViewModel: ObservableObject {
     private let permissionManager = PermissionManager.shared
     private let overlayController = OverlayWindowController.shared
     private var cancellables = Set<AnyCancellable>()
+    // Dedicated cancellable for the $state subscription — assigned in
+    // startHotKeyMonitoring() and nilled in stopHotKeyMonitoring().
+    // Using a standalone optional (not stored in `cancellables`) ensures
+    // at most one live $state subscriber exists at any time; reassigning
+    // implicitly cancels any prior value (fixes subscription leak — issue #8).
+    var stateCancellable: AnyCancellable?
     private var isMonitoring = false
     private var recordingStartTime: Date?
     private var maxDurationTimer: Timer?
@@ -50,24 +56,24 @@ class MainViewModel: ObservableObject {
             .store(in: &cancellables)
     }
 
-    private func startHotKeyMonitoring() {
+    func startHotKeyMonitoring() {
         guard !isMonitoring else { return }
         logger.info("Starting hot key monitoring with state machine")
 
-        hotKeyService.$state
+        stateCancellable = hotKeyService.$state
             .sink { [weak self] state in
                 logger.info("HotKey state changed: \(String(describing: state))")
                 self?.handleHotKeyState(state)
             }
-            .store(in: &cancellables)
 
         hotKeyService.startMonitoring()
         isMonitoring = true
     }
 
-    private func stopHotKeyMonitoring() {
+    func stopHotKeyMonitoring() {
         guard isMonitoring else { return }
         logger.info("Stopping hot key monitoring")
+        stateCancellable = nil
         hotKeyService.stopMonitoring()
         isMonitoring = false
     }
@@ -166,6 +172,10 @@ class MainViewModel: ObservableObject {
     }
 
     private func stopRecordingAndTranscribe() {
+        guard audioRecorder.isRecording else {
+            logger.info("stopRecordingAndTranscribe called but not recording — ignoring")
+            return
+        }
         logger.info("Stopping recording")
         status = .transcribing
         stopMaxDurationTimer()
@@ -214,6 +224,11 @@ class MainViewModel: ObservableObject {
                 consecutiveFailureCount = 0
             }
 
+            if hotKeyService.state.isActive {
+                logger.info("Discarding stale transcription error - new session active")
+                return
+            }
+
             status = .error(error.localizedDescription)
             hotKeyService.setError(error.localizedDescription)
         }
@@ -253,10 +268,8 @@ class MainViewModel: ObservableObject {
 
     private func handleMaxDurationReached() {
         logger.warning("Max recording duration reached")
-
-        if audioRecorder.isRecording {
-            stopRecordingAndTranscribe()
-        }
+        guard audioRecorder.isRecording else { return }
+        hotKeyService.forceTranscribing()
     }
 
     private func setupErrorRecovery() {

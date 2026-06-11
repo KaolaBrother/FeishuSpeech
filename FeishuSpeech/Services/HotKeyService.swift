@@ -190,21 +190,39 @@ class HotKeyService: ObservableObject {
         }
     }
     
-    private func handleFnReleased() {
+    func handleFnReleased() {
         logger.info("Fn key released, current state: \(String(describing: self.state))")
-        
+
         switch state {
         case .pending(let startTime):
             let duration = Date().timeIntervalSince(startTime)
             logger.info("Released during pending, duration: \(duration)s")
             transitionToCancelled(reason: .releasedTooSoon(duration: duration))
-            
         case .recording:
-            logger.info("Released from recording state - stopping and transcribing")
+            logger.info("Released from recording - transitioning to transcribing")
             state = .transcribing
-            
+        case .transcribing, .error, .cancelled, .idle:
+            logger.info("Fn released in non-active state \(String(describing: self.state)) - ignoring")
+        }
+    }
+
+    /// Test-only helper: directly set state without going through the event tap.
+    func forceState(_ newState: HotKeyState) {
+        logger.info("forceState called: \(String(describing: newState))")
+        state = newState
+    }
+
+    /// Called by MainViewModel when the max-duration timer fires.
+    /// Transitions .recording or .pending → .transcribing so the $state sink
+    /// routes through handleTranscribingState() → stopRecordingAndTranscribe().
+    func forceTranscribing() {
+        logger.info("Force transcribing requested, current state: \(String(describing: self.state))")
+        cancelPendingTransition()
+        switch state {
+        case .recording, .pending:
+            state = .transcribing
         default:
-            state = .idle
+            logger.info("forceTranscribing ignored in state \(String(describing: self.state))")
         }
     }
     

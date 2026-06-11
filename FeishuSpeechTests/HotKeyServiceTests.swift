@@ -68,6 +68,55 @@ final class HotKeyServiceTests: XCTestCase {
         sut.setError("Test error message")
         XCTAssertEqual(sut.state, .error("Test error message"))
     }
+
+    // MARK: - Issue #7: forceTranscribing() for max-duration auto-stop
+
+    func test_forceTranscribing_fromRecording_transitionsToTranscribing() {
+        // Arrange: force state to .recording to simulate an active recording session
+        sut.forceState(.recording)
+
+        // Act: trigger forceTranscribing() as the max-duration handler would
+        sut.forceTranscribing()
+
+        // Assert: state must be .transcribing so the $state sink routes to stopRecordingAndTranscribe
+        XCTAssertEqual(
+            sut.state,
+            .transcribing,
+            "forceTranscribing() from .recording must transition to .transcribing; got \(sut.state) instead"
+        )
+    }
+
+    func test_forceTranscribing_whenAlreadyTranscribing_isNoOp() {
+        // Arrange: state is already .transcribing (e.g. Fn released just before timer fired)
+        sut.forceState(.transcribing)
+
+        // Act: timer fires and calls forceTranscribing() a second time
+        sut.forceTranscribing()
+
+        // Assert: state must remain .transcribing — idempotent, no double-stop
+        XCTAssertEqual(
+            sut.state,
+            .transcribing,
+            "forceTranscribing() when already .transcribing must be a no-op; got \(sut.state) instead"
+        )
+    }
+
+    // MARK: - Issue #6: Fn release during .transcribing must not reset state
+
+    func test_fnReleasedDuringTranscribing_stateRemainsTranscribing() {
+        // Arrange: force state to .transcribing to simulate an in-flight API call
+        sut.forceState(.transcribing)
+
+        // Act: simulate a Fn key release event while already transcribing
+        sut.handleFnReleased()
+
+        // Assert: state must NOT revert to .idle (no concurrent session allowed)
+        XCTAssertEqual(
+            sut.state,
+            .transcribing,
+            "Fn release during .transcribing must be a no-op; got \(sut.state) instead"
+        )
+    }
 }
 
 final class HotKeyStateTests: XCTestCase {
