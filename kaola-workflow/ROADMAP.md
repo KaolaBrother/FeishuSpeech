@@ -7,7 +7,6 @@ This file mirrors active unfinished work. GitHub issues are the source of truth 
 
 | Issue | Title | Status | Workflow Project | Next Step |
 |-------|-------|--------|------------------|-----------|
-| #1 | Stale AudioRecorder session permanently disables recording; 重置服务 cannot recover | open | — | — |
 | #5 | Event tap creation fails silently after 3 retries — UI shows 就绪 while the hotkey is dead | open | — | — |
 | #6 | Fn press+release during .transcribing resets the state machine — allows concurrent recording sessions | open | — | — |
 | #7 | Max-duration auto-stop desyncs HotKeyService and MainViewModel — spurious 没有录到音频数据 error on Fn release | open | — | — |

@@ -1,0 +1,30 @@
+{
+  "source_plan_hash": "5e41110d25d3c1de008aa573f278a2e773a60cba0e37e8885d786aa52a3c3862",
+  "tasks": [
+    {
+      "id": "n1-fix-recorder-lifecycle",
+      "role": "tdd-guide",
+      "status": "pending",
+      "ledger_status": "pending"
+    },
+    {
+      "id": "n2-review",
+      "role": "code-reviewer",
+      "status": "pending",
+      "ledger_status": "pending"
+    },
+    {
+      "id": "n3-docs",
+      "role": "doc-updater",
+      "status": "pending",
+      "ledger_status": "pending"
+    },
+    {
+      "id": "n4-finalize",
+      "role": "doc-updater",
+      "status": "pending",
+      "ledger_status": "pending"
+    }
+  ],
+  "last_synced_from_ledger": "2026-06-11T13:05:37.765Z"
+}

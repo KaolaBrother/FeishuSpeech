@@ -1,0 +1,16 @@
+{"node":"n1-fix-recorder-lifecycle","event":"opened","ts":"2026-06-11T13:08:57.979Z"}
+{"node":"n1-fix-recorder-lifecycle","event":"evidence","ts":"2026-06-11T13:22:37.469Z"}
+{"node":"n1-fix-recorder-lifecycle","event":"closed","ts":"2026-06-11T13:30:41.580Z"}
+{"node":"n2-review","event":"opened","ts":"2026-06-11T13:30:41.638Z"}
+{"node":"n2-review","event":"evidence","ts":"2026-06-11T13:36:05.012Z"}
+{"node":"n1-fix-recorder-lifecycle","event":"evidence","ts":"2026-06-11T13:37:41.347Z"}
+{"node":"n1-fix-recorder-lifecycle","event":"closed","ts":"2026-06-11T13:37:47.393Z"}
+{"node":"n2-review","event":"opened","ts":"2026-06-11T13:37:47.457Z"}
+{"node":"n2-review","event":"evidence","ts":"2026-06-11T13:40:03.002Z"}
+{"node":"n2-review","event":"closed","ts":"2026-06-11T13:40:09.937Z"}
+{"node":"n3-docs","event":"opened","ts":"2026-06-11T13:40:09.992Z"}
+{"node":"n3-docs","event":"evidence","ts":"2026-06-11T13:41:27.933Z"}
+{"node":"n3-docs","event":"closed","ts":"2026-06-11T13:41:33.962Z"}
+{"node":"n4-finalize","event":"opened","ts":"2026-06-11T13:41:34.019Z"}
+{"node":"n4-finalize","event":"evidence","ts":"2026-06-11T13:42:30.780Z"}
+{"node":"n4-finalize","event":"closed","ts":"2026-06-11T13:42:37.880Z"}
