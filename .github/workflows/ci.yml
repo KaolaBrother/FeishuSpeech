@@ -8,14 +8,16 @@ on:
 
 jobs:
   build:
-    runs-on: macos-14
-    
+    runs-on: macos-15
+
     steps:
     - uses: actions/checkout@v4
-    
+
     - name: Select Xcode
-      run: sudo xcode-select -s /Applications/Xcode_15.2.app/Contents/Developer
-      
+      run: |
+        sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)/Contents/Developer"
+        xcodebuild -version
+
     - name: Build
       run: |
         xcodebuild -scheme FeishuSpeech \
@@ -32,8 +34,8 @@ jobs:
       continue-on-error: true
 
   lint:
-    runs-on: macos-14
-    
+    runs-on: macos-15
+
     steps:
     - uses: actions/checkout@v4
     

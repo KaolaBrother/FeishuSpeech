@@ -66,25 +66,26 @@ cp -R ~/Library/Developer/Xcode/DerivedData/FeishuSpeech-xxx/Build/Products/Rele
 FeishuSpeech/
 ├── App/
 │   ├── FeishuSpeechApp.swift    # @main 入口，MenuBarExtra 配置
-│   └── AppDelegate.swift        # 应用生命周期，权限检查
+│   └── AppDelegate.swift        # 应用生命周期，权限检查，开机启动同步
 ├── Controllers/
 │   └── OverlayWindowController.swift # 浮动提示窗口管理 (NSPanel)
 ├── Models/
-│   ├── AppSettings.swift        # 用户设置 (Codable)
+│   ├── AppSettings.swift        # 用户设置 (Codable)，含开机启动选项
 │   ├── RecordingState.swift     # 录音状态枚举
 │   └── SpeechResult.swift       # API 请求/响应模型
 ├── Services/
-│   ├── FeishuAPIService.swift   # 飞书 API 调用 (actor)，含网络监测、超时和重试
+│   ├── FeishuAPIService.swift   # 飞书 API 调用 (actor)，含网络监测、超时、重试和 resetState()
 │   ├── AudioRecorder.swift      # 音频录制 (AVCaptureSession + AVAudioConverter)
 │   ├── HotKeyService.swift      # 全局快捷键监听，状态机实现，自动恢复
 │   ├── HotKeyState.swift        # 热键状态枚举
+│   ├── LoginItemService.swift   # 开机启动管理 (SMAppService)
 │   ├── PermissionManager.swift  # 权限管理
 │   └── TextInputSimulator.swift # 文字输入模拟
 ├── ViewModels/
-│   └── MainViewModel.swift      # 主状态管理，含错误恢复和超时
+│   └── MainViewModel.swift      # 主状态管理，含错误恢复、超时和连续失败自动重置
 ├── Views/
-│   ├── MenuBarView.swift        # 菜单栏下拉视图
-│   ├── SettingsView.swift       # 设置窗口
+│   ├── MenuBarView.swift        # 菜单栏下拉视图，含重置服务按钮
+│   ├── SettingsView.swift       # 设置窗口，含开机启动开关
 │   ├── PermissionView.swift     # 权限状态视图
 │   └── RecordingOverlayView.swift # 浮动提示视图
 ├── Resources/
@@ -93,12 +94,13 @@ FeishuSpeech/
 └── FeishuSpeech.entitlements    # 应用权限配置
 
 FeishuSpeechTests/
-├── HotKeyServiceTests.swift     # 热键服务测试
+├── HotKeyServiceTests.swift     # 热键状态机测试
 └── MockURLProtocol.swift        # 网络请求 Mock 工具
 
 配置文件/
 ├── .swiftlint.yml               # SwiftLint 配置
 ├── .github/workflows/ci.yml     # GitHub Actions CI/CD
+├── CLAUDE.md                    # 项目入口文件
 └── AGENTS.md                    # 本文档
 ```
 
@@ -131,6 +133,27 @@ idle ──[Fn按下]──> pending ──[0.3s]──> recording ──[松开
 4. 数据缓冲到预分配内存 (2MB)
 5. 停止时提取 PCM 数据发送给飞书 API
 
+### API 错误处理与重试
+
+FeishuAPIService 使用 `isRetriable` 属性区分错误类型：
+- **可重试**: timeout, connectionFailed, networkError, httpError(400/401)（token 已自动清除）, httpError(5xx)
+- **不可重试**: networkUnavailable, authFailed, recognitionFailed, invalidResponse, unknown
+
+Speech API 返回 400/401 时自动清除 token 缓存，确保重试使用新 token。
+
+### 崩溃恢复
+
+- 连续失败 3 次自动调用 `FeishuAPIService.resetState()` 重置所有状态
+- 菜单栏提供「重置服务」按钮供手动恢复
+- 错误状态 3 秒后自动恢复 idle
+
+### 开机启动
+
+使用 `SMAppService.mainApp`（macOS 13.0+）管理开机启动：
+- `LoginItemService.setEnabled()` 注册/注销
+- 设置页面提供开关
+- 应用启动时同步状态
+
 ### 稳定性保护
 
 | 保护机制 | 值 | 说明 |
@@ -141,6 +164,8 @@ idle ──[Fn按下]──> pending ──[0.3s]──> recording ──[松开
 | API 超时 | 30s | 请求超时保护 |
 | API 重试 | 3次 | 指数退避重试 |
 | 错误恢复 | 3s | 自动恢复 idle |
+| 连续失败重置 | 3次 | 自动重置 API 服务 |
+| Token 缓存 | 6000s | 留 1200s 安全余量 |
 | 转换错误上限 | 10次 | 超过则停止录音 |
 | Event Tap 重试 | 3次 | 自动恢复监控 |
 
@@ -186,10 +211,10 @@ private let logger = Logger(subsystem: "com.feishuspeech.app", category: "Catego
 @MainActor
 class MainViewModel: ObservableObject {
     @Published var status: RecordingState = .idle
-    
+
     private let serviceName = Service.shared
     private var cancellables = Set<AnyCancellable>()
-    
+
     init() {
         setupBindings()
     }
@@ -213,6 +238,12 @@ actor FeishuAPIService {
     static let shared = FeishuAPIService()
     private var cachedToken: String?
 }
+
+// 纯静态服务
+enum LoginItemService {
+    static var isEnabled: Bool { ... }
+    static func setEnabled(_ enabled: Bool) { ... }
+}
 ```
 
 ### 数据模型
@@ -224,7 +255,7 @@ nonisolated struct SpeechResponse: Decodable, Sendable {
     let code: Int
     let msg: String
     let data: RecognitionData?
-    
+
     enum CodingKeys: String, CodingKey {
         case code, msg
         case recognitionText = "recognition_text"
@@ -234,7 +265,7 @@ nonisolated struct SpeechResponse: Decodable, Sendable {
 
 ### 错误处理
 
-定义嵌套的 `LocalizedError` enum：
+定义嵌套的 `LocalizedError` enum，含 `isRetriable` 属性：
 
 ```swift
 enum APIError: LocalizedError {
@@ -242,7 +273,18 @@ enum APIError: LocalizedError {
     case httpError(Int)
     case authFailed(String)
     case timeout
-    
+
+    var isRetriable: Bool {
+        switch self {
+        case .timeout, .connectionFailed, .networkError:
+            return true
+        case .httpError(let code):
+            return code == 400 || code == 401 || (500...599).contains(code)
+        default:
+            return false
+        }
+    }
+
     var errorDescription: String? {
         switch self {
         case .invalidResponse: return "无效响应"
@@ -260,7 +302,7 @@ enum APIError: LocalizedError {
 struct SettingsView: View {
     @ObservedObject var viewModel: MainViewModel
     @AppStorage("key") private var value = defaultValue
-    
+
     var body: some View {
         Form {
             Section("标题") {
@@ -301,15 +343,21 @@ service.$state
 @MainActor
 final class HotKeyServiceTests: XCTestCase {
     private var sut: HotKeyService!
-    
+
     override func setUp() async throws {
         sut = HotKeyService.shared
     }
-    
+
     func test_initialState_isIdle() {
         XCTAssertEqual(sut.state, .idle)
     }
 }
+```
+
+### 运行测试
+
+```bash
+xcodebuild -scheme FeishuSpeech -destination 'platform=macOS' test
 ```
 
 ## 权限配置
@@ -356,27 +404,16 @@ final class HotKeyServiceTests: XCTestCase {
 | `delayInterval` | 0.3s | HotKeyService.swift | Fn 键延迟时间 |
 | `maxRecordingDuration` | 60s | MainViewModel.swift | 最大录音时长 |
 | `errorRecoveryDelay` | 3s | MainViewModel.swift | 错误自动恢复延迟 |
+| `maxConsecutiveFailures` | 3 | MainViewModel.swift | 连续失败自动重置阈值 |
 | `requestTimeout` | 30s | FeishuAPIService.swift | API 请求超时 |
 | `maxRetries` | 3 | FeishuAPIService.swift | API 重试次数 |
 | `retryDelay` | 1s | FeishuAPIService.swift | 重试间隔基数 |
+| Token 缓存 | 6000s | FeishuAPIService.swift | Token 缓存有效期 |
 | `targetSampleRate` | 16000 | AudioRecorder.swift | 目标采样率 |
 | `maxRecordingSeconds` | 60s | AudioRecorder.swift | 录音时长限制 |
 | `estimatedMaxBufferSize` | 2MB | AudioRecorder.swift | Buffer 预分配大小 |
 | `maxConversionErrors` | 10 | AudioRecorder.swift | 最大转换错误数 |
 | `maxRestartRetries` | 3 | HotKeyService.swift | Event Tap 重启重试 |
-
-## 测试
-
-### 测试文件位置
-
-- `FeishuSpeechTests/HotKeyServiceTests.swift` - 热键状态机测试
-- `FeishuSpeechTests/MockURLProtocol.swift` - 网络请求 Mock
-
-### 运行测试
-
-```bash
-xcodebuild -scheme FeishuSpeech -destination 'platform=macOS' test
-```
 
 ## CI/CD
 
@@ -408,9 +445,20 @@ Overlay 显示在鼠标所在的活跃屏幕，而非固定主屏幕。
 - 离线时提前拒绝请求
 - 网络恢复后自动清除 token 缓存
 - 区分错误类型（离线、超时、连接失败）
+- 使用 `isRetriable` 分类决定是否重试
 - 重试次数增加到 3 次
 
-### 6. 进程资源清理
+### 6. HTTP 400/401 恢复
+- Speech API 返回 400/401 时清除 token 缓存
+- 重试时自动获取新 token
+- 连续失败 3 次自动重置全部服务状态
+- 菜单栏提供手动重置按钮
+
+### 7. 开机启动
+- 使用 SMAppService.mainApp 管理（macOS 13.0+）
+- 设置页面开关 + 应用启动时同步
+
+### 8. 进程资源清理
 - 应用退出时完整清理音频资源
 - 释放 Event Tap
 - 释放 AVCaptureSession

@@ -28,16 +28,6 @@ final class HotKeyServiceTests: XCTestCase {
         XCTAssertFalse(sut.state.shouldShowOverlay)
     }
     
-    func test_armed_isActive() {
-        let state: HotKeyState = .armed
-        XCTAssertTrue(state.isActive)
-    }
-    
-    func test_armed_shouldShowOverlay() {
-        let state: HotKeyState = .armed
-        XCTAssertTrue(state.shouldShowOverlay)
-    }
-    
     func test_recording_isActive() {
         let state: HotKeyState = .recording
         XCTAssertTrue(state.isActive)
