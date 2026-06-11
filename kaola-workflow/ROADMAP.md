@@ -8,9 +8,6 @@ This file mirrors active unfinished work. GitHub issues are the source of truth 
 | Issue | Title | Status | Workflow Project | Next Step |
 |-------|-------|--------|------------------|-----------|
 | #5 | Event tap creation fails silently after 3 retries — UI shows 就绪 while the hotkey is dead | open | — | — |
-| #6 | Fn press+release during .transcribing resets the state machine — allows concurrent recording sessions | open | — | — |
-| #7 | Max-duration auto-stop desyncs HotKeyService and MainViewModel — spurious 没有录到音频数据 error on Fn release | open | — | — |
-| #8 | stopHotKeyMonitoring leaks the $state subscription — duplicate event handling after permission flicker | open | — | — |
 | #9 | Event tap runs on the main run loop while session.startRunning() blocks it — dropped Fn events, stuck recording | open | — | — |
 | #10 | Secure keyboard entry is not detected — hotkey silently dead while a password field is focused | open | — | — |
 | #11 | Direct HTTP client discards fully-received responses on timeout; no Content-Length-based completion | open | — | — |
