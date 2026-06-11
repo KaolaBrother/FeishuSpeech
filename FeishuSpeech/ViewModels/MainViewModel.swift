@@ -15,7 +15,7 @@ class MainViewModel: ObservableObject {
     @Published var settings: AppSettings = AppSettings.load()
 
     private let hotKeyService = HotKeyService.shared
-    private let audioRecorder = AudioRecorder()
+    private let audioRecorder: AudioRecorder
     private let permissionManager = PermissionManager.shared
     private let overlayController = OverlayWindowController.shared
     private var cancellables = Set<AnyCancellable>()
@@ -28,7 +28,8 @@ class MainViewModel: ObservableObject {
         status.text
     }
 
-    init() {
+    init(audioRecorder: AudioRecorder = AudioRecorder()) {
+        self.audioRecorder = audioRecorder
         logger.info("MainViewModel init")
         audioRecorder.forceCleanup()
         setupPermissionObserver()
@@ -111,6 +112,7 @@ class MainViewModel: ObservableObject {
     private func handleCancelledState(reason: CancelReason) {
         logger.info("Recording cancelled: \(reason.description)")
         hideOverlay()
+        audioRecorder.forceCleanup()
         status = .idle
         stopMaxDurationTimer()
     }
@@ -118,6 +120,7 @@ class MainViewModel: ObservableObject {
     private func handleErrorState(message: String) {
         logger.error("Error state: \(message)")
         hideOverlay()
+        audioRecorder.forceCleanup()
         status = .error(message)
         stopMaxDurationTimer()
     }
@@ -218,6 +221,7 @@ class MainViewModel: ObservableObject {
 
     func resetService() async {
         logger.info("Manual service reset requested")
+        audioRecorder.forceCleanup()
         await FeishuAPIService.shared.resetState()
         consecutiveFailureCount = 0
         status = .idle

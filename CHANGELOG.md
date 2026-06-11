@@ -14,6 +14,7 @@
 - Kaola-Workflow scaffolding (CLAUDE.md, AGENTS.md redirect, docs/, roadmap)
 
 ### Fixed
+- 「重置服务」现在能正确恢复卡住的麦克风：取消或出错后不再出现永久录音失败；`startRecording()` 在启动前重置任何残留会话状态（issue #1）
 - NWConnection `.waiting` 状态忽略导致每个不可达 IP 等待 30–75 秒（issue #2）
 - 识别中卡死长达 ~150s：30s 超时未正确取消 NWConnection，现使用 `withTaskCancellationHandler` 确保任务取消即时传播（issue #4）
 - HTTP 400 错误后应用卡死：token 过期未清除导致重试持续失败

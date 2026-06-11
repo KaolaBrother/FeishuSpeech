@@ -35,13 +35,12 @@ class AudioRecorder: NSObject, ObservableObject {
     
     @discardableResult
     func startRecording() -> Bool {
-        guard !isRecording else {
-            logger.warning("Already recording, skipping start")
-            return false
-        }
-        
+        // Always run forceCleanup() first so a stale isRecording flag (e.g. left over from a
+        // cancelled or errored recording that forgot to reset state) never permanently prevents
+        // a new session from starting.  forceCleanup() stops any running session and resets
+        // isRecording to false, so every call to startRecording() starts from a clean slate.
         forceCleanup()
-        
+
         audioBuffer.reserveCapacity(estimatedMaxBufferSize)
         audioConverter = nil
         inputFormat = nil
