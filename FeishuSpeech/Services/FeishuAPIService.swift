@@ -24,6 +24,39 @@ private nonisolated struct DirectHTTPResponse {
     let body: Data
 }
 
+private final class CancelBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var connection: NWConnection?
+    private var abort: (() -> Void)?
+    private var cancelled = false
+
+    func store(connection: NWConnection, abort: @escaping () -> Void) {
+        lock.lock()
+        if cancelled {
+            lock.unlock()
+            connection.forceCancel()
+            abort()
+            return
+        }
+        self.connection = connection
+        self.abort = abort
+        lock.unlock()
+    }
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        let connection = self.connection
+        let abort = self.abort
+        self.connection = nil
+        self.abort = nil
+        lock.unlock()
+
+        connection?.forceCancel()
+        abort?()
+    }
+}
+
 private nonisolated final class DirectFeishuHTTPClient {
     private let host: String
     private let ipAddress: String
@@ -42,6 +75,8 @@ private nonisolated final class DirectFeishuHTTPClient {
     }
 
     func send() async throws -> DirectHTTPResponse {
+        let cancelBox = CancelBox()
+        return try await withTaskCancellationHandler {
         try await withCheckedThrowingContinuation { continuation in
             let queue = DispatchQueue(label: "com.feishuspeech.direct-http")
             let tlsOptions = NWProtocolTLS.Options()
@@ -114,6 +149,8 @@ private nonisolated final class DirectFeishuHTTPClient {
                             receiveLoop()
                         }
                     })
+                case .waiting(let error):
+                    finish(.failure(error))
                 case .failed(let error):
                     finish(.failure(error))
                 case .cancelled:
@@ -128,6 +165,12 @@ private nonisolated final class DirectFeishuHTTPClient {
             }
 
             connection.start(queue: queue)
+            cancelBox.store(connection: connection) {
+                finish(.failure(CancellationError()))
+            }
+        }
+        } onCancel: {
+            cancelBox.cancel()
         }
     }
 
@@ -426,11 +469,36 @@ actor FeishuAPIService {
             }
         }
 
+        // #3: all direct IPs failed — fall back to system DNS via URLSession
+        do {
+            logger.warning("All direct IPs failed, falling back to URLSession DNS")
+            return try await sendViaURLSession(path: path, headers: headers, body: body)
+        } catch {
+            lastError = error
+            logger.warning("URLSession DNS fallback failed: \(error.localizedDescription)")
+        }
+
         if let error = lastError as? APIError {
             throw error
         }
 
         throw APIError.connectionFailed
+    }
+
+    private func sendViaURLSession(path: String, headers: [String: String], body: Data) async throws -> DirectHTTPResponse {
+        guard let url = URL(string: "https://\(feishuAPIHost)\(path)") else {
+            throw APIError.invalidResponse
+        }
+        var request = URLRequest(url: url, timeoutInterval: requestTimeout)
+        request.httpMethod = "POST"
+        request.httpBody = body
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        headers.forEach { request.setValue($0.value, forHTTPHeaderField: $0.key) }
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw APIError.invalidResponse
+        }
+        return DirectHTTPResponse(statusCode: httpResponse.statusCode, body: data)
     }
 
     enum APIError: LocalizedError {

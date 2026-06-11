@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- 飞书 API 所有直连 IP 失败后自动回退至 URLSession DNS 解析，防止 CDN IP 轮换导致永久失效（issue #3）
 - 开机启动功能（设置 → 通用 → 开机启动）
 - 菜单栏「重置服务」按钮，手动恢复异常状态
 - 连续失败 3 次自动重置 API 服务
@@ -13,6 +14,8 @@
 - Kaola-Workflow scaffolding (CLAUDE.md, AGENTS.md redirect, docs/, roadmap)
 
 ### Fixed
+- NWConnection `.waiting` 状态忽略导致每个不可达 IP 等待 30–75 秒（issue #2）
+- 识别中卡死长达 ~150s：30s 超时未正确取消 NWConnection，现使用 `withTaskCancellationHandler` 确保任务取消即时传播（issue #4）
 - HTTP 400 错误后应用卡死：token 过期未清除导致重试持续失败
 - Speech API 返回 400/401 时自动清除 token 缓存
 - URLSession 从 computed property 改为 stored property，避免重复创建
