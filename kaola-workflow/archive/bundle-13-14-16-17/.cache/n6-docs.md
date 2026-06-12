@@ -1,0 +1,2 @@
+evidence-binding: n6-docs 1de7d82456b4
+Created docs/decisions/D-13-01.md: ADR covering all four fixes (#13 changeCount clipboard restore, #14 overlayMessage model state, #16 .common run-loop mode, #17 generation guard). Updated CHANGELOG.md: four Fixed entries in [Unreleased]. Updated docs/architecture.md: TextInputSimulator clipboard-restore contract and OverlayWindowController generation guard sections.

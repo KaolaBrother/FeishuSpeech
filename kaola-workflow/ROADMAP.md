@@ -9,11 +9,7 @@ This file mirrors active unfinished work. GitHub issues are the source of truth 
 |-------|-------|--------|------------------|-----------|
 | #11 | Direct HTTP client discards fully-received responses on timeout; no Content-Length-based completion | open | — | — |
 | #12 | Token expiry hardcoded to 6000s — Feishu expire field ignored | open | — | — |
-| #13 | Clipboard restore races the synthetic Cmd+V — recognized text can be lost or replaced by old clipboard | open | — | — |
-| #14 | Empty recognition result is a silent no-op — looks like the app didn't respond | open | — | — |
 | #15 | Mic device loss mid-recording unhandled; microphone permission only checked at launch | open | — | — |
-| #16 | maxDurationTimer uses default run-loop mode — doesn't fire while the menu-bar menu is open | open | — | — |
-| #17 | Overlay hide animation completion can hide a newly-shown overlay — recording with no visual feedback | open | — | — |
 | #18 | appSecret stored in plaintext UserDefaults — move to Keychain | open | — | — |
 | #19 | No sleep/wake health check — event tap and network monitor can be stale after wake | open | — | — |
 | #20 | Test coverage: direct HTTP client, retry logic, and state-machine interplay untested; MockURLProtocol is dead code | open | — | — |
