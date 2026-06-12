@@ -13,6 +13,10 @@ private let maxConsecutiveFailures = 3
 class MainViewModel: ObservableObject {
     @Published var status: RecordingState = .idle
     @Published var settings: AppSettings = AppSettings.load()
+    /// Transient message shown when speech recognition returns an empty result.
+    /// Set to a non-nil string to trigger feedback; callers should observe this
+    /// and clear it after display.  `nil` means no pending feedback.
+    @Published var overlayMessage: String?
 
     private let hotKeyService = HotKeyService.shared
     private let audioRecorder: AudioRecorder
@@ -209,6 +213,24 @@ class MainViewModel: ObservableObject {
         }
     }
 
+    /// Handles a successful recognition result from the API.
+    ///
+    /// Extracted from `transcribeAudio` to allow direct unit testing of the
+    /// empty-result feedback path without requiring a live API call.
+    /// When `text` is empty or whitespace-only, `overlayMessage` is set to
+    /// "未识别到内容" so the UI can display transient feedback (issue #14).
+    func handleRecognitionResult(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            logger.info("Recognition returned empty result — showing feedback")
+            overlayMessage = "未识别到内容"
+        } else {
+            if settings.autoInsert {
+                TextInputSimulator.insertTextViaPasteboard(text)
+            }
+        }
+    }
+
     private func transcribeAudio(_ audioData: Data) async {
         do {
             let text = try await withTimeout(seconds: 30) {
@@ -222,9 +244,7 @@ class MainViewModel: ObservableObject {
             logger.info("Recognition result: \(text)")
             consecutiveFailureCount = 0
 
-            if settings.autoInsert && !text.isEmpty {
-                TextInputSimulator.insertTextViaPasteboard(text)
-            }
+            handleRecognitionResult(text)
 
             status = .idle
             hotKeyService.resetToIdle()
@@ -268,11 +288,13 @@ class MainViewModel: ObservableObject {
 
     private func startMaxDurationTimer() {
         maxDurationTimer?.invalidate()
-        maxDurationTimer = Timer.scheduledTimer(withTimeInterval: maxRecordingDuration, repeats: false) { [weak self] _ in
+        let timer = Timer(timeInterval: maxRecordingDuration, repeats: false) { [weak self] _ in
             Task { @MainActor in
                 self?.handleMaxDurationReached()
             }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        maxDurationTimer = timer
     }
 
     private func stopMaxDurationTimer() {

@@ -121,3 +121,75 @@ final class MonitoringTestableMainViewModel: MainViewModel {
         stopHotKeyMonitoring()
     }
 }
+
+// MARK: - EmptyResultFeedbackTests
+
+/// Tests for issue #14: empty recognition result must produce observable
+/// feedback (overlayMessage) instead of a silent no-op.
+@MainActor
+final class EmptyResultFeedbackTests: XCTestCase {
+
+    // MARK: - test_emptyRecognitionResult_setsOverlayMessage
+
+    /// When `handleRecognitionResult` is called with an empty string, the view
+    /// model MUST set `overlayMessage` to a non-nil, non-empty string so that
+    /// the UI can display transient feedback to the user.
+    ///
+    /// Pre-fix behaviour: the `if settings.autoInsert && !text.isEmpty` branch
+    /// is silently skipped; `overlayMessage` stays nil and the user sees nothing.
+    ///
+    /// Post-fix behaviour: `overlayMessage` is set to "未识别到内容" (or
+    /// equivalent non-empty string) before returning to idle.
+    func test_emptyRecognitionResult_setsOverlayMessage() {
+        let sut = MainViewModel(audioRecorder: AudioRecorder())
+
+        // Pre-condition: overlayMessage starts nil
+        XCTAssertNil(
+            sut.overlayMessage,
+            "overlayMessage must be nil before any recognition result"
+        )
+
+        // Act: simulate API returning an empty recognition result
+        sut.handleRecognitionResult("")
+
+        // Assert: feedback must be visible
+        XCTAssertNotNil(
+            sut.overlayMessage,
+            "overlayMessage must be non-nil when recognition returns empty text"
+        )
+        XCTAssertFalse(
+            sut.overlayMessage?.isEmpty ?? true,
+            "overlayMessage must be non-empty when recognition returns empty text"
+        )
+    }
+
+    // MARK: - test_whitespaceOnlyRecognitionResult_setsOverlayMessage
+
+    /// Whitespace-only results (e.g. "  \n  ") must also trigger feedback,
+    /// because after trimming they are effectively empty.
+    func test_whitespaceOnlyRecognitionResult_setsOverlayMessage() {
+        let sut = MainViewModel(audioRecorder: AudioRecorder())
+
+        sut.handleRecognitionResult("   \n   ")
+
+        XCTAssertNotNil(
+            sut.overlayMessage,
+            "overlayMessage must be non-nil for whitespace-only recognition result"
+        )
+    }
+
+    // MARK: - test_nonEmptyRecognitionResult_doesNotSetOverlayMessage
+
+    /// A non-empty result is the happy path — `overlayMessage` MUST remain nil
+    /// so no spurious feedback panel appears over normally recognised text.
+    func test_nonEmptyRecognitionResult_doesNotSetOverlayMessage() {
+        let sut = MainViewModel(audioRecorder: AudioRecorder())
+
+        sut.handleRecognitionResult("你好世界")
+
+        XCTAssertNil(
+            sut.overlayMessage,
+            "overlayMessage must remain nil for a non-empty recognition result"
+        )
+    }
+}

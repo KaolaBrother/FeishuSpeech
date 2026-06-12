@@ -62,7 +62,7 @@
 
 ## Known Gotchas
 
-- `TextInputSimulator` uses Cmd+V via CGEvent; clipboard restore can race the paste — issue #13.
+- `TextInputSimulator` clipboard restore is confirmed via changeCount polling and full snapshot; race fixed — issue #13 resolved.
 - `AVCaptureSession.startRunning()` blocks the run loop; event tap must not share the main run loop — issue #9.
 - Token expiry from Feishu API is currently ignored (hardcoded 6000 s) — issue #12.
 - `appSecret` stored in plaintext UserDefaults; Keychain migration tracked in issue #18.

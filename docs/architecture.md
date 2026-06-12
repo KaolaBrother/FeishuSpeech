@@ -70,3 +70,40 @@ tap is re-created.
 `PermissionManager` polls `IsSecureEventInputEnabled()` every 2 seconds. When active, the
 menu bar shows an orange "安全输入已启用，热键暂不可用" warning (issue #10). The hotkey
 suppression itself is enforced by the OS kernel; detection and display is the only recourse.
+
+## TextInputSimulator — clipboard-restore contract
+
+`TextInputSimulator` writes transcribed text to `NSPasteboard.general`, sends a synthetic
+Cmd+V, then restores the previous clipboard state (issue #13, see
+`docs/decisions/D-13-01.md`):
+
+- **Full snapshot before write.** Before placing the transcribed text on the pasteboard, the
+  simulator reads every `type` from `NSPasteboard.general` and stores a
+  `[(type: NSPasteboard.PasteboardType, data: Data)]` array. All types — not just the first
+  string item — are captured so non-string content (RTF, images, etc.) survives the round-trip.
+- **changeCount-based confirmation.** After sending Cmd+V, the simulator polls
+  `NSPasteboard.general.changeCount` at a short interval up to a bounded timeout. The
+  changeCount advances each time an application reads from the pasteboard. Restoration is
+  deferred until that increment is observed, ensuring the target application has read the
+  transcribed text before the old data is written back.
+- **Fallback notification on timeout.** If the changeCount does not advance within the
+  timeout, the simulator restores the pasteboard unconditionally and posts an
+  `NSNotification` so the caller can surface a warning to the user.
+
+The `maxDurationTimer` in `HotKeyService` is scheduled with `RunLoop.main.add(timer,
+forMode: .common)` so it fires in both `.default` and `NSEventTrackingRunLoopMode` (e.g.
+while the menu-bar menu is open) — issue #16.
+
+## OverlayWindowController — generation guard
+
+`OverlayWindowController` maintains a monotonically incrementing `Int` generation counter
+to prevent hide/show races (issue #17, see `docs/decisions/D-13-01.md`):
+
+- Each `show()` call increments the counter and captures the new value in its animation
+  completion closure.
+- Each `hide()` call captures the current generation at call time.
+- Any completion block that fires with a stale (mismatched) generation is a no-op and does
+  not close or modify the window.
+
+This prevents a `hide()` completion from a superseded call from closing a window that a
+newer `show()` has already claimed.

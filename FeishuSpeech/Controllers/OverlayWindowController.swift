@@ -1,30 +1,36 @@
 import AppKit
 import SwiftUI
 import Combine
+import os.log
+
+private let logger = Logger(subsystem: "com.feishuspeech.app", category: "OverlayWindowController")
 
 @MainActor
 final class OverlayWindowController: ObservableObject {
     static let shared = OverlayWindowController()
-    
+
     private var window: NSPanel?
     private var cancellables = Set<AnyCancellable>()
-    
+    private var generation: Int = 0
+
     private let windowSize = NSSize(width: 280, height: 100)
-    
+
     private init() {}
-    
+
     func show() {
+        generation += 1
+        logger.debug("show — generation \(self.generation)")
         ensureWindow()
-        
+
         guard let window = window else { return }
-        
+
         let targetFrame = centeredFrame(size: windowSize)
         let startFrame = targetFrame.offsetBy(dx: 0, dy: -20)
-        
+
         window.setFrame(startFrame, display: true)
         window.alphaValue = 0
         window.orderFrontRegardless()
-        
+
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.2
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
@@ -32,19 +38,28 @@ final class OverlayWindowController: ObservableObject {
             window.animator().alphaValue = 1
         }
     }
-    
+
     func hide() {
         guard let window = window else { return }
-        
+
+        let capturedGeneration = generation
+        logger.debug("hide — capturedGeneration \(capturedGeneration)")
         let targetFrame = window.frame.offsetBy(dx: 0, dy: 20)
-        
+
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.15
             context.timingFunction = CAMediaTimingFunction(name: .easeIn)
             window.animator().setFrame(targetFrame, display: true)
             window.animator().alphaValue = 0
-        } completionHandler: {
-            window.orderOut(nil)
+        } completionHandler: { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                guard self.generation == capturedGeneration else {
+                    logger.debug("hide completion skipped — generation advanced to \(self.generation)")
+                    return
+                }
+                window.orderOut(nil)
+            }
         }
     }
     

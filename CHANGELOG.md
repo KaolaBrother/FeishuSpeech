@@ -10,6 +10,10 @@
 - Event Tap 从主线程移至专用后台线程，避免与 AVCaptureSession 争用主 RunLoop 导致热键丢失（issue #9）
 - Event Tap 创建失败或辅助功能权限未授予时，自动按指数退避重试（最长间隔 30 秒），不再硬限 3 次后放弃（issue #5）
 - 录音停止后重置 Fn 键状态，防止重启监控时残留的按键状态触发误录（issue #9）
+- 剪贴板还原不再与合成 Cmd+V 产生竞争：完整保存/还原所有粘贴板类型，通过 changeCount 轮询确认目标应用已读取后再还原；超时未确认时回退到通知（issue #13）
+- 语音识别返回空结果时，不再静默无响应，而是将可观察的 `overlayMessage` 设为提示文字（issue #14）
+- 录音最大时长计时器（maxDurationTimer）改用 `.common` 运行循环模式，菜单栏菜单打开时也能正常触发（issue #16）
+- Overlay 隐藏动画不再与后续 show() 产生竞争：引入 generation 计数器，过期的 hide 完成回调不会关闭新弹出的 overlay（issue #17）
 
 - 飞书 API 所有直连 IP 失败后自动回退至 URLSession DNS 解析，防止 CDN IP 轮换导致永久失效（issue #3）
 - 开机启动功能（设置 → 通用 → 开机启动）
