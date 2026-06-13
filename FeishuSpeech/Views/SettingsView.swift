@@ -2,11 +2,11 @@ import SwiftUI
 
 struct SettingsView: View {
     @ObservedObject var viewModel: MainViewModel
-    @AppStorage("appId") private var appId = ""
-    @AppStorage("appSecret") private var appSecret = ""
-    @AppStorage("autoInsert") private var autoInsert = true
-    @AppStorage("playSound") private var playSound = true
-    @AppStorage("launchAtLogin") private var launchAtLogin = false
+    @State private var appId = ""
+    @State private var appSecret = ""
+    @State private var autoInsert = true
+    @State private var playSound = true
+    @State private var launchAtLogin = false
 
     var body: some View {
         TabView {
@@ -29,20 +29,25 @@ struct SettingsView: View {
         }
         .frame(width: 400, height: 300)
         .onDisappear {
-            viewModel.settings.appId = appId
-            viewModel.settings.appSecret = appSecret
-            viewModel.settings.autoInsert = autoInsert
-            viewModel.settings.playSound = playSound
-            viewModel.settings.launchAtLogin = launchAtLogin
-            viewModel.saveSettings()
+            viewModel.updateSettings(
+                appId: appId,
+                appSecret: appSecret,
+                autoInsert: autoInsert,
+                playSound: playSound,
+                launchAtLogin: launchAtLogin
+            )
         }
         .onAppear {
-            appId = viewModel.settings.appId
-            appSecret = viewModel.settings.appSecret
-            autoInsert = viewModel.settings.autoInsert
-            playSound = viewModel.settings.playSound
-            launchAtLogin = viewModel.settings.launchAtLogin
+            loadSettings()
         }
+    }
+
+    private func loadSettings() {
+        appId = viewModel.settings.appId
+        appSecret = viewModel.settings.appSecret
+        autoInsert = viewModel.settings.autoInsert
+        playSound = viewModel.settings.playSound
+        launchAtLogin = viewModel.settings.launchAtLogin
     }
 }
 

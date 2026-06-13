@@ -372,6 +372,21 @@ class MainViewModel: ObservableObject {
         }
     }
 
+    func updateSettings(
+        appId: String,
+        appSecret: String,
+        autoInsert: Bool,
+        playSound: Bool,
+        launchAtLogin: Bool
+    ) {
+        settings.appId = appId
+        settings.appSecret = appSecret
+        settings.autoInsert = autoInsert
+        settings.playSound = playSound
+        settings.launchAtLogin = launchAtLogin
+        saveSettings()
+    }
+
     func cleanup() {
         logger.info("MainViewModel cleanup called")
         audioRecorder.forceCleanup()

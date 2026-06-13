@@ -36,6 +36,33 @@ exhaustion (see `docs/decisions/D-15-01.md`):
   puts `HotKeyService` into `.error` with the same localized message. This path does not call
   `stopRecording()` and does not start transcription.
 
+## AppSettings — credential storage and migration
+
+Issue #18 moves Feishu App ID and App Secret storage behind `CredentialStoring`
+(see `docs/decisions/D-18-01.md`). `AppSettings.credentialStore` defaults to
+`KeychainCredentialStore`, which stores generic password items through
+Security.framework using service `Siji.FeishuSpeech.credentials` and account
+values `appId` / `appSecret`.
+
+`AppSettings` still exposes `appId` and `appSecret` to the app at runtime, but
+its custom `Codable` implementation does not encode those fields into
+`FeishuSpeechSettings`. That user-defaults payload is limited to `autoInsert`,
+`playSound`, and `launchAtLogin`.
+
+Loading settings performs a guarded migration from legacy credentials:
+
+- encoded `FeishuSpeechSettings` credentials are read if present;
+- standalone user-default keys `appId` and `appSecret` are also read;
+- standalone values take precedence over encoded values;
+- legacy defaults are removed only after credential-store migration succeeds and
+  the migrated credentials can be read back;
+- when migration or credential read/write fails, legacy values remain available
+  as the fallback and later saves avoid deleting the only remaining copy.
+
+`SettingsView` keeps credential edits in transient `@State` fields and saves via
+`MainViewModel.updateSettings(...)`, which calls `AppSettings.save()`. It does
+not use `@AppStorage` for App ID or App Secret.
+
 ## HotKeyService — state-machine contract
 
 `HotKeyService` drives the CGEventTap state machine: `idle -> pending (0.3 s) -> recording ->

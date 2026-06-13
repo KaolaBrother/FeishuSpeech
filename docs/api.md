@@ -15,6 +15,32 @@ This page documents the Feishu integration contract implemented by
 Speech requests use `Authorization: Bearer <tenant_access_token>`,
 `format: "pcm"`, and `engine_type: "16k_auto"`.
 
+## Credential storage
+
+The Feishu App ID and App Secret are runtime `AppSettings` values, but they are
+not encoded into the `FeishuSpeechSettings` user-defaults payload. `AppSettings`
+persists credentials through `CredentialStoring`; the default store is
+`KeychainCredentialStore`, which uses macOS Security.framework generic password
+items.
+
+The keychain service is `Siji.FeishuSpeech.credentials`. The credential account
+values are `appId` and `appSecret`, matching `CredentialAccount.appId.rawValue`
+and `CredentialAccount.appSecret.rawValue`.
+
+`FeishuSpeechSettings` stores only non-credential preferences:
+
+- `autoInsert`
+- `playSound`
+- `launchAtLogin`
+
+On load, `AppSettings` migrates legacy credentials from encoded
+`FeishuSpeechSettings` fields and from standalone user-default keys named
+`appId` / `appSecret`. Standalone values take precedence when both legacy
+sources exist. Legacy defaults are scrubbed only after migration succeeds and the
+credentials can be read from the credential store. If migration, read, or write
+fails, the legacy credentials are preserved as a fallback instead of being
+deleted.
+
 ## Direct HTTP completion
 
 The primary request path uses `DirectFeishuHTTPClient` over `NWConnection` and
