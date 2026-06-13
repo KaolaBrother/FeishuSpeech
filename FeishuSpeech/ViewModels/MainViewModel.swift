@@ -44,8 +44,18 @@ class MainViewModel: ObservableObject {
         self.audioRecorder = audioRecorder
         logger.info("MainViewModel init")
         audioRecorder.forceCleanup()
+        setupAudioRecorderFailureObserver()
         setupPermissionObserver()
         setupErrorRecovery()
+    }
+
+    private func setupAudioRecorderFailureObserver() {
+        audioRecorder.$failure
+            .compactMap { $0 }
+            .sink { [weak self] failure in
+                self?.handleAudioRecorderFailure(failure)
+            }
+            .store(in: &cancellables)
     }
 
     private func setupPermissionObserver() {
@@ -143,6 +153,15 @@ class MainViewModel: ObservableObject {
         audioRecorder.forceCleanup()
         status = .error(message)
         stopMaxDurationTimer()
+    }
+
+    private func handleAudioRecorderFailure(_ failure: RecordingFailure) {
+        logger.error("Audio recorder failure: \(failure.localizedDescription)")
+        hideOverlay()
+        audioRecorder.forceCleanup()
+        stopMaxDurationTimer()
+        status = .error(failure.localizedDescription)
+        hotKeyService.setError(failure.localizedDescription)
     }
 
     private func handleMonitoringState(_ monState: MonitoringState) {

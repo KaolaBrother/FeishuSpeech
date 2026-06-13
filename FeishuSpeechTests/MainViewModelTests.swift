@@ -276,3 +276,118 @@ final class EmptyResultFeedbackTests: XCTestCase {
         )
     }
 }
+
+// MARK: - AudioRecorderFailureTests
+
+/// Tests for issue #15: mid-recording capture failures must fail fast with a
+/// specific reason instead of letting later code transcribe empty/truncated data.
+@MainActor
+final class AudioRecorderFailureTests: XCTestCase {
+
+    func test_conversionExhaustion_publishesFormatConversionFailure() async {
+        let recorder = AudioRecorder()
+
+        recorder.simulateConversionErrorExhaustionForTesting()
+
+        XCTAssertEqual(
+            recorder.failure,
+            .formatConversion,
+            "reaching the conversion-error limit must publish a format-conversion failure"
+        )
+        XCTAssertFalse(
+            recorder.isRecording,
+            "conversion exhaustion must abort the active recording"
+        )
+    }
+
+    func test_runtimeError_publishesRuntimeFailure() async {
+        let recorder = AudioRecorder()
+
+        recorder.simulateRuntimeErrorForTesting()
+
+        XCTAssertEqual(
+            recorder.failure,
+            .runtime,
+            "AVCaptureSession runtime errors must publish a runtime failure"
+        )
+    }
+
+    func test_backgroundRuntimeError_cleansUpRecorderOnMainThread() async {
+        let recorder = ThreadTrackingFailureAudioRecorder()
+        let cleanupExpectation = expectation(description: "cleanup called")
+        recorder.onForceCleanup = { isMainThread in
+            recorder.forceCleanupWasMainThread = isMainThread
+            cleanupExpectation.fulfill()
+        }
+
+        recorder.forceSetRecordingForTesting(true)
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            recorder.simulateRuntimeErrorForTesting()
+        }
+
+        await fulfillment(of: [cleanupExpectation], timeout: 1.0)
+
+        XCTAssertEqual(
+            recorder.forceCleanupWasMainThread,
+            true,
+            "recorder failure delivered off-main must hop to main before forceCleanup mutates @Published state"
+        )
+    }
+
+    func test_viewModelRecorderFailure_cleansUpAndShowsSpecificError() async {
+        let recorder = FailureTrackingAudioRecorder()
+        let sut = MainViewModel(audioRecorder: recorder)
+
+        sut.status = .recording
+        recorder.forceSetRecordingForTesting(true)
+        recorder.resetTracking()
+
+        recorder.simulateDeviceLossForTesting()
+        await Task.yield()
+
+        XCTAssertEqual(
+            sut.status,
+            .error("录音失败：麦克风设备断开"),
+            "recorder device-loss failure must surface the specific failure message"
+        )
+        XCTAssertTrue(
+            recorder.forceCleanupCalled,
+            "MainViewModel must clean up the recorder when a mid-recording failure arrives"
+        )
+        XCTAssertFalse(
+            recorder.stopRecordingCalled,
+            "MainViewModel must not stop-and-transcribe after a recorder failure"
+        )
+    }
+}
+
+final class ThreadTrackingFailureAudioRecorder: AudioRecorder {
+    var onForceCleanup: ((Bool) -> Void)?
+    var forceCleanupWasMainThread: Bool?
+
+    override func forceCleanup() {
+        onForceCleanup?(Thread.isMainThread)
+        super.forceCleanup()
+    }
+}
+
+final class FailureTrackingAudioRecorder: AudioRecorder {
+    private(set) var forceCleanupCalled = false
+    private(set) var stopRecordingCalled = false
+
+    override func forceCleanup() {
+        forceCleanupCalled = true
+        super.forceCleanup()
+    }
+
+    override func stopRecording() -> Data {
+        stopRecordingCalled = true
+        return super.stopRecording()
+    }
+
+    func resetTracking() {
+        forceCleanupCalled = false
+        stopRecordingCalled = false
+    }
+}

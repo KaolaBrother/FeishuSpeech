@@ -9,8 +9,29 @@ private let targetSampleRate: Double = 16000
 private let maxRecordingSeconds: Double = 60.0
 private let estimatedMaxBufferSize = Int(targetSampleRate * 2 * maxRecordingSeconds)
 
+enum RecordingFailure: LocalizedError, Equatable {
+    case runtime
+    case interrupted
+    case deviceLost
+    case formatConversion
+
+    var errorDescription: String? {
+        switch self {
+        case .runtime:
+            return "录音失败：音频采集运行错误"
+        case .interrupted:
+            return "录音中断：音频采集被系统中断"
+        case .deviceLost:
+            return "录音失败：麦克风设备断开"
+        case .formatConversion:
+            return "录音失败：音频格式转换失败"
+        }
+    }
+}
+
 class AudioRecorder: NSObject, ObservableObject {
     @Published var isRecording = false
+    @Published private(set) var failure: RecordingFailure?
     
     private var captureSession: AVCaptureSession?
     private var audioDataOutput: AVCaptureAudioDataOutput?
@@ -27,6 +48,7 @@ class AudioRecorder: NSObject, ObservableObject {
     private var outputFormat: AVAudioFormat?
     private var conversionErrorCount = 0
     private let maxConversionErrors = 10
+    private var notificationObservers: [NSObjectProtocol] = []
     
     override init() {
         super.init()
@@ -58,6 +80,7 @@ class AudioRecorder: NSObject, ObservableObject {
         inputFormat = nil
         outputFormat = nil
         conversionErrorCount = 0
+        failure = nil
         
         logger.info("Starting fresh recording session")
         
@@ -91,6 +114,7 @@ class AudioRecorder: NSObject, ObservableObject {
 
             captureSession = session
             audioDataOutput = output
+            registerSessionNotifications(for: session, device: microphone)
 
             // Issue #9: startRunning() blocks — never on the main actor. Dispatch onto
             // sessionQueue, then flip @Published isRecording + deliver completion on main.
@@ -136,6 +160,7 @@ class AudioRecorder: NSObject, ObservableObject {
     
     func forceCleanup() {
         logger.info("Force cleanup - releasing all audio resources")
+        removeSessionNotifications()
 
         // Issue #9: session.stopRunning() blocks — tear the session down on sessionQueue,
         // never on the main actor. Hand off the captured session before nil'ing references.
@@ -166,18 +191,78 @@ class AudioRecorder: NSObject, ObservableObject {
         isRecording = false
         logger.info("Audio resources fully released")
     }
+
+    private func registerSessionNotifications(for session: AVCaptureSession, device: AVCaptureDevice) {
+        removeSessionNotifications()
+        let center = NotificationCenter.default
+        notificationObservers = [
+            center.addObserver(
+                forName: AVCaptureSession.runtimeErrorNotification,
+                object: session,
+                queue: nil
+            ) { [weak self] _ in
+                self?.abortRecording(with: .runtime)
+            },
+            center.addObserver(
+                forName: AVCaptureSession.wasInterruptedNotification,
+                object: session,
+                queue: nil
+            ) { [weak self] _ in
+                self?.abortRecording(with: .interrupted)
+            },
+            center.addObserver(
+                forName: AVCaptureDevice.wasDisconnectedNotification,
+                object: device,
+                queue: nil
+            ) { [weak self] _ in
+                self?.abortRecording(with: .deviceLost)
+            }
+        ]
+    }
+
+    private func removeSessionNotifications() {
+        let center = NotificationCenter.default
+        for observer in notificationObservers {
+            center.removeObserver(observer)
+        }
+        notificationObservers.removeAll()
+    }
+
+    private func abortRecording(with failure: RecordingFailure) {
+        logger.error("Recording failed: \(failure.localizedDescription)")
+        if Thread.isMainThread {
+            finishAbortingRecording(with: failure)
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.finishAbortingRecording(with: failure)
+            }
+        }
+    }
+
+    private func finishAbortingRecording(with failure: RecordingFailure) {
+        forceCleanup()
+        self.failure = failure
+    }
+
+    private func incrementConversionErrorAndAbortIfNeeded() {
+        conversionErrorCount += 1
+        if conversionErrorCount >= maxConversionErrors {
+            abortRecording(with: .formatConversion)
+        }
+    }
 }
 
 extension AudioRecorder: AVCaptureAudioDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         guard conversionErrorCount < maxConversionErrors else {
+            abortRecording(with: .formatConversion)
             return
         }
         
         guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer),
               let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else {
             logger.error("Invalid sample buffer")
-            conversionErrorCount += 1
+            incrementConversionErrorAndAbortIfNeeded()
             return
         }
         
@@ -188,7 +273,7 @@ extension AudioRecorder: AVCaptureAudioDataOutputSampleBufferDelegate {
         
         guard inputSampleRate > 0, inputChannels > 0, bitsPerChannel > 0 else {
             logger.error("Invalid audio format: rate=\(inputSampleRate), channels=\(inputChannels), bits=\(bitsPerChannel)")
-            conversionErrorCount += 1
+            incrementConversionErrorAndAbortIfNeeded()
             return
         }
         
@@ -199,7 +284,7 @@ extension AudioRecorder: AVCaptureAudioDataOutputSampleBufferDelegate {
             
             guard let inputFmt = inputFormat, let outputFmt = outputFormat else {
                 logger.error("Failed to create audio formats")
-                conversionErrorCount += 1
+                incrementConversionErrorAndAbortIfNeeded()
                 return
             }
             
@@ -209,7 +294,7 @@ extension AudioRecorder: AVCaptureAudioDataOutputSampleBufferDelegate {
                 logger.info("Converter created: \(inputSampleRate)Hz/\(bitsPerChannel)bit/\(inputChannels)ch -> \(targetSampleRate)Hz/16bit/1ch")
             } else {
                 logger.error("Failed to create audio converter")
-                conversionErrorCount += 1
+                incrementConversionErrorAndAbortIfNeeded()
                 return
             }
         }
@@ -223,7 +308,7 @@ extension AudioRecorder: AVCaptureAudioDataOutputSampleBufferDelegate {
               let converter = audioConverter,
               let inputBuffer = AVAudioPCMBuffer(pcmFormat: inputFmt, frameCapacity: AVAudioFrameCount(inputFrameCount)) else {
             logger.error("Failed to create input buffer")
-            conversionErrorCount += 1
+            incrementConversionErrorAndAbortIfNeeded()
             return
         }
         
@@ -247,7 +332,7 @@ extension AudioRecorder: AVCaptureAudioDataOutputSampleBufferDelegate {
             }
         } else {
             guard let channelData = inputBuffer.int16ChannelData?[0] else {
-                conversionErrorCount += 1
+                incrementConversionErrorAndAbortIfNeeded()
                 return
             }
             CMBlockBufferCopyDataBytes(blockBuffer, atOffset: 0, dataLength: dataLength, destination: channelData)
@@ -257,7 +342,7 @@ extension AudioRecorder: AVCaptureAudioDataOutputSampleBufferDelegate {
         guard outputFrameCount > 0,
               let outputBuffer = AVAudioPCMBuffer(pcmFormat: outputFmt, frameCapacity: outputFrameCount) else {
             logger.error("Failed to create output buffer")
-            conversionErrorCount += 1
+            incrementConversionErrorAndAbortIfNeeded()
             return
         }
         
@@ -271,7 +356,7 @@ extension AudioRecorder: AVCaptureAudioDataOutputSampleBufferDelegate {
         
         if let error = error {
             logger.error("Conversion error: \(error.localizedDescription)")
-            conversionErrorCount += 1
+            incrementConversionErrorAndAbortIfNeeded()
             return
         }
         
@@ -291,3 +376,24 @@ extension AudioRecorder: AVCaptureAudioDataOutputSampleBufferDelegate {
         }
     }
 }
+
+#if DEBUG
+extension AudioRecorder {
+    func forceSetRecordingForTesting(_ value: Bool) {
+        isRecording = value
+    }
+
+    func simulateRuntimeErrorForTesting() {
+        abortRecording(with: .runtime)
+    }
+
+    func simulateDeviceLossForTesting() {
+        abortRecording(with: .deviceLost)
+    }
+
+    func simulateConversionErrorExhaustionForTesting() {
+        conversionErrorCount = maxConversionErrors - 1
+        incrementConversionErrorAndAbortIfNeeded()
+    }
+}
+#endif

@@ -16,6 +16,26 @@ see `docs/decisions/D-1-01.md`):
 
 `forceCleanup()` is idempotent — calling it on an already-stopped session is a no-op.
 
+Issue #15 adds a fail-fast failure contract for capture failures and conversion-error
+exhaustion (see `docs/decisions/D-15-01.md`):
+
+- `AudioRecorder` publishes `@Published private(set) var failure: RecordingFailure?`.
+  `RecordingFailure` distinguishes `.runtime`, `.interrupted`, `.deviceLost`, and
+  `.formatConversion`.
+- `AVCaptureSession.runtimeErrorNotification` maps to `.runtime`,
+  `AVCaptureSession.wasInterruptedNotification` maps to `.interrupted`, and
+  `AVCaptureDevice.wasDisconnectedNotification` maps to `.deviceLost`.
+- Repeated sample-buffer or converter failures increment the conversion-error counter; reaching
+  `maxConversionErrors` aborts the recording with `.formatConversion`.
+- If the abort is delivered off-main, `AudioRecorder` dispatches to the main queue before
+  calling `forceCleanup()` and publishing `failure`. `forceCleanup()` still runs
+  `AVCaptureSession.stopRunning()` and session teardown on `sessionQueue`, so blocking session
+  work remains off the main actor.
+- `MainViewModel` observes `audioRecorder.$failure`; on failure it hides the overlay,
+  force-cleans the recorder, stops the max-duration timer, sets a specific error status, and
+  puts `HotKeyService` into `.error` with the same localized message. This path does not call
+  `stopRecording()` and does not start transcription.
+
 ## HotKeyService — state-machine contract
 
 `HotKeyService` drives the CGEventTap state machine: `idle -> pending (0.3 s) -> recording ->
@@ -81,6 +101,11 @@ tap is re-created.
 `PermissionManager` polls `IsSecureEventInputEnabled()` every 2 seconds. When active, the
 menu bar shows an orange "安全输入已启用，热键暂不可用" warning (issue #10). The hotkey
 suppression itself is enforced by the OS kernel; detection and display is the only recourse.
+
+The same 2-second `AppDelegate` poll also refreshes accessibility, microphone authorization,
+and secure-input status (issue #15). `PermissionManager.refreshMicrophoneStatus()` reads the
+current microphone authorization status without prompting and recomputes
+`allPermissionsGranted`, so permission changes made in System Settings are reflected at runtime.
 
 ## TextInputSimulator — clipboard-restore contract
 

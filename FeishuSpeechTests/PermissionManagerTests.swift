@@ -1,4 +1,5 @@
 import XCTest
+import AVFoundation
 import Combine
 import os.log
 @testable import FeishuSpeech
@@ -19,10 +20,12 @@ final class PermissionManagerTests: XCTestCase {
     override func setUp() async throws {
         try await super.setUp()
         sut = PermissionManager.shared
+        sut.resetStateForTesting()
         cancellables = Set<AnyCancellable>()
     }
 
     override func tearDown() async throws {
+        sut.resetStateForTesting()
         cancellables.removeAll()
         try await super.tearDown()
     }
@@ -126,5 +129,34 @@ final class PermissionManagerTests: XCTestCase {
             "Two state changes (false→true, true→false) must produce two published events"
         )
         XCTAssertEqual(publishedValues, [true, false], "Published sequence must match injected values")
+    }
+
+    // MARK: - Microphone permission refresh
+
+    func test_refreshMicrophoneStatus_usesInjectedAuthorizedProvider() {
+        sut.setMicrophoneAuthorizationStatusProviderForTesting { .authorized }
+
+        sut.refreshMicrophoneStatus()
+
+        XCTAssertTrue(
+            sut.microphoneGranted,
+            "refreshMicrophoneStatus() must set microphoneGranted from the injected authorization provider"
+        )
+    }
+
+    func test_refreshMicrophoneStatus_updatesAllPermissionsGrantedWhenMicrophoneChanges() {
+        sut.accessibilityGranted = true
+        sut.setMicrophoneAuthorizationStatusProviderForTesting { .authorized }
+        sut.refreshMicrophoneStatus()
+        XCTAssertTrue(sut.allPermissionsGranted)
+
+        sut.setMicrophoneAuthorizationStatusProviderForTesting { .denied }
+        sut.refreshMicrophoneStatus()
+
+        XCTAssertFalse(sut.microphoneGranted)
+        XCTAssertFalse(
+            sut.allPermissionsGranted,
+            "allPermissionsGranted must be recomputed when the runtime microphone status changes"
+        )
     }
 }

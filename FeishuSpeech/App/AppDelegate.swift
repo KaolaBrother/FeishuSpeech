@@ -24,6 +24,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             .autoconnect()
             .sink { _ in
                 PermissionManager.shared.refreshAccessibilityStatus()
+                PermissionManager.shared.refreshMicrophoneStatus()
                 PermissionManager.shared.refreshSecureInputStatus()
             }
 
