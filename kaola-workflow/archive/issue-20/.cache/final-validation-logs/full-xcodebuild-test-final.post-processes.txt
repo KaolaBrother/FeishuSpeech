@@ -1,0 +1,1 @@
+52133 /Users/ylpromax5/Workspace/feishuspeech/.kw/worktrees/issue-20/.kw/DerivedData/issue-20/Build/Products/Debug/FeishuSpeech.app/Contents/MacOS/FeishuSpeech -NSTreatUnknownArgumentsAsOpen NO -ApplePersistenceIgnoreState YES

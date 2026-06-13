@@ -1,0 +1,46 @@
+Test Suite 'Selected tests' started at 2026-06-13 19:25:38.361.
+Test Suite 'FeishuSpeechTests.xctest' started at 2026-06-13 19:25:38.361.
+Test Suite 'CoordinatorStateInterplayTests' started at 2026-06-13 19:25:38.361.
+Test Case '-[FeishuSpeechTests.CoordinatorStateInterplayTests test_duplicateTranscribingSignals_stopRecorderOnlyOnce]' started.
+Test Case '-[FeishuSpeechTests.CoordinatorStateInterplayTests test_duplicateTranscribingSignals_stopRecorderOnlyOnce]' passed (0.005 seconds).
+Test Case '-[FeishuSpeechTests.CoordinatorStateInterplayTests test_maxDurationTranscribing_thenDuplicateReleaseStopsRecorderOnlyOnce]' started.
+Test Case '-[FeishuSpeechTests.CoordinatorStateInterplayTests test_maxDurationTranscribing_thenDuplicateReleaseStopsRecorderOnlyOnce]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.CoordinatorStateInterplayTests test_transcriptionErrorDuringNewActiveRecording_doesNotClobberRecordingState]' started.
+Test Case '-[FeishuSpeechTests.CoordinatorStateInterplayTests test_transcriptionErrorDuringNewActiveRecording_doesNotClobberRecordingState]' passed (0.000 seconds).
+Test Suite 'CoordinatorStateInterplayTests' passed at 2026-06-13 19:25:38.367.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.006 (0.006) seconds
+Test Suite 'FeishuAPIServiceTests' started at 2026-06-13 19:25:38.367.
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_directHTTPParser_whenChunkDataMissingTerminatingCRLF_throwsInvalidResponse]' started.
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_directHTTPParser_whenChunkDataMissingTerminatingCRLF_throwsInvalidResponse]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_directHTTPParser_whenChunkExtensionsAndTrailersPresent_decodesBody]' started.
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_directHTTPParser_whenChunkExtensionsAndTrailersPresent_decodesBody]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_directHTTPParser_whenChunkSizeMalformed_throwsInvalidResponse]' started.
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_directHTTPParser_whenChunkSizeMalformed_throwsInvalidResponse]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_directHTTPParser_whenContentLengthHasExtraBytes_ignoresExtraBytes]' started.
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_directHTTPParser_whenContentLengthHasExtraBytes_ignoresExtraBytes]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_directHTTPParser_whenContentLengthInvalidOrNegative_throwsInvalidResponse]' started.
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_directHTTPParser_whenContentLengthInvalidOrNegative_throwsInvalidResponse]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_directHTTPParser_whenHeaderDelimiterMissing_waitsForMoreData]' started.
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_directHTTPParser_whenHeaderDelimiterMissing_waitsForMoreData]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_directHTTPParser_whenStatusLineMalformed_throwsInvalidResponse]' started.
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_directHTTPParser_whenStatusLineMalformed_throwsInvalidResponse]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_recognizeSpeech_whenAuthSucceeds_cachesTokenForSecondRequest]' started.
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_recognizeSpeech_whenAuthSucceeds_cachesTokenForSecondRequest]' passed (0.001 seconds).
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_recognizeSpeech_whenSpeechReturns400_clearsTokenAndRetriesWithFreshAuth]' started.
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_recognizeSpeech_whenSpeechReturns400_clearsTokenAndRetriesWithFreshAuth]' passed (1.064 seconds).
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_recognizeSpeech_whenSpeechReturns401_clearsTokenAndRetriesWithFreshAuth]' started.
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_recognizeSpeech_whenSpeechReturns401_clearsTokenAndRetriesWithFreshAuth]' passed (1.061 seconds).
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_withRetry_whenAuthFailed_doesNotRetryOrSleep]' started.
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_withRetry_whenAuthFailed_doesNotRetryOrSleep]' passed (0.001 seconds).
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_withRetry_whenGenericErrorsExhaust_rethrowsLastError]' started.
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_withRetry_whenGenericErrorsExhaust_rethrowsLastError]' passed (0.002 seconds).
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_withRetry_whenNetworkUnavailable_preflightAvoidsOperation]' started.
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_withRetry_whenNetworkUnavailable_preflightAvoidsOperation]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_withRetry_whenRetriableError_recordsRetryDelaysWithoutSleeping]' started.
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_withRetry_whenRetriableError_recordsRetryDelaysWithoutSleeping]' passed (0.000 seconds).
+Test Suite 'FeishuAPIServiceTests' passed at 2026-06-13 19:25:40.499.
+	 Executed 14 tests, with 0 failures (0 unexpected) in 2.131 (2.132) seconds
+Test Suite 'FeishuSpeechTests.xctest' passed at 2026-06-13 19:25:40.499.
+	 Executed 17 tests, with 0 failures (0 unexpected) in 2.137 (2.138) seconds
+Test Suite 'Selected tests' passed at 2026-06-13 19:25:40.499.
+	 Executed 17 tests, with 0 failures (0 unexpected) in 2.137 (2.139) seconds

@@ -7,7 +7,7 @@ This file mirrors active unfinished work. GitHub issues are the source of truth 
 
 | Issue | Title | Status | Workflow Project | Next Step |
 |-------|-------|--------|------------------|-----------|
-| #20 | Test coverage: direct HTTP client, retry logic, and state-machine interplay untested; MockURLProtocol is dead code | open | — | — |
+| none | No active work | — | — | — |
 
 ## Rules
 

@@ -1,0 +1,1 @@
+xcodebuild -scheme FeishuSpeech -configuration Release build

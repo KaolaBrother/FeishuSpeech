@@ -1,0 +1,1 @@
+xcodebuild -scheme FeishuSpeech -destination platform=macOS -derivedDataPath .kw/DerivedData/issue-20 build-for-testing
