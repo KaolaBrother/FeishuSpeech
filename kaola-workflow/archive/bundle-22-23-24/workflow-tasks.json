@@ -1,0 +1,30 @@
+{
+  "source_plan_hash": "f58f1c7cb58521fa21759fd5211aef5ed630d7a49eff5a38820b9a1a12ac99e5",
+  "tasks": [
+    {
+      "id": "impl-auto-clear-tap-error",
+      "role": "tdd-guide",
+      "status": "completed",
+      "ledger_status": "complete"
+    },
+    {
+      "id": "review-code",
+      "role": "code-reviewer",
+      "status": "completed",
+      "ledger_status": "complete"
+    },
+    {
+      "id": "docs-auto-clear-policy",
+      "role": "doc-updater",
+      "status": "completed",
+      "ledger_status": "complete"
+    },
+    {
+      "id": "finalize",
+      "role": "finalize",
+      "status": "completed",
+      "ledger_status": "complete"
+    }
+  ],
+  "last_synced_from_ledger": "2026-06-13T05:33:52.770Z"
+}
