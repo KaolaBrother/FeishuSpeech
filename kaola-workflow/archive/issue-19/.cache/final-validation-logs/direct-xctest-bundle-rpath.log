@@ -1,0 +1,35 @@
+Test Suite 'All tests' started at 2026-06-13 17:42:28.287.
+Test Suite 'FeishuSpeechTests.xctest' started at 2026-06-13 17:42:28.288.
+Test Suite 'AppSettingsCredentialStorageTests' started at 2026-06-13 17:42:28.288.
+Test Case '-[FeishuSpeechTests.AppSettingsCredentialStorageTests test_codableEncodingOmitsCredentials]' started.
+Test Case '-[FeishuSpeechTests.AppSettingsCredentialStorageTests test_codableEncodingOmitsCredentials]' passed (0.004 seconds).
+Test Case '-[FeishuSpeechTests.AppSettingsCredentialStorageTests test_keychainCredentialStore_saveReadAndDeleteUseIsolatedService]' started.
+Test Case '-[FeishuSpeechTests.AppSettingsCredentialStorageTests test_keychainCredentialStore_saveReadAndDeleteUseIsolatedService]' passed (0.010 seconds).
+Test Case '-[FeishuSpeechTests.AppSettingsCredentialStorageTests test_load_keepsLegacyDefaultsWhenCredentialMigrationSaveFails]' started.
+Test Case '-[FeishuSpeechTests.AppSettingsCredentialStorageTests test_load_keepsLegacyDefaultsWhenCredentialMigrationSaveFails]' passed (0.003 seconds).
+Test Case '-[FeishuSpeechTests.AppSettingsCredentialStorageTests test_load_migratesLegacyCredentialsToCredentialStoreAndScrubsDefaults]' started.
+Test Case '-[FeishuSpeechTests.AppSettingsCredentialStorageTests test_load_migratesLegacyCredentialsToCredentialStoreAndScrubsDefaults]' passed (0.001 seconds).
+Test Case '-[FeishuSpeechTests.AppSettingsCredentialStorageTests test_load_migratesStandaloneCredentialsWhenEncodedSettingsHasNoCredentials]' started.
+Test Case '-[FeishuSpeechTests.AppSettingsCredentialStorageTests test_load_migratesStandaloneCredentialsWhenEncodedSettingsHasNoCredentials]' passed (0.001 seconds).
+Test Case '-[FeishuSpeechTests.AppSettingsCredentialStorageTests test_load_prefersStandaloneCredentialsWhenTheyDifferFromEncodedLegacyValues]' started.
+Test Case '-[FeishuSpeechTests.AppSettingsCredentialStorageTests test_load_prefersStandaloneCredentialsWhenTheyDifferFromEncodedLegacyValues]' passed (0.001 seconds).
+Test Case '-[FeishuSpeechTests.AppSettingsCredentialStorageTests test_save_withBlankCredentialDeletesThatCredential]' started.
+Test Case '-[FeishuSpeechTests.AppSettingsCredentialStorageTests test_save_withBlankCredentialDeletesThatCredential]' passed (0.001 seconds).
+Test Case '-[FeishuSpeechTests.AppSettingsCredentialStorageTests test_save_writesCredentialsToCredentialStoreOnlyAndPreservesPreferences]' started.
+Test Case '-[FeishuSpeechTests.AppSettingsCredentialStorageTests test_save_writesCredentialsToCredentialStoreOnlyAndPreservesPreferences]' passed (0.001 seconds).
+Test Case '-[FeishuSpeechTests.AppSettingsCredentialStorageTests test_saveAfterCredentialReadFailureDoesNotDeleteExistingCredential]' started.
+Test Case '-[FeishuSpeechTests.AppSettingsCredentialStorageTests test_saveAfterCredentialReadFailureDoesNotDeleteExistingCredential]' passed (0.001 seconds).
+Test Case '-[FeishuSpeechTests.AppSettingsCredentialStorageTests test_saveAfterFailedEncodedMigrationKeepsLegacySettingsPayload]' started.
+Test Case '-[FeishuSpeechTests.AppSettingsCredentialStorageTests test_saveAfterFailedEncodedMigrationKeepsLegacySettingsPayload]' passed (0.001 seconds).
+Test Suite 'AppSettingsCredentialStorageTests' passed at 2026-06-13 17:42:28.313.
+	 Executed 10 tests, with 0 failures (0 unexpected) in 0.025 (0.025) seconds
+Test Suite 'AudioRecorderFailureTests' started at 2026-06-13 17:42:28.313.
+Test Case '-[FeishuSpeechTests.AudioRecorderFailureTests test_backgroundRuntimeError_cleansUpRecorderOnMainThread]' started.
+Test Case '-[FeishuSpeechTests.AudioRecorderFailureTests test_backgroundRuntimeError_cleansUpRecorderOnMainThread]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.AudioRecorderFailureTests test_conversionExhaustion_publishesFormatConversionFailure]' started.
+Test Case '-[FeishuSpeechTests.AudioRecorderFailureTests test_conversionExhaustion_publishesFormatConversionFailure]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.AudioRecorderFailureTests test_runtimeError_publishesRuntimeFailure]' started.
+Test Case '-[FeishuSpeechTests.AudioRecorderFailureTests test_runtimeError_publishesRuntimeFailure]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.AudioRecorderFailureTests test_viewModelRecorderFailure_cleansUpAndShowsSpecificError]' started.
+
+[watchdog] timeout after 60s; terminating process group

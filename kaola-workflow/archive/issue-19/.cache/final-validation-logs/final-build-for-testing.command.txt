@@ -1,0 +1,1 @@
+xcodebuild -scheme FeishuSpeech -destination platform=macOS build-for-testing

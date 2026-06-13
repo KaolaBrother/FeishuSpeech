@@ -1,0 +1,6 @@
+Test Suite 'Selected tests' started at 2026-06-13 17:53:42.072.
+Test Suite 'FeishuSpeechTests.xctest' started at 2026-06-13 17:53:42.072.
+Test Suite 'MainViewModelTests' started at 2026-06-13 17:53:42.072.
+Test Case '-[FeishuSpeechTests.MainViewModelTests test_didWake_resetsAPIAndRecoversHotKeyState]' started.
+
+[watchdog] timeout after 20s; terminating process group

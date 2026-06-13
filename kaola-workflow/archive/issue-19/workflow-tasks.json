@@ -1,0 +1,54 @@
+{
+  "source_plan_hash": "d3634172e5e867182b4c1dc1e966ec302f4c89944ce0a5c114e76ef3e74af7a4",
+  "tasks": [
+    {
+      "id": "n1-current-wake-gap-survey",
+      "role": "code-explorer",
+      "status": "completed",
+      "ledger_status": "complete"
+    },
+    {
+      "id": "n2-macos-wake-api-contract",
+      "role": "knowledge-lookup",
+      "status": "completed",
+      "ledger_status": "complete"
+    },
+    {
+      "id": "n3-hotkey-wake-health",
+      "role": "tdd-guide",
+      "status": "completed",
+      "ledger_status": "complete"
+    },
+    {
+      "id": "n4-wake-coordinator-api-reset",
+      "role": "tdd-guide",
+      "status": "completed",
+      "ledger_status": "complete"
+    },
+    {
+      "id": "n5-code-review",
+      "role": "code-reviewer",
+      "status": "completed",
+      "ledger_status": "complete"
+    },
+    {
+      "id": "n6-security-review",
+      "role": "security-reviewer",
+      "status": "completed",
+      "ledger_status": "complete"
+    },
+    {
+      "id": "n7-docs",
+      "role": "doc-updater",
+      "status": "completed",
+      "ledger_status": "complete"
+    },
+    {
+      "id": "n8-finalize",
+      "role": "finalize",
+      "status": "completed",
+      "ledger_status": "complete"
+    }
+  ],
+  "last_synced_from_ledger": "2026-06-13T10:19:25.641Z"
+}

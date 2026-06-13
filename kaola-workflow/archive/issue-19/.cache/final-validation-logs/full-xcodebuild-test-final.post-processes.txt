@@ -1,0 +1,1 @@
+20702 /Users/ylpromax5/Library/Developer/Xcode/DerivedData/FeishuSpeech-aonavbtpjnnifcepxwicoogwqdiz/Build/Products/Debug/FeishuSpeech.app/Contents/MacOS/FeishuSpeech -NSTreatUnknownArgumentsAsOpen NO -ApplePersistenceIgnoreState YES

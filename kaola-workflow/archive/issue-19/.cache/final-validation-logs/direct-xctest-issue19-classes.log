@@ -1,0 +1,96 @@
+Test Suite 'Selected tests' started at 2026-06-13 17:44:05.879.
+Test Suite 'FeishuSpeechTests.xctest' started at 2026-06-13 17:44:05.880.
+Test Suite 'FeishuAPIServiceTests' started at 2026-06-13 17:44:05.880.
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_authResponse_decodesExpireFromFeishuPayload]' started.
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_authResponse_decodesExpireFromFeishuPayload]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_directHTTPParser_whenChunkedBodyLacksTerminalChunk_waitsForMoreData]' started.
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_directHTTPParser_whenChunkedBodyLacksTerminalChunk_waitsForMoreData]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_directHTTPParser_whenCloseDelimited_waitsUntilConnectionClose]' started.
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_directHTTPParser_whenCloseDelimited_waitsUntilConnectionClose]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_directHTTPParser_whenContentLengthBodyComplete_returnsResponse]' started.
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_directHTTPParser_whenContentLengthBodyComplete_returnsResponse]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_directHTTPParser_whenContentLengthBodyIncomplete_waitsForMoreData]' started.
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_directHTTPParser_whenContentLengthBodyIncomplete_waitsForMoreData]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_directHTTPParser_whenTerminalChunkedBodyComplete_returnsDecodedBody]' started.
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_directHTTPParser_whenTerminalChunkedBodyComplete_returnsDecodedBody]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_resetStateForWake_clearsTokenNetworkErrorAndRefreshesAvailability]' started.
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_resetStateForWake_clearsTokenNetworkErrorAndRefreshesAvailability]' passed (0.001 seconds).
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_sendDirectRequest_whenDirectSenderCancels_doesNotTryLaterIPsOrFallback]' started.
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_sendDirectRequest_whenDirectSenderCancels_doesNotTryLaterIPsOrFallback]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_timeoutFallback_parsesCompleteBufferedContentLengthResponse]' started.
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_timeoutFallback_parsesCompleteBufferedContentLengthResponse]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_timeoutFallback_rejectsIncompleteBufferedContentLengthBody]' started.
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_timeoutFallback_rejectsIncompleteBufferedContentLengthBody]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_tokenLifetimeForMissingOrInvalidExpire_fallsBackToDefault]' started.
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_tokenLifetimeForMissingOrInvalidExpire_fallsBackToDefault]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_tokenLifetimeForShortPositiveExpire_expiresImmediatelyInsteadOfDefaultFallback]' started.
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_tokenLifetimeForShortPositiveExpire_expiresImmediatelyInsteadOfDefaultFallback]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_tokenLifetimeForValidExpire_usesExpireMinusSafetyMargin]' started.
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_tokenLifetimeForValidExpire_usesExpireMinusSafetyMargin]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_withRetry_whenOperationThrowsCancellation_attemptsOnceAndRethrows]' started.
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_withRetry_whenOperationThrowsCancellation_attemptsOnceAndRethrows]' passed (0.000 seconds).
+Test Suite 'FeishuAPIServiceTests' passed at 2026-06-13 17:44:05.883.
+	 Executed 14 tests, with 0 failures (0 unexpected) in 0.002 (0.003) seconds
+Test Suite 'HotKeyServiceTests' started at 2026-06-13 17:44:05.883.
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_cancelled_isNotActive]' started.
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_cancelled_isNotActive]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_error_isNotActive]' started.
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_error_isNotActive]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_fnReleasedDuringTranscribing_stateRemainsTranscribing]' started.
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_fnReleasedDuringTranscribing_stateRemainsTranscribing]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_forceTranscribing_fromRecording_transitionsToTranscribing]' started.
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_forceTranscribing_fromRecording_transitionsToTranscribing]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_forceTranscribing_whenAlreadyTranscribing_isNoOp]' started.
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_forceTranscribing_whenAlreadyTranscribing_isNoOp]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_idle_isNotActive]' started.
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_idle_isNotActive]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_idle_shouldNotShowOverlay]' started.
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_idle_shouldNotShowOverlay]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_initialState_isIdle]' started.
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_initialState_isIdle]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_monitoringState_publishesFailedOnEachRetryAttempt]' started.
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_monitoringState_publishesFailedOnEachRetryAttempt]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_pending_isActive]' started.
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_pending_isActive]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_pending_shouldNotShowOverlay]' started.
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_pending_shouldNotShowOverlay]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_postTimeoutResync_fnStillHeld_doesNotTriggerRelease]' started.
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_postTimeoutResync_fnStillHeld_doesNotTriggerRelease]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_postTimeoutResync_missedFnRelease_triggersHandleFnReleased]' started.
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_postTimeoutResync_missedFnRelease_triggersHandleFnReleased]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_recording_isActive]' started.
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_recording_isActive]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_recording_shouldShowOverlay]' started.
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_recording_shouldShowOverlay]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_recoverAfterWake_whenTapIsDisabled_restartsMonitoringThroughLifecycle]' started.
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_recoverAfterWake_whenTapIsDisabled_restartsMonitoringThroughLifecycle]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_recoverAfterWake_whenTapIsMissing_restartsMonitoringThroughLifecycle]' started.
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_recoverAfterWake_whenTapIsMissing_restartsMonitoringThroughLifecycle]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_recoverAfterWake_whenTapIsPresentAndEnabled_keepsMonitoringActiveAndClearsStaleInput]' started.
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_recoverAfterWake_whenTapIsPresentAndEnabled_keepsMonitoringActiveAndClearsStaleInput]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_resetToIdle_setsStateToIdle]' started.
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_resetToIdle_setsStateToIdle]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_retryBackoff_isExponentialWithCap]' started.
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_retryBackoff_isExponentialWithCap]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_setError_setsErrorState]' started.
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_setError_setsErrorState]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_startMonitoring_whenNotTrusted_setsMonitoringStateToFailed]' started.
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_startMonitoring_whenNotTrusted_setsMonitoringStateToFailed]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_startMonitoring_whenTapCreationFails_setsMonitoringStateToFailed]' started.
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_startMonitoring_whenTapCreationFails_setsMonitoringStateToFailed]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_startMonitoring_whenTapCreationSucceeds_setsMonitoringStateToActive]' started.
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_startMonitoring_whenTapCreationSucceeds_setsMonitoringStateToActive]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_stopMonitoring_resetsPreviousFlags]' started.
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_stopMonitoring_resetsPreviousFlags]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_stopMonitoring_setsMonitoringStateToStopped]' started.
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_stopMonitoring_setsMonitoringStateToStopped]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_tapRunLoop_isNotMainRunLoop]' started.
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_tapRunLoop_isNotMainRunLoop]' passed (0.012 seconds).
+Test Suite 'HotKeyServiceTests' passed at 2026-06-13 17:44:05.898.
+	 Executed 27 tests, with 0 failures (0 unexpected) in 0.015 (0.015) seconds
+Test Suite 'MainViewModelTests' started at 2026-06-13 17:44:05.898.
+Test Case '-[FeishuSpeechTests.MainViewModelTests test_applicationLaunchAndTerminate_manageWorkspaceSleepWakeObservers]' started.
+Test Case '-[FeishuSpeechTests.MainViewModelTests test_applicationLaunchAndTerminate_manageWorkspaceSleepWakeObservers]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.MainViewModelTests test_cleanup_releasesStateCancellable]' started.
+
+[watchdog] timeout after 90s; terminating process group

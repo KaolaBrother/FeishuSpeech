@@ -1,0 +1,26 @@
+{
+  "batchId": "batch-n1-current-wake-gap-survey-n2-macos-wake-api-contract",
+  "state": "joined",
+  "kind": "read_only",
+  "members": [
+    {
+      "id": "n1-current-wake-gap-survey",
+      "role": "code-explorer",
+      "model": "sonnet",
+      "declared_write_set": "—",
+      "kind": "read_only",
+      "baseline": "recorded",
+      "sealed": true
+    },
+    {
+      "id": "n2-macos-wake-api-contract",
+      "role": "knowledge-lookup",
+      "model": "sonnet",
+      "declared_write_set": "—",
+      "kind": "read_only",
+      "baseline": "recorded",
+      "sealed": true
+    }
+  ],
+  "createdAt": "2026-06-13T08:18:02.273Z"
+}

@@ -1,0 +1,1 @@
+xcrun xctest -XCTest FeishuSpeechTests.MainViewModelTests/test_didWake_resetsAPIAndRecoversHotKeyState /Users/ylpromax5/Library/Developer/Xcode/DerivedData/FeishuSpeech-aonavbtpjnnifcepxwicoogwqdiz/Build/Products/Debug/FeishuSpeech.app/Contents/PlugIns/FeishuSpeechTests.xctest

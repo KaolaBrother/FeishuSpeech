@@ -1,0 +1,11 @@
+Test Suite 'Selected tests' started at 2026-06-13 17:57:13.404.
+Test Suite 'FeishuSpeechTests.xctest' started at 2026-06-13 17:57:13.405.
+Test Suite 'MainViewModelTests' started at 2026-06-13 17:57:13.405.
+Test Case '-[FeishuSpeechTests.MainViewModelTests test_didWake_resetsAPIAndRecoversHotKeyState]' started.
+Test Case '-[FeishuSpeechTests.MainViewModelTests test_didWake_resetsAPIAndRecoversHotKeyState]' passed (0.002 seconds).
+Test Suite 'MainViewModelTests' passed at 2026-06-13 17:57:13.407.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.002 (0.002) seconds
+Test Suite 'FeishuSpeechTests.xctest' passed at 2026-06-13 17:57:13.407.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.002 (0.002) seconds
+Test Suite 'Selected tests' passed at 2026-06-13 17:57:13.407.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.002 (0.003) seconds

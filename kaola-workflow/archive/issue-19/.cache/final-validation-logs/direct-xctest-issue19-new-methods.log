@@ -1,0 +1,22 @@
+Test Suite 'Selected tests' started at 2026-06-13 17:49:44.226.
+Test Suite 'FeishuSpeechTests.xctest' started at 2026-06-13 17:49:44.227.
+Test Suite 'FeishuAPIServiceTests' started at 2026-06-13 17:49:44.227.
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_resetStateForWake_clearsTokenNetworkErrorAndRefreshesAvailability]' started.
+Test Case '-[FeishuSpeechTests.FeishuAPIServiceTests test_resetStateForWake_clearsTokenNetworkErrorAndRefreshesAvailability]' passed (0.001 seconds).
+Test Suite 'FeishuAPIServiceTests' passed at 2026-06-13 17:49:44.228.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.001 (0.001) seconds
+Test Suite 'HotKeyServiceTests' started at 2026-06-13 17:49:44.228.
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_recoverAfterWake_whenTapIsDisabled_restartsMonitoringThroughLifecycle]' started.
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_recoverAfterWake_whenTapIsDisabled_restartsMonitoringThroughLifecycle]' passed (0.001 seconds).
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_recoverAfterWake_whenTapIsMissing_restartsMonitoringThroughLifecycle]' started.
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_recoverAfterWake_whenTapIsMissing_restartsMonitoringThroughLifecycle]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_recoverAfterWake_whenTapIsPresentAndEnabled_keepsMonitoringActiveAndClearsStaleInput]' started.
+Test Case '-[FeishuSpeechTests.HotKeyServiceTests test_recoverAfterWake_whenTapIsPresentAndEnabled_keepsMonitoringActiveAndClearsStaleInput]' passed (0.000 seconds).
+Test Suite 'HotKeyServiceTests' passed at 2026-06-13 17:49:44.229.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.001 (0.001) seconds
+Test Suite 'MainViewModelTests' started at 2026-06-13 17:49:44.229.
+Test Case '-[FeishuSpeechTests.MainViewModelTests test_applicationLaunchAndTerminate_manageWorkspaceSleepWakeObservers]' started.
+Test Case '-[FeishuSpeechTests.MainViewModelTests test_applicationLaunchAndTerminate_manageWorkspaceSleepWakeObservers]' passed (0.000 seconds).
+Test Case '-[FeishuSpeechTests.MainViewModelTests test_didWake_resetsAPIAndRecoversHotKeyState]' started.
+
+[watchdog] timeout after 60s; terminating process group
