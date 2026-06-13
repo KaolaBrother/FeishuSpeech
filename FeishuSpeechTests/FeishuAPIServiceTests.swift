@@ -6,10 +6,17 @@ import os.log
 private let logger = Logger(subsystem: "com.feishuspeech.app", category: "FeishuAPIServiceTests")
 
 final class FeishuAPIServiceTests: XCTestCase {
+    private let service = FeishuAPIService.shared
 
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
+        try await super.setUp()
         logger.debug("Starting FeishuAPIServiceTests")
+        await service.resetForTesting()
+    }
+
+    override func tearDown() async throws {
+        await service.resetForTesting()
+        try await super.tearDown()
     }
 
     func test_authResponse_decodesExpireFromFeishuPayload() throws {
@@ -102,6 +109,79 @@ final class FeishuAPIServiceTests: XCTestCase {
         XCTAssertEqual(String(data: closedResponse.body, encoding: .utf8), "close body")
     }
 
+    func test_directHTTPParser_whenStatusLineMalformed_throwsInvalidResponse() {
+        XCTAssertThrowsError(
+            try FeishuAPIService.parseCompleteDirectHTTPResponseForTesting(
+                Data("HTTP/1.1 OK\r\nContent-Length: 0\r\n\r\n".utf8)
+            )
+        ) { error in
+            assertInvalidResponse(error)
+        }
+    }
+
+    func test_directHTTPParser_whenContentLengthInvalidOrNegative_throwsInvalidResponse() {
+        for contentLength in ["abc", "-1"] {
+            XCTAssertThrowsError(
+                try FeishuAPIService.parseCompleteDirectHTTPResponseForTesting(
+                    httpResponse(headers: ["Content-Length": contentLength], body: "")
+                )
+            ) { error in
+                assertInvalidResponse(error)
+            }
+        }
+    }
+
+    func test_directHTTPParser_whenHeaderDelimiterMissing_waitsForMoreData() throws {
+        let response = try FeishuAPIService.parseCompleteDirectHTTPResponseForTesting(
+            Data("HTTP/1.1 200 OK\r\nContent-Length: 5\r\nhello".utf8)
+        )
+
+        XCTAssertNil(response)
+    }
+
+    func test_directHTTPParser_whenChunkSizeMalformed_throwsInvalidResponse() {
+        XCTAssertThrowsError(
+            try FeishuAPIService.parseCompleteDirectHTTPResponseForTesting(
+                httpResponse(headers: ["Transfer-Encoding": "chunked"], body: "zz\r\nhello\r\n0\r\n\r\n")
+            )
+        ) { error in
+            assertInvalidResponse(error)
+        }
+    }
+
+    func test_directHTTPParser_whenChunkDataMissingTerminatingCRLF_throwsInvalidResponse() {
+        XCTAssertThrowsError(
+            try FeishuAPIService.parseCompleteDirectHTTPResponseForTesting(
+                httpResponse(headers: ["Transfer-Encoding": "chunked"], body: "5\r\nhello0\r\n\r\n")
+            )
+        ) { error in
+            assertInvalidResponse(error)
+        }
+    }
+
+    func test_directHTTPParser_whenChunkExtensionsAndTrailersPresent_decodesBody() throws {
+        let response = try XCTUnwrap(
+            FeishuAPIService.parseCompleteDirectHTTPResponseForTesting(
+                httpResponse(
+                    headers: ["Transfer-Encoding": "chunked"],
+                    body: "5;foo=bar\r\nhello\r\n0\r\nX-Trailer: yes\r\n\r\n"
+                )
+            )
+        )
+
+        XCTAssertEqual(String(data: response.body, encoding: .utf8), "hello")
+    }
+
+    func test_directHTTPParser_whenContentLengthHasExtraBytes_ignoresExtraBytes() throws {
+        let response = try XCTUnwrap(
+            FeishuAPIService.parseCompleteDirectHTTPResponseForTesting(
+                httpResponse(headers: ["Content-Length": "5"], body: "hello ignored")
+            )
+        )
+
+        XCTAssertEqual(String(data: response.body, encoding: .utf8), "hello")
+    }
+
     func test_timeoutFallback_parsesCompleteBufferedContentLengthResponse() throws {
         let response = try FeishuAPIService.parseTimeoutBufferedDirectHTTPResponseForTesting(
             httpResponse(headers: ["Content-Length": "11"], body: "hello world")
@@ -121,7 +201,6 @@ final class FeishuAPIServiceTests: XCTestCase {
     }
 
     func test_withRetry_whenOperationThrowsCancellation_attemptsOnceAndRethrows() async {
-        let service = FeishuAPIService.shared
         await service.setNetworkAvailableForTesting(true)
         var attempts = 0
 
@@ -169,8 +248,125 @@ final class FeishuAPIServiceTests: XCTestCase {
         XCTAssertEqual(fallbackAttempts, 0)
     }
 
+    func test_withRetry_whenRetriableError_recordsRetryDelaysWithoutSleeping() async throws {
+        var attempts = 0
+        var delays: [TimeInterval] = []
+        await service.setRetrySleeperForTesting { delay in
+            delays.append(delay)
+        }
+
+        try await service.withRetryForTesting(maxAttempts: 3) {
+            attempts += 1
+            if attempts < 3 {
+                throw FeishuAPIService.APIError.timeout
+            }
+        }
+
+        XCTAssertEqual(attempts, 3)
+        XCTAssertEqual(delays, [1.0, 2.0])
+    }
+
+    func test_withRetry_whenAuthFailed_doesNotRetryOrSleep() async {
+        var attempts = 0
+        var delays: [TimeInterval] = []
+        await service.setRetrySleeperForTesting { delay in
+            delays.append(delay)
+        }
+
+        do {
+            try await service.withRetryForTesting(maxAttempts: 3) {
+                attempts += 1
+                throw FeishuAPIService.APIError.authFailed("bad secret")
+            }
+            XCTFail("withRetryForTesting must throw authFailed")
+        } catch FeishuAPIService.APIError.authFailed {
+            // Expected.
+        } catch {
+            XCTFail("Expected authFailed, got \(error)")
+        }
+
+        XCTAssertEqual(attempts, 1)
+        XCTAssertEqual(delays, [])
+    }
+
+    func test_withRetry_whenGenericErrorsExhaust_rethrowsLastError() async {
+        struct RetryProbeError: Error, Equatable {
+            let id: Int
+        }
+
+        var attempts = 0
+        var delays: [TimeInterval] = []
+        await service.setRetrySleeperForTesting { delay in
+            delays.append(delay)
+        }
+
+        do {
+            try await service.withRetryForTesting(maxAttempts: 3) {
+                attempts += 1
+                throw RetryProbeError(id: attempts)
+            }
+            XCTFail("withRetryForTesting must throw the last generic error")
+        } catch let error as RetryProbeError {
+            XCTAssertEqual(error, RetryProbeError(id: 3))
+        } catch {
+            XCTFail("Expected RetryProbeError, got \(error)")
+        }
+
+        XCTAssertEqual(attempts, 3)
+        XCTAssertEqual(delays, [1.0, 2.0])
+    }
+
+    func test_withRetry_whenNetworkUnavailable_preflightAvoidsOperation() async {
+        await service.setNetworkAvailableForTesting(false)
+        var attempts = 0
+
+        do {
+            try await service.withRetryForTesting(maxAttempts: 3) {
+                attempts += 1
+            }
+            XCTFail("withRetryForTesting must throw networkUnavailable")
+        } catch FeishuAPIService.APIError.networkUnavailable {
+            // Expected.
+        } catch {
+            XCTFail("Expected networkUnavailable, got \(error)")
+        }
+
+        XCTAssertEqual(attempts, 0)
+    }
+
+    func test_recognizeSpeech_whenAuthSucceeds_cachesTokenForSecondRequest() async throws {
+        let transport = MockFeishuRequestSequence([
+            .success(jsonResponse(authJSON(token: "cached-token"))),
+            .success(jsonResponse(speechJSON(text: "first"))),
+            .success(jsonResponse(speechJSON(text: "second")))
+        ])
+        await service.setDirectRequestSenderForTesting(transport.send)
+
+        let first = try await service.recognizeSpeech(audioData: Data([1, 2]), appId: "app", appSecret: "secret")
+        let second = try await service.recognizeSpeech(audioData: Data([3, 4]), appId: "app", appSecret: "secret")
+
+        XCTAssertEqual(first, "first")
+        XCTAssertEqual(second, "second")
+        XCTAssertEqual(transport.requestPaths(), [
+            FeishuAPIService.authPathForTesting,
+            FeishuAPIService.speechPathForTesting,
+            FeishuAPIService.speechPathForTesting
+        ])
+        XCTAssertEqual(transport.authorizationHeaders(), [
+            "Bearer cached-token",
+            "Bearer cached-token"
+        ])
+    }
+
+    func test_recognizeSpeech_whenSpeechReturns400_clearsTokenAndRetriesWithFreshAuth() async throws {
+        try await assertSpeechHTTPErrorRefreshesToken(statusCode: 400)
+    }
+
+    func test_recognizeSpeech_whenSpeechReturns401_clearsTokenAndRetriesWithFreshAuth() async throws {
+        try await assertSpeechHTTPErrorRefreshesToken(statusCode: 401)
+    }
+
     func test_resetStateForWake_clearsTokenNetworkErrorAndRefreshesAvailability() async {
-        let service = FeishuAPIService.shared
         await service.seedStateForWakeTesting(
             cachedToken: "stale-token",
             tokenExpiresIn: 600,
@@ -186,6 +382,30 @@ final class FeishuAPIServiceTests: XCTestCase {
         XCTAssertNil(snapshot.lastNetworkErrorDescription, "wake reset must clear stale network error")
         XCTAssertTrue(snapshot.isNetworkAvailable, "wake reset must allow fresh network checks after wake")
     }
+
+    private func assertSpeechHTTPErrorRefreshesToken(statusCode: Int) async throws {
+        let transport = MockFeishuRequestSequence([
+            .success(jsonResponse(authJSON(token: "stale-token"))),
+            .success(jsonResponse(["code": 999, "msg": "expired"], statusCode: statusCode)),
+            .success(jsonResponse(authJSON(token: "fresh-token"))),
+            .success(jsonResponse(speechJSON(text: "fresh result")))
+        ])
+        await service.setDirectRequestSenderForTesting(transport.send)
+
+        let result = try await service.recognizeSpeech(audioData: Data([1, 2]), appId: "app", appSecret: "secret")
+
+        XCTAssertEqual(result, "fresh result")
+        XCTAssertEqual(transport.requestPaths(), [
+            FeishuAPIService.authPathForTesting,
+            FeishuAPIService.speechPathForTesting,
+            FeishuAPIService.authPathForTesting,
+            FeishuAPIService.speechPathForTesting
+        ])
+        XCTAssertEqual(transport.authorizationHeaders(), [
+            "Bearer stale-token",
+            "Bearer fresh-token"
+        ])
+    }
 }
 
 private func httpResponse(headers: [String: String], body: String) -> Data {
@@ -200,4 +420,35 @@ private func assertTimeout(_ error: Error, file: StaticString = #filePath, line:
         XCTFail("Expected APIError.timeout, got \(error)", file: file, line: line)
         return
     }
+}
+
+private func assertInvalidResponse(_ error: Error, file: StaticString = #filePath, line: UInt = #line) {
+    guard case FeishuAPIService.APIError.invalidResponse = error else {
+        XCTFail("Expected APIError.invalidResponse, got \(error)", file: file, line: line)
+        return
+    }
+}
+
+private func authJSON(token: String) -> [String: Any] {
+    [
+        "code": 0,
+        "msg": "ok",
+        "tenant_access_token": token,
+        "expire": 7200
+    ]
+}
+
+private func speechJSON(text: String) -> [String: Any] {
+    [
+        "code": 0,
+        "msg": "ok",
+        "data": [
+            "recognition_text": text
+        ]
+    ]
+}
+
+private func jsonResponse(_ json: [String: Any], statusCode: Int = 200) -> DirectHTTPResponse {
+    let data = try! JSONSerialization.data(withJSONObject: json)
+    return DirectHTTPResponse(statusCode: statusCode, body: data)
 }

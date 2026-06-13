@@ -6,6 +6,7 @@
 - 热键监控状态现在可被观察：新增 `MonitoringState`（`.stopped` / `.active` / `.failed`），菜单栏可实时反映 Event Tap 是否正常运行（issue #5）
 - 安全输入检测：终端、1Password 等程序启用安全键盘时，菜单栏显示橙色提示"安全输入已启用，热键暂不可用"（issue #10）
 - 新增 `FeishuAPIServiceTests` 单元测试目标，覆盖直连 HTTP 解析、token 过期时间和取消重试路径（issues #11/#12/#21）
+- 扩展 API 与状态机测试覆盖：新增直连 HTTP 异常解析、重试退避、token 缓存复用、Speech 400/401 token 刷新，以及 MainViewModel 与 HotKeyService 协调层重复转录/陈旧错误防护测试（issue #20）
 - 新增 `MainViewModelTests` 覆盖 `MonitoringState` 失败映射、恢复清除和 cleanup 订阅释放路径（issues #22/#23/#24）
 
 ### Fixed

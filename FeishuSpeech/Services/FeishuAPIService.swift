@@ -21,7 +21,7 @@ private nonisolated let feishuDirectIPs = [
     "116.136.165.49"
 ]
 
-nonisolated struct DirectHTTPResponse {
+nonisolated struct DirectHTTPResponse: Sendable {
     let statusCode: Int
     let body: Data
 }
@@ -34,6 +34,11 @@ private typealias DirectRequestSender = (
     TimeInterval
 ) async throws -> DirectHTTPResponse
 private typealias URLSessionRequestSender = (String, [String: String], Data) async throws -> DirectHTTPResponse
+
+#if DEBUG
+typealias TestDirectRequestSender = @Sendable (String, [String: String], Data) async throws -> DirectHTTPResponse
+typealias TestRetrySleeper = @Sendable (TimeInterval) async throws -> Void
+#endif
 
 private nonisolated func tokenLifetime(fromExpire expire: Int?) -> TimeInterval {
     guard let expire else {
@@ -341,6 +346,11 @@ actor FeishuAPIService {
     private var networkMonitor: NWPathMonitor?
     private var isNetworkAvailable = true
 
+#if DEBUG
+    private var directRequestSenderForTesting: TestDirectRequestSender?
+    private var retrySleeperForTesting: TestRetrySleeper?
+#endif
+
     private let decoder = JSONDecoder()
     private let encoder = JSONEncoder()
 
@@ -401,6 +411,14 @@ actor FeishuAPIService {
         tokenLifetime(fromExpire: expire)
     }
 
+    nonisolated static var authPathForTesting: String {
+        authPath
+    }
+
+    nonisolated static var speechPathForTesting: String {
+        speechPath
+    }
+
     nonisolated static func parseCompleteDirectHTTPResponseForTesting(_ data: Data) throws -> DirectHTTPResponse? {
         try DirectFeishuHTTPClient.parseCompleteResponse(data)
     }
@@ -417,6 +435,23 @@ actor FeishuAPIService {
 
     func setNetworkAvailableForTesting(_ available: Bool) {
         isNetworkAvailable = available
+    }
+
+    func setRetrySleeperForTesting(_ sleeper: @escaping TestRetrySleeper) {
+        retrySleeperForTesting = sleeper
+    }
+
+    func setDirectRequestSenderForTesting(_ sender: @escaping TestDirectRequestSender) {
+        directRequestSenderForTesting = sender
+    }
+
+    func resetForTesting() {
+        cachedToken = nil
+        tokenExpiry = nil
+        lastNetworkError = nil
+        isNetworkAvailable = true
+        directRequestSenderForTesting = nil
+        retrySleeperForTesting = nil
     }
 
     func seedStateForWakeTesting(
@@ -507,7 +542,7 @@ actor FeishuAPIService {
                     try Task.checkCancellation()
                     let delay = retryDelay * Double(attempt)
                     logger.info("Retrying in \(delay)s...")
-                    try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                    try await sleepBeforeRetry(delay: delay)
                 }
             } catch {
                 try Task.checkCancellation()
@@ -518,12 +553,22 @@ actor FeishuAPIService {
                     try Task.checkCancellation()
                     let delay = retryDelay * Double(attempt)
                     logger.info("Retrying in \(delay)s...")
-                    try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                    try await sleepBeforeRetry(delay: delay)
                 }
             }
         }
 
         throw lastError ?? APIError.unknown
+    }
+
+    private func sleepBeforeRetry(delay: TimeInterval) async throws {
+#if DEBUG
+        if let retrySleeperForTesting {
+            try await retrySleeperForTesting(delay)
+            return
+        }
+#endif
+        try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
     }
 
     private func getAccessToken(appId: String, appSecret: String) async throws -> String {
@@ -615,7 +660,12 @@ actor FeishuAPIService {
         headers: [String: String],
         body: Data
     ) async throws -> DirectHTTPResponse {
-        try await sendDirectRequest(
+#if DEBUG
+        if let directRequestSenderForTesting {
+            return try await directRequestSenderForTesting(path, headers, body)
+        }
+#endif
+        return try await sendDirectRequest(
             path: path,
             headers: headers,
             body: body,

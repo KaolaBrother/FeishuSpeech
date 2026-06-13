@@ -275,6 +275,81 @@ final class MonitoringStateBindingTests: XCTestCase {
     }
 }
 
+// MARK: - CoordinatorStateInterplayTests
+
+/// Tests for issue #20: MainViewModel must coordinate duplicate hot-key signals,
+/// max-duration auto-stop, and stale transcription errors without double-stopping
+/// the recorder or clobbering a new active recording.
+@MainActor
+final class CoordinatorStateInterplayTests: XCTestCase {
+
+    override func tearDown() async throws {
+        HotKeyService.shared.resetToIdle()
+        try await super.tearDown()
+    }
+
+    func test_duplicateTranscribingSignals_stopRecorderOnlyOnce() {
+        let recorder = StopCountingAudioRecorder()
+        let sut = MainViewModel(audioRecorder: recorder, settings: AppSettings())
+        recorder.forceSetRecordingForTesting(true)
+
+        sut.handleHotKeyStateForTesting(.transcribing, startsTranscriptionTask: false)
+        sut.handleHotKeyStateForTesting(.transcribing, startsTranscriptionTask: false)
+
+        XCTAssertEqual(
+            recorder.stopRecordingCallCount,
+            1,
+            "duplicate transcribing signals must not stop the same recorder session twice"
+        )
+        XCTAssertEqual(sut.status, .transcribing)
+    }
+
+    func test_maxDurationTranscribing_thenDuplicateReleaseStopsRecorderOnlyOnce() {
+        let recorder = StopCountingAudioRecorder()
+        let hotKeyService = HotKeyService.shared
+        let sut = MainViewModel(audioRecorder: recorder, settings: AppSettings())
+        recorder.forceSetRecordingForTesting(true)
+        hotKeyService.forceState(.recording)
+
+        sut.handleMaxDurationReachedForTesting()
+        sut.handleHotKeyStateForTesting(hotKeyService.state, startsTranscriptionTask: false)
+        hotKeyService.handleFnReleased()
+        sut.handleHotKeyStateForTesting(hotKeyService.state, startsTranscriptionTask: false)
+
+        XCTAssertEqual(
+            hotKeyService.state,
+            .transcribing,
+            "max-duration must route the hot-key state to transcribing and duplicate releases must be ignored"
+        )
+        XCTAssertEqual(
+            recorder.stopRecordingCallCount,
+            1,
+            "max-duration followed by a duplicate release must not stop the recorder twice"
+        )
+    }
+
+    func test_transcriptionErrorDuringNewActiveRecording_doesNotClobberRecordingState() async {
+        let recorder = StopCountingAudioRecorder()
+        let hotKeyService = HotKeyService.shared
+        let sut = MainViewModel(audioRecorder: recorder, settings: AppSettings())
+        hotKeyService.forceState(.recording)
+        sut.status = .recording
+
+        await sut.handleTranscriptionErrorForTesting(StubRecognitionError())
+
+        XCTAssertEqual(
+            sut.status,
+            .recording,
+            "a stale transcription error must not replace a new active recording with an error status"
+        )
+        XCTAssertEqual(
+            hotKeyService.state,
+            .recording,
+            "a stale transcription error must not push HotKeyService into an error state over a new recording"
+        )
+    }
+}
+
 // MARK: - MonitoringTestableMainViewModel (test-visible subclass)
 
 /// Subclass of `MainViewModel` that exposes `startHotKeyMonitoring()` and
@@ -506,6 +581,22 @@ final class SleepWakeTrackingAudioRecorder: AudioRecorder {
     func resetTracking() {
         forceCleanupCalled = false
         stopRecordingCalled = false
+    }
+}
+
+final class StopCountingAudioRecorder: AudioRecorder {
+    private(set) var stopRecordingCallCount = 0
+
+    override func stopRecording() -> Data {
+        stopRecordingCallCount += 1
+        forceSetRecordingForTesting(false)
+        return Data([1, 2, 3, 4])
+    }
+}
+
+private struct StubRecognitionError: LocalizedError {
+    var errorDescription: String? {
+        "stub recognition failure"
     }
 }
 

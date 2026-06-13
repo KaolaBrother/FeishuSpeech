@@ -117,7 +117,7 @@ class MainViewModel: ObservableObject {
         isMonitoring = false
     }
 
-    private func handleHotKeyState(_ state: HotKeyState) {
+    private func handleHotKeyState(_ state: HotKeyState, startsTranscriptionTask: Bool = true) {
         switch state {
         case .idle:
             handleIdleState()
@@ -126,13 +126,22 @@ class MainViewModel: ObservableObject {
         case .recording:
             handleRecordingState()
         case .transcribing:
-            handleTranscribingState()
+            handleTranscribingState(startsTranscriptionTask: startsTranscriptionTask)
         case .cancelled(let reason):
             handleCancelledState(reason: reason)
         case .error(let message):
             handleErrorState(message: message)
         }
     }
+
+    #if DEBUG
+    func handleHotKeyStateForTesting(
+        _ state: HotKeyState,
+        startsTranscriptionTask: Bool = true
+    ) {
+        handleHotKeyState(state, startsTranscriptionTask: startsTranscriptionTask)
+    }
+    #endif
 
     private func handleIdleState() {
         hideOverlay()
@@ -150,8 +159,8 @@ class MainViewModel: ObservableObject {
         startMaxDurationTimer()
     }
 
-    private func handleTranscribingState() {
-        stopRecordingAndTranscribe()
+    private func handleTranscribingState(startsTranscriptionTask: Bool = true) {
+        stopRecordingAndTranscribe(startsTranscriptionTask: startsTranscriptionTask)
     }
 
     private func handleCancelledState(reason: CancelReason) {
@@ -242,7 +251,7 @@ class MainViewModel: ObservableObject {
         return true
     }
 
-    private func stopRecordingAndTranscribe() {
+    private func stopRecordingAndTranscribe(startsTranscriptionTask: Bool = true) {
         guard audioRecorder.isRecording else {
             logger.info("stopRecordingAndTranscribe called but not recording — ignoring")
             return
@@ -259,6 +268,8 @@ class MainViewModel: ObservableObject {
         }
 
         hideOverlay()
+
+        guard startsTranscriptionTask else { return }
 
         transcriptionTask?.cancel()
         let generation = transcriptionGeneration
@@ -309,30 +320,40 @@ class MainViewModel: ObservableObject {
             hotKeyService.resetToIdle()
 
         } catch {
-            logger.error("Recognition error: \(error.localizedDescription)")
-
-            guard isCurrentTranscription(generation) else {
-                logger.info("Discarding stale transcription error after reset")
-                return
-            }
-
-            consecutiveFailureCount += 1
-
-            if consecutiveFailureCount >= maxConsecutiveFailures {
-                logger.warning("Consecutive failures reached \(self.consecutiveFailureCount), auto-resetting service")
-                await FeishuAPIService.shared.resetState()
-                consecutiveFailureCount = 0
-            }
-
-            if hotKeyService.state.isActive {
-                logger.info("Discarding stale transcription error - new session active")
-                return
-            }
-
-            status = .error(error.localizedDescription)
-            hotKeyService.setError(error.localizedDescription)
+            await handleTranscriptionError(error, generation: generation)
         }
     }
+
+    private func handleTranscriptionError(_ error: Error, generation: Int) async {
+        logger.error("Recognition error: \(error.localizedDescription)")
+
+        guard isCurrentTranscription(generation) else {
+            logger.info("Discarding stale transcription error after reset")
+            return
+        }
+
+        consecutiveFailureCount += 1
+
+        if consecutiveFailureCount >= maxConsecutiveFailures {
+            logger.warning("Consecutive failures reached \(self.consecutiveFailureCount), auto-resetting service")
+            await FeishuAPIService.shared.resetState()
+            consecutiveFailureCount = 0
+        }
+
+        if hotKeyService.state.isActive {
+            logger.info("Discarding stale transcription error - new session active")
+            return
+        }
+
+        status = .error(error.localizedDescription)
+        hotKeyService.setError(error.localizedDescription)
+    }
+
+    #if DEBUG
+    func handleTranscriptionErrorForTesting(_ error: Error) async {
+        await handleTranscriptionError(error, generation: transcriptionGeneration)
+    }
+    #endif
 
     private func isCurrentTranscription(_ generation: Int) -> Bool {
         !Task.isCancelled && generation == transcriptionGeneration
@@ -399,6 +420,12 @@ class MainViewModel: ObservableObject {
         guard audioRecorder.isRecording else { return }
         hotKeyService.forceTranscribing()
     }
+
+    #if DEBUG
+    func handleMaxDurationReachedForTesting() {
+        handleMaxDurationReached()
+    }
+    #endif
 
     private func setupErrorRecovery() {
         $status
