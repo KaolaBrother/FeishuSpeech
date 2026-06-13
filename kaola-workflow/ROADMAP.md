@@ -7,7 +7,6 @@ This file mirrors active unfinished work. GitHub issues are the source of truth 
 
 | Issue | Title | Status | Workflow Project | Next Step |
 |-------|-------|--------|------------------|-----------|
-| #18 | appSecret stored in plaintext UserDefaults — move to Keychain | open | — | — |
 | #19 | No sleep/wake health check — event tap and network monitor can be stale after wake | open | — | — |
 | #20 | Test coverage: direct HTTP client, retry logic, and state-machine interplay untested; MockURLProtocol is dead code | open | — | — |
 
