@@ -1,0 +1,12 @@
+{"ts":"2026-06-13T04:02:30Z","agent_type":"code-explorer","agent_id":"019ebf25-38e3-78b1-954d-9fcb96e28d10","cwd":"/Users/ylpromax5/Workspace/feishuspeech"}
+{"ts":"2026-06-13T04:05:17Z","agent_type":"code-architect-max","agent_id":"019ebf27-c427-77f2-b539-f5b2c014756d","cwd":"/Users/ylpromax5/Workspace/feishuspeech"}
+{"ts":"2026-06-13T04:09:47Z","agent_type":"tdd-guide-max","agent_id":"019ebf2b-dc5d-75d0-bc10-8db524941d9c","cwd":"/Users/ylpromax5/Workspace/feishuspeech"}
+{"ts":"2026-06-13T04:25:42Z","agent_type":"code-reviewer-max","agent_id":"019ebf3a-732a-7490-8c3d-2dd03b286daf","cwd":"/Users/ylpromax5/Workspace/feishuspeech"}
+{"ts":"2026-06-13T04:30:16Z","agent_type":"adversarial-verifier-max","agent_id":"019ebf3e-a342-7f81-8d50-da2bea4ead7b","cwd":"/Users/ylpromax5/Workspace/feishuspeech"}
+{"ts":"2026-06-13T04:35:58Z","agent_type":"tdd-guide-max","agent_id":"019ebf43-db30-7b23-bc43-49b7d020ee25","cwd":"/Users/ylpromax5/Workspace/feishuspeech"}
+{"ts":"2026-06-13T04:42:28Z","agent_type":"tdd-guide-max","agent_id":"019ebf49-c8fd-7dd1-99a5-c47cabe06212","cwd":"/Users/ylpromax5/Workspace/feishuspeech"}
+{"ts":"2026-06-13T04:46:57Z","agent_type":"code-reviewer-max","agent_id":"019ebf4d-e7b7-79c1-83ef-1f5a792dd6fa","cwd":"/Users/ylpromax5/Workspace/feishuspeech"}
+{"ts":"2026-06-13T04:51:18Z","agent_type":"adversarial-verifier-max","agent_id":"019ebf51-de9f-7e11-a886-58a9c63e2d28","cwd":"/Users/ylpromax5/Workspace/feishuspeech"}
+{"ts":"2026-06-13T04:56:45Z","agent_type":"doc-updater","agent_id":"019ebf56-e2c4-7051-9ccc-a33af6263615","cwd":"/Users/ylpromax5/Workspace/feishuspeech"}
+{"ts":"2026-06-13T05:06:32Z","agent_type":"contractor","agent_id":"019ebf5f-d0e3-7a40-a2f5-cc4ab58a54b4","cwd":"/Users/ylpromax5/Workspace/feishuspeech"}
+{"ts":"2026-06-13T05:09:13Z","agent_type":"contractor","agent_id":"finalize-backfill","cwd":"/Users/ylpromax5/Workspace/feishuspeech/.kw/worktrees/bundle-11-12-21"}

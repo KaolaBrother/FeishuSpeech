@@ -7,8 +7,6 @@ This file mirrors active unfinished work. GitHub issues are the source of truth 
 
 | Issue | Title | Status | Workflow Project | Next Step |
 |-------|-------|--------|------------------|-----------|
-| #11 | Direct HTTP client discards fully-received responses on timeout; no Content-Length-based completion | open | — | — |
-| #12 | Token expiry hardcoded to 6000s — Feishu expire field ignored | open | — | — |
 | #15 | Mic device loss mid-recording unhandled; microphone permission only checked at launch | open | — | — |
 | #18 | appSecret stored in plaintext UserDefaults — move to Keychain | open | — | — |
 | #19 | No sleep/wake health check — event tap and network monitor can be stale after wake | open | — | — |
