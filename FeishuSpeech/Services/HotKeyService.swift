@@ -8,6 +8,12 @@ private let logger = Logger(subsystem: "com.feishuspeech.app", category: "HotKey
 class HotKeyService: ObservableObject {
     static let shared = HotKeyService()
 
+    #if DEBUG
+    struct WakeRecoveryTestResult {
+        let restartCount: Int
+    }
+    #endif
+
     @Published private(set) var state: HotKeyState = .idle
     @Published private(set) var isMonitoring = false
     @Published private(set) var monitoringState: MonitoringState = .stopped
@@ -221,6 +227,48 @@ class HotKeyService: ObservableObject {
         
         restartRetryCount = 0
         startMonitoring()
+    }
+
+    func recoverAfterWake() {
+        logger.info("Recovering hotkey monitoring after wake")
+        recoverAfterWake(
+            tapPresent: eventTap != nil,
+            tapEnabled: eventTap.map { isEventTapEnabled($0) } ?? false,
+            restartMonitoring: { [weak self] in
+                self?.stopMonitoring()
+                self?.startMonitoring()
+            }
+        )
+    }
+
+    private func recoverAfterWake(
+        tapPresent: Bool,
+        tapEnabled: Bool,
+        restartMonitoring: () -> Void
+    ) {
+        cancelStaleWakeInput()
+
+        guard tapPresent && tapEnabled else {
+            logger.warning("Event tap missing or disabled after wake; restarting monitoring")
+            restartMonitoring()
+            return
+        }
+
+        monitoringState = .active
+        isMonitoring = true
+        logger.info("Event tap still enabled after wake")
+    }
+
+    private func isEventTapEnabled(_ tap: CFMachPort) -> Bool {
+        CGEvent.tapIsEnabled(tap: tap)
+    }
+
+    private func cancelStaleWakeInput() {
+        cancelPendingTransition()
+        state = .idle
+        previousFlagsLock.lock()
+        previousFlags = []
+        previousFlagsLock.unlock()
     }
     
     private func handleFlagsChanged(_ event: CGEvent) {
@@ -459,4 +507,24 @@ class HotKeyService: ObservableObject {
         previousFlags = CGEventFlags(rawValue: liveFlags.rawValue)
         previousFlagsLock.unlock()
     }
+
+    #if DEBUG
+    /// Drives wake recovery without requiring a real CFMachPort or system wake event.
+    func recoverAfterWakeForTesting(
+        tapPresent: Bool,
+        tapEnabled: Bool
+    ) -> WakeRecoveryTestResult {
+        var restartCount = 0
+        recoverAfterWake(
+            tapPresent: tapPresent,
+            tapEnabled: tapEnabled,
+            restartMonitoring: { [weak self] in
+                restartCount += 1
+                self?.stopMonitoring()
+                self?.simulateStartMonitoringWithTapCreationResult(true)
+            }
+        )
+        return WakeRecoveryTestResult(restartCount: restartCount)
+    }
+    #endif
 }

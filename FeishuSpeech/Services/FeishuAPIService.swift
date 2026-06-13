@@ -384,7 +384,19 @@ actor FeishuAPIService {
         lastNetworkError = nil
     }
 
+    func resetStateForWake() {
+        resetState()
+        isNetworkAvailable = true
+    }
+
 #if DEBUG
+    struct StateSnapshotForTesting {
+        let hasCachedToken: Bool
+        let hasTokenExpiry: Bool
+        let lastNetworkErrorDescription: String?
+        let isNetworkAvailable: Bool
+    }
+
     nonisolated static func tokenLifetimeForTesting(expire: Int?) -> TimeInterval {
         tokenLifetime(fromExpire: expire)
     }
@@ -405,6 +417,27 @@ actor FeishuAPIService {
 
     func setNetworkAvailableForTesting(_ available: Bool) {
         isNetworkAvailable = available
+    }
+
+    func seedStateForWakeTesting(
+        cachedToken: String?,
+        tokenExpiresIn: TimeInterval?,
+        lastNetworkError: Error?,
+        isNetworkAvailable: Bool
+    ) {
+        self.cachedToken = cachedToken
+        self.tokenExpiry = tokenExpiresIn.map { Date().addingTimeInterval($0) }
+        self.lastNetworkError = lastNetworkError
+        self.isNetworkAvailable = isNetworkAvailable
+    }
+
+    func stateSnapshotForTesting() -> StateSnapshotForTesting {
+        StateSnapshotForTesting(
+            hasCachedToken: cachedToken != nil,
+            hasTokenExpiry: tokenExpiry != nil,
+            lastNetworkErrorDescription: lastNetworkError?.localizedDescription,
+            isNetworkAvailable: isNetworkAvailable
+        )
     }
 
     func withRetryForTesting(maxAttempts: Int, operation: () async throws -> Void) async throws {

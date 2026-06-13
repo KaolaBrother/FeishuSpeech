@@ -10,16 +10,23 @@ let errorRecoveryDelay: TimeInterval = 3.0
 private let maxConsecutiveFailures = 3
 private let hotKeyMonitoringErrorMessage = "热键不可用，请检查辅助功能权限"
 
+protocol HotKeyWakeRecovering: AnyObject {
+    func recoverAfterWake()
+}
+
+extension HotKeyService: HotKeyWakeRecovering {}
+
 @MainActor
 class MainViewModel: ObservableObject {
     @Published var status: RecordingState = .idle
-    @Published var settings: AppSettings = AppSettings.load()
+    @Published var settings: AppSettings
     /// Transient message shown when speech recognition returns an empty result.
     /// Set to a non-nil string to trigger feedback; callers should observe this
     /// and clear it after display.  `nil` means no pending feedback.
     @Published var overlayMessage: String?
 
     private let hotKeyService = HotKeyService.shared
+    private let hotKeyWakeRecovering: HotKeyWakeRecovering
     private let audioRecorder: AudioRecorder
     private let permissionManager = PermissionManager.shared
     private let overlayController = OverlayWindowController.shared
@@ -35,13 +42,21 @@ class MainViewModel: ObservableObject {
     private var maxDurationTimer: Timer?
     private var consecutiveFailureCount = 0
     private var isShowingHotKeyMonitoringError = false
+    private var transcriptionTask: Task<Void, Never>?
+    private var transcriptionGeneration = 0
 
     var statusText: String {
         status.text
     }
 
-    init(audioRecorder: AudioRecorder = AudioRecorder()) {
+    init(
+        audioRecorder: AudioRecorder = AudioRecorder(),
+        settings: AppSettings = AppSettings.load(),
+        hotKeyWakeRecovering: HotKeyWakeRecovering = HotKeyService.shared
+    ) {
         self.audioRecorder = audioRecorder
+        self.settings = settings
+        self.hotKeyWakeRecovering = hotKeyWakeRecovering
         logger.info("MainViewModel init")
         audioRecorder.forceCleanup()
         setupAudioRecorderFailureObserver()
@@ -245,8 +260,10 @@ class MainViewModel: ObservableObject {
 
         hideOverlay()
 
-        Task {
-            await transcribeAudio(audioData)
+        transcriptionTask?.cancel()
+        let generation = transcriptionGeneration
+        transcriptionTask = Task { [weak self] in
+            await self?.transcribeAudio(audioData, generation: generation)
         }
     }
 
@@ -268,7 +285,7 @@ class MainViewModel: ObservableObject {
         }
     }
 
-    private func transcribeAudio(_ audioData: Data) async {
+    private func transcribeAudio(_ audioData: Data, generation: Int) async {
         do {
             let text = try await withTimeout(seconds: 30) {
                 try await FeishuAPIService.shared.recognizeSpeech(
@@ -281,6 +298,11 @@ class MainViewModel: ObservableObject {
             logger.info("Recognition result: \(text)")
             consecutiveFailureCount = 0
 
+            guard isCurrentTranscription(generation) else {
+                logger.info("Discarding stale transcription result")
+                return
+            }
+
             handleRecognitionResult(text)
 
             status = .idle
@@ -288,6 +310,12 @@ class MainViewModel: ObservableObject {
 
         } catch {
             logger.error("Recognition error: \(error.localizedDescription)")
+
+            guard isCurrentTranscription(generation) else {
+                logger.info("Discarding stale transcription error after reset")
+                return
+            }
+
             consecutiveFailureCount += 1
 
             if consecutiveFailureCount >= maxConsecutiveFailures {
@@ -306,10 +334,36 @@ class MainViewModel: ObservableObject {
         }
     }
 
+    private func isCurrentTranscription(_ generation: Int) -> Bool {
+        !Task.isCancelled && generation == transcriptionGeneration
+    }
+
     func resetService() async {
         logger.info("Manual service reset requested")
-        audioRecorder.forceCleanup()
+        cancelTranscriptionAndReturnIdle()
         await FeishuAPIService.shared.resetState()
+    }
+
+    func handleSystemWillSleep() async {
+        logger.info("Handling system will sleep")
+        cancelTranscriptionAndReturnIdle()
+        await FeishuAPIService.shared.resetStateForWake()
+    }
+
+    func handleSystemDidWake() async {
+        logger.info("Handling system did wake")
+        cancelTranscriptionAndReturnIdle()
+        await FeishuAPIService.shared.resetStateForWake()
+        hotKeyWakeRecovering.recoverAfterWake()
+    }
+
+    private func cancelTranscriptionAndReturnIdle() {
+        transcriptionGeneration += 1
+        transcriptionTask?.cancel()
+        transcriptionTask = nil
+        hideOverlay()
+        audioRecorder.forceCleanup()
+        stopMaxDurationTimer()
         consecutiveFailureCount = 0
         status = .idle
         hotKeyService.resetToIdle()
@@ -389,6 +443,9 @@ class MainViewModel: ObservableObject {
 
     func cleanup() {
         logger.info("MainViewModel cleanup called")
+        transcriptionGeneration += 1
+        transcriptionTask?.cancel()
+        transcriptionTask = nil
         audioRecorder.forceCleanup()
         stopHotKeyMonitoring()
         stopMaxDurationTimer()

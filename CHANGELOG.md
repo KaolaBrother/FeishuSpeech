@@ -10,6 +10,7 @@
 
 ### Fixed
 - 飞书 App ID / App Secret 不再写入 UserDefaults 设置载荷：新保存使用 macOS Keychain，旧版 `FeishuSpeechSettings` 或独立 `appId` / `appSecret` 默认值会在可安全读写 Keychain 后迁移并清理；迁移或读写失败时保留旧凭据回退（issue #18）
+- 系统睡眠/唤醒后会取消陈旧转录、清理录音和 overlay 状态、重置热键状态，并刷新飞书 token / 网络错误缓存；唤醒时还会检查并重启丢失或禁用的 Event Tap（issue #19）
 - Event Tap 从主线程移至专用后台线程，避免与 AVCaptureSession 争用主 RunLoop 导致热键丢失（issue #9）
 - Event Tap 创建失败或辅助功能权限未授予时，自动按指数退避重试（最长间隔 30 秒），不再硬限 3 次后放弃（issue #5）
 - 录音停止后重置 Fn 键状态，防止重启监控时残留的按键状态触发误录（issue #9）

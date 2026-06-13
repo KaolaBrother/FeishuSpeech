@@ -63,6 +63,36 @@ Loading settings performs a guarded migration from legacy credentials:
 `MainViewModel.updateSettings(...)`, which calls `AppSettings.save()`. It does
 not use `@AppStorage` for App ID or App Secret.
 
+## AppDelegate and MainViewModel — sleep/wake lifecycle
+
+Issue #19 defines the system sleep/wake recovery contract (see
+`docs/decisions/D-19-01.md`). `AppDelegate` registers
+`NSWorkspace.willSleepNotification` and `NSWorkspace.didWakeNotification` through
+`NSWorkspace.shared.notificationCenter` when the app finishes launching. The
+observer tokens are retained in `workspaceObserverTokens` and removed during
+application termination.
+
+Workspace lifecycle delivery is routed through `MainViewModel`. If a sleep or
+wake notification arrives before `setViewModel(_:)`, `AppDelegate` queues the
+event and replays the queued lifecycle events once the view model is injected.
+
+`MainViewModel.handleSystemWillSleep()` and `handleSystemDidWake()` both call the
+same idle reset path used for stale transcription cleanup:
+
+- advance the transcription generation and cancel the current transcription
+  task;
+- hide the overlay;
+- call `audioRecorder.forceCleanup()` rather than `stopRecording()`, so stale
+  audio is discarded instead of transcribed;
+- stop the max-duration timer;
+- clear the consecutive-failure counter;
+- set coordinator status to `.idle`;
+- call `hotKeyService.resetToIdle()`;
+- call `FeishuAPIService.resetStateForWake()`.
+
+The wake handler also calls `HotKeyService.recoverAfterWake()` after the API
+wake reset.
+
 ## HotKeyService — state-machine contract
 
 `HotKeyService` drives the CGEventTap state machine: `idle -> pending (0.3 s) -> recording ->
@@ -122,6 +152,18 @@ limit.
 key-flag baseline. After each backoff delay, `CGEventSource.flagsState(.combinedSessionState)`
 is sampled to detect a held Fn key and cancel any stale pending/recording state before the
 tap is re-created.
+
+**Wake recovery**
+
+`recoverAfterWake()` cancels pending transitions, returns the state machine to
+`.idle`, and clears `previousFlags` before checking tap health. For real taps,
+tap health is read through `CGEvent.tapIsEnabled(tap:)`. If the tap exists and
+is enabled, monitoring remains active. If the tap is missing or disabled, wake
+recovery restarts monitoring through the normal `stopMonitoring()` /
+`startMonitoring()` lifecycle.
+
+The DEBUG test hook drives the same recovery branch without a real
+`CFMachPort`, and its result exposes only `restartCount`.
 
 **Secure keyboard entry**
 

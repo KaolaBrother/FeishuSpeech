@@ -328,6 +328,49 @@ final class HotKeyServiceTests: XCTestCase {
             "All published states must be .failed(.accessibilityNotTrusted)"
         )
     }
+
+    // MARK: - Issue #19: Wake recovery tap health
+
+    func test_recoverAfterWake_whenTapIsPresentAndEnabled_keepsMonitoringActiveAndClearsStaleInput() {
+        sut.forceState(.pending(startTime: Date()))
+        sut.setPreviousFlagsForTesting(CGEventFlags.maskSecondaryFn)
+        sut.simulateStartMonitoringWithTapCreationResult(true)
+
+        let result = sut.recoverAfterWakeForTesting(tapPresent: true, tapEnabled: true)
+
+        XCTAssertEqual(result.restartCount, 0, "Enabled live tap must not restart during wake recovery")
+        XCTAssertEqual(sut.monitoringState, .active, "Enabled live tap must remain active after wake recovery")
+        XCTAssertTrue(sut.isMonitoring, "Enabled live tap must keep monitoring active")
+        XCTAssertEqual(sut.state, .idle, "Pending wake transition must be cancelled back to idle")
+        XCTAssertEqual(sut.previousFlagsForTesting, [], "Stale pre-sleep Fn flags must be cleared")
+    }
+
+    func test_recoverAfterWake_whenTapIsMissing_restartsMonitoringThroughLifecycle() {
+        sut.forceState(.pending(startTime: Date()))
+        sut.setPreviousFlagsForTesting(CGEventFlags.maskSecondaryFn)
+
+        let result = sut.recoverAfterWakeForTesting(tapPresent: false, tapEnabled: false)
+
+        XCTAssertEqual(result.restartCount, 1, "Missing tap must restart monitoring during wake recovery")
+        XCTAssertEqual(sut.monitoringState, .active, "Restarted monitoring must publish active state")
+        XCTAssertTrue(sut.isMonitoring, "Restarted monitoring must be active")
+        XCTAssertEqual(sut.state, .idle, "Wake recovery must cancel pending state before restart")
+        XCTAssertEqual(sut.previousFlagsForTesting, [], "Wake recovery must clear previousFlags before restart")
+    }
+
+    func test_recoverAfterWake_whenTapIsDisabled_restartsMonitoringThroughLifecycle() {
+        sut.forceState(.pending(startTime: Date()))
+        sut.setPreviousFlagsForTesting(CGEventFlags.maskSecondaryFn)
+        sut.simulateStartMonitoringWithTapCreationResult(true)
+
+        let result = sut.recoverAfterWakeForTesting(tapPresent: true, tapEnabled: false)
+
+        XCTAssertEqual(result.restartCount, 1, "Disabled tap must restart monitoring during wake recovery")
+        XCTAssertEqual(sut.monitoringState, .active, "Restarted disabled tap must publish active state")
+        XCTAssertTrue(sut.isMonitoring, "Restarted disabled tap must be active")
+        XCTAssertEqual(sut.state, .idle, "Wake recovery must cancel pending state before restart")
+        XCTAssertEqual(sut.previousFlagsForTesting, [], "Wake recovery must clear stale Fn flags")
+    }
 }
 
 final class HotKeyStateTests: XCTestCase {

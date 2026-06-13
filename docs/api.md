@@ -73,6 +73,16 @@ produces an already-expired lifetime, forcing a fresh token on the next request.
 The token cache is cleared on network recovery and on speech API HTTP 400/401
 responses so the next retry can obtain a fresh tenant token.
 
+System wake also resets Feishu API client state. `MainViewModel` calls
+`FeishuAPIService.resetStateForWake()` from both sleep and wake handlers. That
+method clears the cached tenant token, token expiry, and last network error, and
+sets network availability back to true so later requests perform fresh
+post-wake network work instead of reusing a stale unavailable state.
+
+The DEBUG wake-reset snapshot exposes only non-secret state used by tests:
+whether a cached token exists, whether token expiry exists, the last network
+error description, and the current network-availability flag.
+
 ## Retry and cancellation
 
 `withRetry` retries retriable API/network failures up to three attempts with

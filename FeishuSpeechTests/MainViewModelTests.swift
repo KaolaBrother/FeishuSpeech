@@ -118,6 +118,103 @@ final class MainViewModelTests: XCTestCase {
             "cleanup() must release stateCancellable so teardown cannot leave a live $state subscriber"
         )
     }
+
+    func test_willSleep_abortsRecordingWithoutTranscribingAndReturnsIdle() async {
+        let recorder = SleepWakeTrackingAudioRecorder()
+        let sut = MainViewModel(audioRecorder: recorder, settings: AppSettings())
+        sut.status = .recording
+        recorder.forceSetRecordingForTesting(true)
+        recorder.resetTracking()
+
+        await sut.handleSystemWillSleep()
+
+        XCTAssertEqual(sut.status, .idle, "sleep cleanup must hide active UI by returning to idle")
+        XCTAssertTrue(recorder.forceCleanupCalled, "sleep cleanup must abort recorder resources")
+        XCTAssertFalse(recorder.stopRecordingCalled, "sleep cleanup must not stop-and-transcribe stale audio")
+    }
+
+    func test_didWake_resetsAPIAndRecoversHotKeyState() async {
+        let service = FeishuAPIService.shared
+        await service.seedStateForWakeTesting(
+            cachedToken: "stale-token",
+            tokenExpiresIn: 600,
+            lastNetworkError: FeishuAPIService.APIError.connectionFailed,
+            isNetworkAvailable: false
+        )
+
+        let hotKeyRecoverer = TrackingHotKeyWakeRecoverer()
+        let sut = MainViewModel(
+            audioRecorder: SleepWakeTrackingAudioRecorder(),
+            settings: AppSettings(),
+            hotKeyWakeRecovering: hotKeyRecoverer
+        )
+        sut.status = .transcribing
+
+        await sut.handleSystemDidWake()
+
+        let snapshot = await service.stateSnapshotForTesting()
+        XCTAssertEqual(sut.status, .idle, "wake recovery must leave the coordinator idle")
+        XCTAssertFalse(snapshot.hasCachedToken, "wake recovery must clear stale token cache")
+        XCTAssertFalse(snapshot.hasTokenExpiry, "wake recovery must clear token expiry")
+        XCTAssertNil(snapshot.lastNetworkErrorDescription, "wake recovery must clear stale network errors")
+        XCTAssertTrue(snapshot.isNetworkAvailable, "wake recovery must allow a fresh network probe after wake")
+        XCTAssertEqual(hotKeyRecoverer.recoverAfterWakeCallCount, 1, "wake recovery must refresh hot-key monitoring")
+    }
+
+    func test_applicationLaunchAndTerminate_manageWorkspaceSleepWakeObservers() {
+        let sut = AppDelegate()
+
+        XCTAssertEqual(sut.workspaceObserverCountForTesting, 0)
+
+        sut.registerWorkspaceWakeObserversForTesting()
+        XCTAssertEqual(
+            sut.workspaceObserverCountForTesting,
+            2,
+            "AppDelegate must register will-sleep and did-wake observers"
+        )
+
+        sut.removeWorkspaceWakeObserversForTesting()
+        XCTAssertEqual(
+            sut.workspaceObserverCountForTesting,
+            0,
+            "AppDelegate must remove workspace observers during termination"
+        )
+    }
+
+    func test_syntheticSleepWakeNotifications_routeToViewModel() async {
+        let viewModel = AppDelegateTrackingMainViewModel(recorder: SleepWakeTrackingAudioRecorder())
+        let sut = AppDelegate()
+        sut.setViewModel(viewModel)
+
+        sut.simulateWorkspaceWillSleepForTesting()
+        await Task.yield()
+        sut.simulateWorkspaceDidWakeForTesting()
+        await Task.yield()
+
+        XCTAssertEqual(viewModel.willSleepCallCount, 1)
+        XCTAssertEqual(viewModel.didWakeCallCount, 1)
+    }
+
+    func test_preInjectionSleepWakeNotifications_replayWhenViewModelIsSet() async {
+        let viewModel = AppDelegateTrackingMainViewModel(recorder: SleepWakeTrackingAudioRecorder())
+        let sut = AppDelegate()
+
+        sut.simulateWorkspaceWillSleepForTesting()
+        await Task.yield()
+        sut.simulateWorkspaceDidWakeForTesting()
+        await Task.yield()
+
+        XCTAssertEqual(viewModel.willSleepCallCount, 0)
+        XCTAssertEqual(viewModel.didWakeCallCount, 0)
+
+        sut.setViewModel(viewModel)
+        for _ in 0..<3 {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(viewModel.willSleepCallCount, 1)
+        XCTAssertEqual(viewModel.didWakeCallCount, 1)
+    }
 }
 
 // MARK: - MonitoringStateBindingTests
@@ -189,7 +286,7 @@ final class MonitoringStateBindingTests: XCTestCase {
 @MainActor
 final class MonitoringTestableMainViewModel: MainViewModel {
     init(recorder: AudioRecorder) {
-        super.init(audioRecorder: recorder)
+        super.init(audioRecorder: recorder, settings: AppSettings())
     }
 
     func testStartHotKeyMonitoring() {
@@ -224,7 +321,7 @@ final class EmptyResultFeedbackTests: XCTestCase {
     /// Post-fix behaviour: `overlayMessage` is set to "未识别到内容" (or
     /// equivalent non-empty string) before returning to idle.
     func test_emptyRecognitionResult_setsOverlayMessage() {
-        let sut = MainViewModel(audioRecorder: AudioRecorder())
+        let sut = MainViewModel(audioRecorder: AudioRecorder(), settings: AppSettings())
 
         // Pre-condition: overlayMessage starts nil
         XCTAssertNil(
@@ -251,7 +348,7 @@ final class EmptyResultFeedbackTests: XCTestCase {
     /// Whitespace-only results (e.g. "  \n  ") must also trigger feedback,
     /// because after trimming they are effectively empty.
     func test_whitespaceOnlyRecognitionResult_setsOverlayMessage() {
-        let sut = MainViewModel(audioRecorder: AudioRecorder())
+        let sut = MainViewModel(audioRecorder: AudioRecorder(), settings: AppSettings())
 
         sut.handleRecognitionResult("   \n   ")
 
@@ -266,7 +363,7 @@ final class EmptyResultFeedbackTests: XCTestCase {
     /// A non-empty result is the happy path — `overlayMessage` MUST remain nil
     /// so no spurious feedback panel appears over normally recognised text.
     func test_nonEmptyRecognitionResult_doesNotSetOverlayMessage() {
-        let sut = MainViewModel(audioRecorder: AudioRecorder())
+        let sut = MainViewModel(audioRecorder: AudioRecorder(), settings: AppSettings())
 
         sut.handleRecognitionResult("你好世界")
 
@@ -337,7 +434,7 @@ final class AudioRecorderFailureTests: XCTestCase {
 
     func test_viewModelRecorderFailure_cleansUpAndShowsSpecificError() async {
         let recorder = FailureTrackingAudioRecorder()
-        let sut = MainViewModel(audioRecorder: recorder)
+        let sut = MainViewModel(audioRecorder: recorder, settings: AppSettings())
 
         sut.status = .recording
         recorder.forceSetRecordingForTesting(true)
@@ -389,5 +486,57 @@ final class FailureTrackingAudioRecorder: AudioRecorder {
     func resetTracking() {
         forceCleanupCalled = false
         stopRecordingCalled = false
+    }
+}
+
+final class SleepWakeTrackingAudioRecorder: AudioRecorder {
+    private(set) var forceCleanupCalled = false
+    private(set) var stopRecordingCalled = false
+
+    override func forceCleanup() {
+        forceCleanupCalled = true
+        super.forceCleanup()
+    }
+
+    override func stopRecording() -> Data {
+        stopRecordingCalled = true
+        return Data([1, 2, 3, 4])
+    }
+
+    func resetTracking() {
+        forceCleanupCalled = false
+        stopRecordingCalled = false
+    }
+}
+
+final class TrackingHotKeyWakeRecoverer: HotKeyWakeRecovering {
+    private(set) var recoverAfterWakeCallCount = 0
+
+    func recoverAfterWake() {
+        recoverAfterWakeCallCount += 1
+    }
+}
+
+@MainActor
+final class AppDelegateTrackingMainViewModel: MainViewModel {
+    private(set) var willSleepCallCount = 0
+    private(set) var didWakeCallCount = 0
+
+    init(recorder: AudioRecorder) {
+        super.init(
+            audioRecorder: recorder,
+            settings: AppSettings(),
+            hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer()
+        )
+    }
+
+    override func handleSystemWillSleep() async {
+        willSleepCallCount += 1
+        await super.handleSystemWillSleep()
+    }
+
+    override func handleSystemDidWake() async {
+        didWakeCallCount += 1
+        await super.handleSystemDidWake()
     }
 }

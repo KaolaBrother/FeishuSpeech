@@ -168,6 +168,24 @@ final class FeishuAPIServiceTests: XCTestCase {
         XCTAssertEqual(attemptedIPs, ["first"])
         XCTAssertEqual(fallbackAttempts, 0)
     }
+
+    func test_resetStateForWake_clearsTokenNetworkErrorAndRefreshesAvailability() async {
+        let service = FeishuAPIService.shared
+        await service.seedStateForWakeTesting(
+            cachedToken: "stale-token",
+            tokenExpiresIn: 600,
+            lastNetworkError: FeishuAPIService.APIError.connectionFailed,
+            isNetworkAvailable: false
+        )
+
+        await service.resetStateForWake()
+
+        let snapshot = await service.stateSnapshotForTesting()
+        XCTAssertFalse(snapshot.hasCachedToken, "wake reset must clear stale cached token")
+        XCTAssertFalse(snapshot.hasTokenExpiry, "wake reset must clear stale token expiry")
+        XCTAssertNil(snapshot.lastNetworkErrorDescription, "wake reset must clear stale network error")
+        XCTAssertTrue(snapshot.isNetworkAvailable, "wake reset must allow fresh network checks after wake")
+    }
 }
 
 private func httpResponse(headers: [String: String], body: String) -> Data {
