@@ -97,6 +97,85 @@ final class MainViewModelTests: XCTestCase {
         // Cleanup
         sut.testStopHotKeyMonitoring()
     }
+
+    // MARK: - test_cleanup_releasesStateCancellable
+
+    /// `cleanup()` is the AppDelegate teardown path, so it must preserve the
+    /// same subscription invariant as `stopHotKeyMonitoring()`.
+    func test_cleanup_releasesStateCancellable() {
+        let sut = MonitoringTestableMainViewModel(recorder: AudioRecorder())
+
+        sut.testStartHotKeyMonitoring()
+        XCTAssertNotNil(
+            sut.stateCancellable,
+            "Precondition: stateCancellable must be non-nil after monitoring starts"
+        )
+
+        sut.cleanup()
+
+        XCTAssertNil(
+            sut.stateCancellable,
+            "cleanup() must release stateCancellable so teardown cannot leave a live $state subscriber"
+        )
+    }
+}
+
+// MARK: - MonitoringStateBindingTests
+
+/// Tests for issue #23/#24: MainViewModel must surface hot-key tap failures
+/// and clear only that stale failure when monitoring recovers.
+@MainActor
+final class MonitoringStateBindingTests: XCTestCase {
+
+    func test_accessibilityNotTrustedFailure_setsStatusError() {
+        let sut = MonitoringTestableMainViewModel(recorder: AudioRecorder())
+
+        sut.testHandleMonitoringState(.failed(.accessibilityNotTrusted))
+
+        XCTAssertEqual(
+            sut.status,
+            .error("热键不可用，请检查辅助功能权限"),
+            "accessibility-not-trusted monitoring failure must surface the hot-key permission error"
+        )
+    }
+
+    func test_tapCreationFailure_setsStatusError() {
+        let sut = MonitoringTestableMainViewModel(recorder: AudioRecorder())
+
+        sut.testHandleMonitoringState(.failed(.tapCreationFailed))
+
+        XCTAssertEqual(
+            sut.status,
+            .error("热键不可用，请检查辅助功能权限"),
+            "tap-creation monitoring failure must surface the hot-key permission error"
+        )
+    }
+
+    func test_activeAfterTapFailure_clearsStaleTapFailureError() {
+        let sut = MonitoringTestableMainViewModel(recorder: AudioRecorder())
+
+        sut.testHandleMonitoringState(.failed(.accessibilityNotTrusted))
+        sut.testHandleMonitoringState(.active)
+
+        XCTAssertEqual(
+            sut.status,
+            .idle,
+            "monitoring recovery must clear the stale hot-key tap failure error"
+        )
+    }
+
+    func test_activeDoesNotClearUnrelatedError() {
+        let sut = MonitoringTestableMainViewModel(recorder: AudioRecorder())
+        sut.status = .error("识别失败")
+
+        sut.testHandleMonitoringState(.active)
+
+        XCTAssertEqual(
+            sut.status,
+            .error("识别失败"),
+            "monitoring recovery must not clear unrelated errors"
+        )
+    }
 }
 
 // MARK: - MonitoringTestableMainViewModel (test-visible subclass)
@@ -119,6 +198,10 @@ final class MonitoringTestableMainViewModel: MainViewModel {
 
     func testStopHotKeyMonitoring() {
         stopHotKeyMonitoring()
+    }
+
+    func testHandleMonitoringState(_ monitoringState: MonitoringState) {
+        handleMonitoringStateForTesting(monitoringState)
     }
 }
 

@@ -6,6 +6,7 @@
 - 热键监控状态现在可被观察：新增 `MonitoringState`（`.stopped` / `.active` / `.failed`），菜单栏可实时反映 Event Tap 是否正常运行（issue #5）
 - 安全输入检测：终端、1Password 等程序启用安全键盘时，菜单栏显示橙色提示"安全输入已启用，热键暂不可用"（issue #10）
 - 新增 `FeishuAPIServiceTests` 单元测试目标，覆盖直连 HTTP 解析、token 过期时间和取消重试路径（issues #11/#12/#21）
+- 新增 `MainViewModelTests` 覆盖 `MonitoringState` 失败映射、恢复清除和 cleanup 订阅释放路径（issues #22/#23/#24）
 
 ### Fixed
 - Event Tap 从主线程移至专用后台线程，避免与 AVCaptureSession 争用主 RunLoop 导致热键丢失（issue #9）
@@ -16,6 +17,7 @@
 - 录音最大时长计时器（maxDurationTimer）改用 `.common` 运行循环模式，菜单栏菜单打开时也能正常触发（issue #16）
 - Overlay 隐藏动画不再与后续 show() 产生竞争：引入 generation 计数器，过期的 hide 完成回调不会关闭新弹出的 overlay（issue #17）
 - 飞书 API 直连 HTTP 现在会在 `Content-Length` 或 chunked body 完整时立即完成，超时时会先解析已完整缓冲的响应；token 缓存遵守飞书 `expire` 字段并保留 300 秒安全余量；取消任务不再继续重试、轮询后续直连 IP 或进入 DNS 回退（issues #11/#12/#21）
+- 热键监控恢复为 `.active` 时自动清除过期的热键失败提示但保留其他错误；`cleanup()` 复用 `stopHotKeyMonitoring()` 释放订阅，`forceState(_:)` 限定为 Debug 测试辅助方法（issues #22/#23/#24）
 
 - 飞书 API 所有直连 IP 失败后自动回退至 URLSession DNS 解析，防止 CDN IP 轮换导致永久失效（issue #3）
 - 开机启动功能（设置 → 通用 → 开机启动）

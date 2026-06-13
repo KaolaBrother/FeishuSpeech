@@ -301,11 +301,13 @@ class HotKeyService: ObservableObject {
         previousFlagsLock.unlock()
     }
 
+    #if DEBUG
     /// Test-only helper: directly set state without going through the event tap.
     func forceState(_ newState: HotKeyState) {
         logger.info("forceState called: \(String(describing: newState))")
         state = newState
     }
+    #endif
 
     /// Called by MainViewModel when the max-duration timer fires.
     /// Transitions .recording or .pending → .transcribing so the $state sink

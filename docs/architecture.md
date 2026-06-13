@@ -18,9 +18,10 @@ see `docs/decisions/D-1-01.md`):
 
 ## HotKeyService — state-machine contract
 
-`HotKeyService` drives the CGEventTap state machine: `idle → pending (0.3 s) → recording →
-transcribing → idle`. The following contract rules (issue #6, #7, #8; see
-`docs/decisions/D-6-01.md`) keep `HotKeyService` and `MainViewModel` in sync:
+`HotKeyService` drives the CGEventTap state machine: `idle -> pending (0.3 s) -> recording ->
+transcribing -> idle`. The following contract rules (issues #6, #7, #8, #22, #23, #24; see
+`docs/decisions/D-6-01.md` and `docs/decisions/D-24-01.md`) keep `HotKeyService` and
+`MainViewModel` in sync:
 
 - **`handleFnReleased` is a no-op except in `.recording`.** Calling it from `.transcribing`,
   `.error`, `.cancelled`, or `.idle` performs no transition. Only `.recording → .transcribing`
@@ -33,6 +34,10 @@ transcribing → idle`. The following contract rules (issue #6, #7, #8; see
   subscriber.** `startHotKeyMonitoring` assigns it (replacing any prior subscriber);
   `stopHotKeyMonitoring` nils it before calling `stopMonitoring()`. At most one live
   `$state` subscriber exists at any time.
+- **App teardown uses the same hot-key stop path as normal monitoring shutdown.**
+  `MainViewModel.cleanup()` calls `stopHotKeyMonitoring()`, so cleanup releases
+  `stateCancellable` before delegating to `HotKeyService.stopMonitoring()`. Teardown must not
+  bypass `stopHotKeyMonitoring()` or leave a live `$state` subscriber behind.
 
 ## HotKeyService — tap-lifecycle and threading contract
 
@@ -55,8 +60,14 @@ which blocks the run loop and previously caused sporadic hotkey event drops.
 
 `HotKeyService` publishes `@Published var monitoringState: MonitoringState` with three
 cases: `.stopped`, `.active`, and `.failed(TapFailureReason)`. `MainViewModel` subscribes
-and surfaces `.failed` as an error status. The retry policy is unbounded capped exponential
-backoff (1 s → 2 s → … → 30 s cap) instead of the previous hard 3-attempt limit.
+and surfaces `.failed` as the fixed error status `热键不可用，请检查辅助功能权限`.
+
+When monitoring later publishes `.active`, `MainViewModel` auto-clears only that specific
+stale hot-key monitoring error and returns to `.idle`. The clear is guarded by both the
+tracked hot-key monitoring failure flag and the current status value, so unrelated errors
+such as speech-recognition failures are preserved. The retry policy is unbounded capped
+exponential backoff (1 s -> 2 s -> ... -> 30 s cap) instead of the previous hard 3-attempt
+limit.
 
 **`previousFlags` lifecycle**
 

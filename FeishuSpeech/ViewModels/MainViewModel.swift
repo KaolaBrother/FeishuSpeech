@@ -8,6 +8,7 @@ private let logger = Logger(subsystem: "com.feishuspeech.app", category: "ViewMo
 let maxRecordingDuration: TimeInterval = 60.0
 let errorRecoveryDelay: TimeInterval = 3.0
 private let maxConsecutiveFailures = 3
+private let hotKeyMonitoringErrorMessage = "热键不可用，请检查辅助功能权限"
 
 @MainActor
 class MainViewModel: ObservableObject {
@@ -33,6 +34,7 @@ class MainViewModel: ObservableObject {
     private var recordingStartTime: Date?
     private var maxDurationTimer: Timer?
     private var consecutiveFailureCount = 0
+    private var isShowingHotKeyMonitoringError = false
 
     var statusText: String {
         status.text
@@ -83,9 +85,9 @@ class MainViewModel: ObservableObject {
     }
 
     func stopHotKeyMonitoring() {
+        stateCancellable = nil
         guard isMonitoring else { return }
         logger.info("Stopping hot key monitoring")
-        stateCancellable = nil
         hotKeyService.stopMonitoring()
         isMonitoring = false
     }
@@ -144,11 +146,27 @@ class MainViewModel: ObservableObject {
     }
 
     private func handleMonitoringState(_ monState: MonitoringState) {
-        if case .failed = monState {
+        switch monState {
+        case .failed:
             logger.error("HotKey tap failed: \(String(describing: monState))")
-            status = .error("热键不可用，请检查辅助功能权限")
+            isShowingHotKeyMonitoringError = true
+            status = .error(hotKeyMonitoringErrorMessage)
+        case .active:
+            if isShowingHotKeyMonitoringError,
+               status == .error(hotKeyMonitoringErrorMessage) {
+                status = .idle
+            }
+            isShowingHotKeyMonitoringError = false
+        case .stopped:
+            break
         }
     }
+
+    #if DEBUG
+    func handleMonitoringStateForTesting(_ monState: MonitoringState) {
+        handleMonitoringState(monState)
+    }
+    #endif
 
     private func canStartRecording() -> Bool {
         guard settings.isConfigured else {
@@ -338,7 +356,7 @@ class MainViewModel: ObservableObject {
     func cleanup() {
         logger.info("MainViewModel cleanup called")
         audioRecorder.forceCleanup()
-        hotKeyService.stopMonitoring()
+        stopHotKeyMonitoring()
         stopMaxDurationTimer()
     }
 }
