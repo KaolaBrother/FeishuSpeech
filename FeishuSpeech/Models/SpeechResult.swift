@@ -4,10 +4,28 @@ nonisolated struct AuthResponse: Decodable, Sendable {
     let code: Int
     let msg: String
     let tenantAccessToken: String?
+    let expire: Int?
     
     enum CodingKeys: String, CodingKey {
         case code, msg
         case tenantAccessToken = "tenant_access_token"
+        case expire
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        code = try container.decode(Int.self, forKey: .code)
+        msg = try container.decode(String.self, forKey: .msg)
+        tenantAccessToken = try container.decodeIfPresent(String.self, forKey: .tenantAccessToken)
+
+        if let intExpire = try? container.decodeIfPresent(Int.self, forKey: .expire) {
+            expire = intExpire
+        } else if let stringExpire = try? container.decodeIfPresent(String.self, forKey: .expire) {
+            expire = Int(stringExpire)
+        } else {
+            expire = nil
+        }
     }
 }
 

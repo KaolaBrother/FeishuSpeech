@@ -8,6 +8,7 @@
 
 /* Begin PBXFileReference section */
 		5C662C682F43464500BCDAFF /* FeishuSpeech.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = FeishuSpeech.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		5C662CA02F44A00000BCDAFF /* FeishuSpeechTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = FeishuSpeechTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -17,6 +18,13 @@
 				Info.plist,
 			);
 			target = 5C662C672F43464500BCDAFF /* FeishuSpeech */;
+		};
+		5C662CAB2F44A00000BCDAFF /* Exceptions for "FeishuSpeechTests" folder in "FeishuSpeechTests" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				AudioRecorderRecoveryTests.swift,
+			);
+			target = 5C662CA52F44A00000BCDAFF /* FeishuSpeechTests */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
@@ -29,10 +37,25 @@
 			path = FeishuSpeech;
 			sourceTree = "<group>";
 		};
+		5C662CA12F44A00000BCDAFF /* FeishuSpeechTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				5C662CAB2F44A00000BCDAFF /* Exceptions for "FeishuSpeechTests" folder in "FeishuSpeechTests" target */,
+			);
+			path = FeishuSpeechTests;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		5C662C652F43464500BCDAFF /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		5C662CA32F44A00000BCDAFF /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -46,6 +69,7 @@
 			isa = PBXGroup;
 			children = (
 				5C662C6A2F43464500BCDAFF /* FeishuSpeech */,
+				5C662CA12F44A00000BCDAFF /* FeishuSpeechTests */,
 				5C662C692F43464500BCDAFF /* Products */,
 			);
 			sourceTree = "<group>";
@@ -54,6 +78,7 @@
 			isa = PBXGroup;
 			children = (
 				5C662C682F43464500BCDAFF /* FeishuSpeech.app */,
+				5C662CA02F44A00000BCDAFF /* FeishuSpeechTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -83,7 +108,40 @@
 			productReference = 5C662C682F43464500BCDAFF /* FeishuSpeech.app */;
 			productType = "com.apple.product-type.application";
 		};
+		5C662CA52F44A00000BCDAFF /* FeishuSpeechTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 5C662CAA2F44A00000BCDAFF /* Build configuration list for PBXNativeTarget "FeishuSpeechTests" */;
+			buildPhases = (
+				5C662CA22F44A00000BCDAFF /* Sources */,
+				5C662CA32F44A00000BCDAFF /* Frameworks */,
+				5C662CA42F44A00000BCDAFF /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				5C662CA72F44A00000BCDAFF /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				5C662CA12F44A00000BCDAFF /* FeishuSpeechTests */,
+			);
+			name = FeishuSpeechTests;
+			packageProductDependencies = (
+			);
+			productName = FeishuSpeechTests;
+			productReference = 5C662CA02F44A00000BCDAFF /* FeishuSpeechTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
+
+/* Begin PBXContainerItemProxy section */
+		5C662CA62F44A00000BCDAFF /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 5C662C602F43464500BCDAFF /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 5C662C672F43464500BCDAFF;
+			remoteInfo = FeishuSpeech;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXProject section */
 		5C662C602F43464500BCDAFF /* Project object */ = {
@@ -95,6 +153,10 @@
 				TargetAttributes = {
 					5C662C672F43464500BCDAFF = {
 						CreatedOnToolsVersion = 26.2;
+					};
+					5C662CA52F44A00000BCDAFF = {
+						CreatedOnToolsVersion = 26.2;
+						TestTargetID = 5C662C672F43464500BCDAFF;
 					};
 				};
 			};
@@ -113,12 +175,20 @@
 			projectRoot = "";
 			targets = (
 				5C662C672F43464500BCDAFF /* FeishuSpeech */,
+				5C662CA52F44A00000BCDAFF /* FeishuSpeechTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		5C662C662F43464500BCDAFF /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		5C662CA42F44A00000BCDAFF /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -135,7 +205,22 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		5C662CA22F44A00000BCDAFF /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		5C662CA72F44A00000BCDAFF /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 5C662C672F43464500BCDAFF /* FeishuSpeech */;
+			targetProxy = 5C662CA62F44A00000BCDAFF /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		5C662C712F43464700BCDAFF /* Debug */ = {
@@ -320,6 +405,57 @@
 			};
 			name = Release;
 		};
+		5C662CA82F44A00000BCDAFF /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_TESTING_SEARCH_PATHS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.2;
+				PRODUCT_BUNDLE_IDENTIFIER = Siji.FeishuSpeechTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/FeishuSpeech.app/Contents/MacOS/FeishuSpeech";
+			};
+			name = Debug;
+		};
+		5C662CA92F44A00000BCDAFF /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_TESTING_SEARCH_PATHS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.2;
+				PRODUCT_BUNDLE_IDENTIFIER = Siji.FeishuSpeechTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/FeishuSpeech.app/Contents/MacOS/FeishuSpeech";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -337,6 +473,15 @@
 			buildConfigurations = (
 				5C662C742F43464700BCDAFF /* Debug */,
 				5C662C752F43464700BCDAFF /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		5C662CAA2F44A00000BCDAFF /* Build configuration list for PBXNativeTarget "FeishuSpeechTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5C662CA82F44A00000BCDAFF /* Debug */,
+				5C662CA92F44A00000BCDAFF /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
