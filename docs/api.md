@@ -41,21 +41,17 @@ credentials can be read from the credential store. If migration, read, or write
 fails, the legacy credentials are preserved as a fallback instead of being
 deleted.
 
-## Direct HTTP completion
+## HTTP transport and deadline
 
-The primary request path uses `DirectFeishuHTTPClient` over `NWConnection` and
-tries the configured direct Feishu IP list before falling back to URLSession DNS.
-Direct HTTP responses complete as soon as the buffered response proves that the
-body is complete:
+Authentication and speech requests use `URLSession` with the hostname
+`open.feishu.cn`. System DNS therefore selects a current Feishu CDN endpoint;
+the runtime path does not depend on a static IP list.
 
-- `Content-Length`: complete when at least the declared byte count has arrived.
-- `Transfer-Encoding: chunked`: complete when the terminal zero-size chunk and
-  trailer terminator have arrived.
-- No body length marker: complete only when the connection closes.
-
-If the direct connection reaches the request timeout, the buffered data is parsed
-one last time. A complete `Content-Length` or terminal chunked response is
-accepted; an incomplete response still throws `APIError.timeout`.
+`FeishuAPIService.recognizeSpeech` owns one 30-second end-to-end deadline that
+covers authentication, retries, backoff, and the speech request. When the
+deadline expires, cancellation propagates into the active URLSession task and
+the service reports `APIError.timeout`. `MainViewModel` does not add a competing
+timer.
 
 ## Token cache
 
@@ -89,8 +85,8 @@ error description, and the current network-availability flag.
 linear backoff. `CancellationError` and task cancellation are terminal:
 
 - retry attempts stop immediately;
-- the direct-IP loop does not try later IPs after cancellation;
-- URLSession DNS fallback is skipped after cancellation.
+- the active URLSession request is cancelled;
+- no later retry starts after the end-to-end deadline.
 
 This preserves the caller's timeout/cancel semantics instead of converting
 cancelled work into additional network attempts.

@@ -6,6 +6,7 @@ import os.log
 private nonisolated(unsafe) let logger = Logger(subsystem: "com.feishuspeech.app", category: "API")
 
 private nonisolated let requestTimeout: TimeInterval = 30
+private nonisolated let recognitionTimeout: TimeInterval = 30
 private nonisolated let maxRetries = 3
 private nonisolated let retryDelay: TimeInterval = 1.0
 private nonisolated let defaultTokenLifetime: TimeInterval = 6000
@@ -13,14 +14,6 @@ private nonisolated let tokenExpirySafetyMargin: TimeInterval = 300
 private nonisolated let feishuAPIHost = "open.feishu.cn"
 private nonisolated let authPath = "/open-apis/auth/v3/tenant_access_token/internal"
 private nonisolated let speechPath = "/open-apis/speech_to_text/v1/speech/file_recognize"
-private nonisolated let feishuDirectIPs = [
-    "101.73.101.8",
-    "60.9.0.98",
-    "221.195.244.15",
-    "119.249.53.155",
-    "116.136.165.49"
-]
-
 nonisolated struct DirectHTTPResponse: Sendable {
     let statusCode: Int
     let body: Data
@@ -36,7 +29,7 @@ private typealias DirectRequestSender = (
 private typealias URLSessionRequestSender = (String, [String: String], Data) async throws -> DirectHTTPResponse
 
 #if DEBUG
-typealias TestDirectRequestSender = @Sendable (String, [String: String], Data) async throws -> DirectHTTPResponse
+typealias TestRequestSender = @Sendable (URLRequest) async throws -> DirectHTTPResponse
 typealias TestRetrySleeper = @Sendable (TimeInterval) async throws -> Void
 #endif
 
@@ -347,8 +340,9 @@ actor FeishuAPIService {
     private var isNetworkAvailable = true
 
 #if DEBUG
-    private var directRequestSenderForTesting: TestDirectRequestSender?
+    private var requestSenderForTesting: TestRequestSender?
     private var retrySleeperForTesting: TestRetrySleeper?
+    private var recognitionTimeoutForTesting: TimeInterval?
 #endif
 
     private let decoder = JSONDecoder()
@@ -441,8 +435,12 @@ actor FeishuAPIService {
         retrySleeperForTesting = sleeper
     }
 
-    func setDirectRequestSenderForTesting(_ sender: @escaping TestDirectRequestSender) {
-        directRequestSenderForTesting = sender
+    func setRequestSenderForTesting(_ sender: @escaping TestRequestSender) {
+        requestSenderForTesting = sender
+    }
+
+    func setRecognitionTimeoutForTesting(_ timeout: TimeInterval) {
+        recognitionTimeoutForTesting = timeout
     }
 
     func resetForTesting() {
@@ -450,8 +448,9 @@ actor FeishuAPIService {
         tokenExpiry = nil
         lastNetworkError = nil
         isNetworkAvailable = true
-        directRequestSenderForTesting = nil
+        requestSenderForTesting = nil
         retrySleeperForTesting = nil
+        recognitionTimeoutForTesting = nil
     }
 
     func seedStateForWakeTesting(
@@ -510,10 +509,46 @@ actor FeishuAPIService {
             throw APIError.networkUnavailable
         }
 
-        return try await withRetry {
+        let timeout: TimeInterval
+#if DEBUG
+        timeout = recognitionTimeoutForTesting ?? recognitionTimeout
+#else
+        timeout = recognitionTimeout
+#endif
+
+        return try await withRecognitionTimeout(seconds: timeout) {
+            try await self.performRecognition(audioData: audioData, appId: appId, appSecret: appSecret)
+        }
+    }
+
+    private func performRecognition(audioData: Data, appId: String, appSecret: String) async throws -> String {
+        try await withRetry {
             let token = try await self.getAccessToken(appId: appId, appSecret: appSecret)
             logger.info("Got access token")
             return try await self.sendSpeechRequest(audioData: audioData, token: token)
+        }
+    }
+
+    private func withRecognitionTimeout<T: Sendable>(
+        seconds: TimeInterval,
+        operation: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask {
+                try await operation()
+            }
+
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw APIError.timeout
+            }
+
+            defer { group.cancelAll() }
+
+            guard let result = try await group.next() else {
+                throw APIError.timeout
+            }
+            return result
         }
     }
 
@@ -585,7 +620,7 @@ actor FeishuAPIService {
         ]
         let requestBody = try JSONSerialization.data(withJSONObject: body)
 
-        let response = try await sendDirectRequest(
+        let response = try await sendRequest(
             path: authPath,
             headers: ["Content-Type": "application/json"],
             body: requestBody
@@ -621,7 +656,7 @@ actor FeishuAPIService {
 
         logger.info("Sending speech request with fileId: \(fileId)")
 
-        let response = try await sendDirectRequest(
+        let response = try await sendRequest(
             path: speechPath,
             headers: [
                 "Authorization": "Bearer \(token)",
@@ -655,24 +690,19 @@ actor FeishuAPIService {
         return result.recognitionText
     }
 
-    private func sendDirectRequest(
+    private func sendRequest(
         path: String,
         headers: [String: String],
         body: Data
     ) async throws -> DirectHTTPResponse {
+        let request = try makeURLRequest(path: path, headers: headers, body: body)
 #if DEBUG
-        if let directRequestSenderForTesting {
-            return try await directRequestSenderForTesting(path, headers, body)
+        if let requestSenderForTesting {
+            return try await requestSenderForTesting(request)
         }
 #endif
-        return try await sendDirectRequest(
-            path: path,
-            headers: headers,
-            body: body,
-            ipAddresses: feishuDirectIPs,
-            directSend: nil,
-            fallbackSend: nil
-        )
+        logger.info("Sending Feishu request via system DNS: \(path, privacy: .public)")
+        return try await executeURLRequest(request)
     }
 
     private func sendDirectRequest(
@@ -747,19 +777,44 @@ actor FeishuAPIService {
         headers: [String: String],
         body: Data
     ) async throws -> DirectHTTPResponse {
+        let request = try makeURLRequest(path: path, headers: headers, body: body)
+        return try await executeURLRequest(request)
+    }
+
+    private func makeURLRequest(
+        path: String,
+        headers: [String: String],
+        body: Data
+    ) throws -> URLRequest {
         guard let url = URL(string: "https://\(feishuAPIHost)\(path)") else {
             throw APIError.invalidResponse
         }
-        var request = URLRequest(url: url, timeoutInterval: requestTimeout)
+        var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.httpBody = body
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         headers.forEach { request.setValue($0.value, forHTTPHeaderField: $0.key) }
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw APIError.invalidResponse
+        return request
+    }
+
+    private func executeURLRequest(_ request: URLRequest) async throws -> DirectHTTPResponse {
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw APIError.invalidResponse
+            }
+            return DirectHTTPResponse(statusCode: httpResponse.statusCode, body: data)
+        } catch let error as CancellationError {
+            throw error
+        } catch let error as URLError {
+            if error.code == .cancelled, Task.isCancelled {
+                throw CancellationError()
+            }
+            if error.code == .timedOut {
+                throw APIError.timeout
+            }
+            throw APIError.networkError(error.localizedDescription)
         }
-        return DirectHTTPResponse(statusCode: httpResponse.statusCode, body: data)
     }
 
     enum APIError: LocalizedError {

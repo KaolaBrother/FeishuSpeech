@@ -3,6 +3,7 @@ import Foundation
 @testable import FeishuSpeech
 
 struct MockFeishuRequest: Sendable {
+    let host: String?
     let path: String
     let headers: [String: String]
     let body: Data
@@ -17,9 +18,16 @@ final class MockFeishuRequestSequence: @unchecked Sendable {
         self.results = results
     }
 
-    func send(path: String, headers: [String: String], body: Data) throws -> DirectHTTPResponse {
+    func send(request: URLRequest) throws -> DirectHTTPResponse {
         lock.lock()
-        requests.append(MockFeishuRequest(path: path, headers: headers, body: body))
+        requests.append(
+            MockFeishuRequest(
+                host: request.url?.host,
+                path: request.url?.path ?? "",
+                headers: request.allHTTPHeaderFields ?? [:],
+                body: request.httpBody ?? Data()
+            )
+        )
         let result = results.isEmpty ? nil : results.removeFirst()
         lock.unlock()
 
@@ -35,6 +43,13 @@ final class MockFeishuRequestSequence: @unchecked Sendable {
         let paths = requests.map(\.path)
         lock.unlock()
         return paths
+    }
+
+    func requestHosts() -> [String?] {
+        lock.lock()
+        let hosts = requests.map(\.host)
+        lock.unlock()
+        return hosts
     }
 
     func authorizationHeaders() -> [String] {

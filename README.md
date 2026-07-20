@@ -84,7 +84,7 @@ cp -R build/Build/Products/Release/FeishuSpeech.app /Applications/
 
 ### 识别卡在「识别中」很久
 
-当飞书 CDN 节点不可达时，应用会依次尝试多个备用 IP，每个 IP 超时后立即中止（不再等待系统默认的 30–75 秒）。若全部 IP 均不可达，自动回退至系统 DNS 解析 `open.feishu.cn`，以应对飞书 CDN IP 变化。转录请求超时上限为 30 秒，超时后连接会被强制取消，「识别中」最长卡顿从约 150 秒降至约 30 秒。
+应用始终通过系统 DNS 解析 `open.feishu.cn`，由 Feishu CDN 选择当前可用节点，不再依赖可能过期的硬编码 IP。一次完整识别（包括认证、重试和语音请求）共享 30 秒总超时；到期后底层 URLSession 请求会被取消，避免迟到结果覆盖当前状态。
 
 ### 开机启动
 

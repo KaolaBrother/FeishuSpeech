@@ -298,13 +298,11 @@ class MainViewModel: ObservableObject {
 
     private func transcribeAudio(_ audioData: Data, generation: Int) async {
         do {
-            let text = try await withTimeout(seconds: 30) {
-                try await FeishuAPIService.shared.recognizeSpeech(
-                    audioData: audioData,
-                    appId: self.settings.appId,
-                    appSecret: self.settings.appSecret
-                )
-            }
+            let text = try await FeishuAPIService.shared.recognizeSpeech(
+                audioData: audioData,
+                appId: settings.appId,
+                appSecret: settings.appSecret
+            )
 
             logger.info("Recognition result: \(text)")
             consecutiveFailureCount = 0
@@ -476,31 +474,5 @@ class MainViewModel: ObservableObject {
         audioRecorder.forceCleanup()
         stopHotKeyMonitoring()
         stopMaxDurationTimer()
-    }
-}
-
-private func withTimeout<T>(seconds: TimeInterval, operation: @escaping () async throws -> T) async throws -> T {
-    try await withThrowingTaskGroup(of: T.self) { group in
-        group.addTask {
-            try await operation()
-        }
-
-        group.addTask {
-            try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-            throw TimeoutError()
-        }
-
-        guard let result = try await group.next() else {
-            throw TimeoutError()
-        }
-
-        group.cancelAll()
-        return result
-    }
-}
-
-struct TimeoutError: LocalizedError {
-    var errorDescription: String? {
-        return "操作超时"
     }
 }

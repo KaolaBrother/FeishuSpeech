@@ -219,35 +219,6 @@ final class FeishuAPIServiceTests: XCTestCase {
         XCTAssertEqual(attempts, 1)
     }
 
-    func test_sendDirectRequest_whenDirectSenderCancels_doesNotTryLaterIPsOrFallback() async {
-        let service = FeishuAPIService.shared
-        await service.setNetworkAvailableForTesting(true)
-        var attemptedIPs: [String] = []
-        var fallbackAttempts = 0
-
-        do {
-            _ = try await service.sendDirectRequestForTesting(
-                ipAddresses: ["first", "second"],
-                directSend: { ipAddress in
-                    attemptedIPs.append(ipAddress)
-                    throw CancellationError()
-                },
-                fallbackSend: {
-                    fallbackAttempts += 1
-                    return DirectHTTPResponse(statusCode: 200, body: Data())
-                }
-            )
-            XCTFail("sendDirectRequestForTesting must rethrow CancellationError")
-        } catch is CancellationError {
-            // Expected.
-        } catch {
-            XCTFail("Expected CancellationError, got \(error)")
-        }
-
-        XCTAssertEqual(attemptedIPs, ["first"])
-        XCTAssertEqual(fallbackAttempts, 0)
-    }
-
     func test_withRetry_whenRetriableError_recordsRetryDelaysWithoutSleeping() async throws {
         var attempts = 0
         var delays: [TimeInterval] = []
@@ -340,7 +311,7 @@ final class FeishuAPIServiceTests: XCTestCase {
             .success(jsonResponse(speechJSON(text: "first"))),
             .success(jsonResponse(speechJSON(text: "second")))
         ])
-        await service.setDirectRequestSenderForTesting(transport.send)
+        await service.setRequestSenderForTesting(transport.send)
 
         let first = try await service.recognizeSpeech(audioData: Data([1, 2]), appId: "app", appSecret: "secret")
         let second = try await service.recognizeSpeech(audioData: Data([3, 4]), appId: "app", appSecret: "secret")
@@ -356,6 +327,57 @@ final class FeishuAPIServiceTests: XCTestCase {
             "Bearer cached-token",
             "Bearer cached-token"
         ])
+    }
+
+    func test_recognizeSpeech_routesEveryRequestThroughFeishuHostname() async throws {
+        let transport = MockFeishuRequestSequence([
+            .success(jsonResponse(authJSON(token: "token"))),
+            .success(jsonResponse(speechJSON(text: "result")))
+        ])
+        await service.setRequestSenderForTesting(transport.send)
+
+        _ = try await service.recognizeSpeech(
+            audioData: Data([1, 2]),
+            appId: "app",
+            appSecret: "secret"
+        )
+
+        XCTAssertEqual(
+            transport.requestHosts(),
+            ["open.feishu.cn", "open.feishu.cn"],
+            "Auth and speech requests must use the hostname so DNS can select current Feishu endpoints"
+        )
+    }
+
+    func test_recognizeSpeech_whenOverallDeadlineExpires_cancelsActiveRequestOnce() async {
+        let probe = RequestCancellationProbe()
+        await service.setRecognitionTimeoutForTesting(0.05)
+        await service.setRequestSenderForTesting { _ in
+            probe.markStarted()
+            do {
+                try await Task.sleep(nanoseconds: 5_000_000_000)
+            } catch {
+                probe.markCancelled()
+                throw error
+            }
+            return jsonResponse(authJSON(token: "late-token"))
+        }
+
+        do {
+            _ = try await service.recognizeSpeech(
+                audioData: Data([1, 2]),
+                appId: "app",
+                appSecret: "secret"
+            )
+            XCTFail("recognizeSpeech must enforce one overall deadline")
+        } catch FeishuAPIService.APIError.timeout {
+            // Expected.
+        } catch {
+            XCTFail("Expected APIError.timeout, got \(error)")
+        }
+
+        XCTAssertEqual(probe.startedCount, 1, "The overall deadline must not start a retry after cancellation")
+        XCTAssertEqual(probe.cancelledCount, 1, "The active hostname request must receive cancellation")
     }
 
     func test_recognizeSpeech_whenSpeechReturns400_clearsTokenAndRetriesWithFreshAuth() async throws {
@@ -390,7 +412,7 @@ final class FeishuAPIServiceTests: XCTestCase {
             .success(jsonResponse(authJSON(token: "fresh-token"))),
             .success(jsonResponse(speechJSON(text: "fresh result")))
         ])
-        await service.setDirectRequestSenderForTesting(transport.send)
+        await service.setRequestSenderForTesting(transport.send)
 
         let result = try await service.recognizeSpeech(audioData: Data([1, 2]), appId: "app", appSecret: "secret")
 
@@ -405,6 +427,32 @@ final class FeishuAPIServiceTests: XCTestCase {
             "Bearer stale-token",
             "Bearer fresh-token"
         ])
+    }
+}
+
+private final class RequestCancellationProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var started = 0
+    private var cancelled = 0
+
+    var startedCount: Int {
+        lock.withLock { started }
+    }
+
+    var cancelledCount: Int {
+        lock.withLock { cancelled }
+    }
+
+    func markStarted() {
+        lock.withLock {
+            started += 1
+        }
+    }
+
+    func markCancelled() {
+        lock.withLock {
+            cancelled += 1
+        }
     }
 }
 

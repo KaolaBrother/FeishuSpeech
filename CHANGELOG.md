@@ -10,6 +10,7 @@
 - 新增 `MainViewModelTests` 覆盖 `MonitoringState` 失败映射、恢复清除和 cleanup 订阅释放路径（issues #22/#23/#24）
 
 ### Fixed
+- 飞书认证和语音识别请求改为直接通过 `open.feishu.cn` 的系统 DNS/URLSession 路径发送，移除会因 CDN IP 轮换耗尽 30 秒预算的硬编码 IP 主路径；30 秒总超时统一由 `FeishuAPIService` 管理并向底层请求传播取消。
 - 飞书 App ID / App Secret 不再写入 UserDefaults 设置载荷：新保存使用 macOS Keychain，旧版 `FeishuSpeechSettings` 或独立 `appId` / `appSecret` 默认值会在可安全读写 Keychain 后迁移并清理；迁移或读写失败时保留旧凭据回退（issue #18）
 - 系统睡眠/唤醒后会取消陈旧转录、清理录音和 overlay 状态、重置热键状态，并刷新飞书 token / 网络错误缓存；唤醒时还会检查并重启丢失或禁用的 Event Tap（issue #19）
 - Event Tap 从主线程移至专用后台线程，避免与 AVCaptureSession 争用主 RunLoop 导致热键丢失（issue #9）
