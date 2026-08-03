@@ -79,6 +79,26 @@ final class HotKeyServiceTests: XCTestCase {
         XCTAssertEqual(sut.state, .error("Test error message"))
     }
 
+    func test_setError_repeatedIdenticalMessagePublishesOnce() {
+        let message = "认证失败，请检查应用凭据"
+        var publishedStates: [HotKeyState] = []
+        sut.resetToIdle()
+        sut.$state
+            .dropFirst()
+            .sink { publishedStates.append($0) }
+            .store(in: &cancellables)
+
+        sut.setError(message)
+        sut.setError(message)
+        sut.setError(message)
+
+        XCTAssertEqual(
+            publishedStates,
+            [.error(message)],
+            "identical errors must not republish and re-enter teardown"
+        )
+    }
+
     // MARK: - Issue #7/#26: max-duration sealing
 
     func test_forceSealing_fromStreaming_preservesIdentity() {

@@ -19,6 +19,25 @@ Speech requests use `Authorization: Bearer <tenant_access_token>`,
 The production Fn interaction never calls the compatibility-only whole-file endpoint and does not
 fall back to it after a streaming failure.
 
+### Authentication startup and public failures
+
+The streaming provider must obtain a tenant token before it constructs a session or sends any
+request to `stream_recognize`. A tenant-token business rejection therefore means that the
+streaming endpoint was not reached. The recorded second installed-Release UAT failed at this token
+acquisition boundary; it is evidence of an authentication rejection, not of a successful live
+streaming request.
+
+`FeishuAPIService.APIError.authFailed` maps to the fixed public message
+`认证失败，请检查应用凭据`. The associated backend message, credential values, transcript, and raw
+response stay outside UI and logs. Any terminal provider or streaming failure invalidates the
+active generation, hides the recording overlay, and tears the interaction down once. Republishing
+the same `HotKeyService` error is suppressed so it cannot re-enter teardown or indefinitely defer
+the overlay's hide completion.
+
+Owner UAT with a valid App ID/App Secret must still verify the tenant's
+`speech_to_text:speech` permission, published application state, supported edition, and the real
+streaming contract. The observed authentication rejection does not close that gate.
+
 ## Streaming recognition contract (issues #25/#26)
 
 Issue #25 defined and issue #26 implements production recognition at:
@@ -202,9 +221,10 @@ cancelled work into additional network attempts.
 `FeishuSpeechTests` is wired into the Xcode project. Issue #26 adds automated coverage for exact
 audio ingress accounting, recorder sealing barriers, streaming action/sequence/token/cancel races,
 cursor replacement, captured and unbound final-only output, lifecycle generation, settings, and
-fixed completion feedback. The independent pre-correction full macOS run reports 171 passed, 0
-failed, and 0 skipped; focused post-UAT regressions were added for AX-unavailable startup and
-exact-once current-focus final delivery.
+fixed completion feedback. The current full macOS run reports 184 passed, 0 failed, and 0 skipped;
+post-UAT regressions cover AX-unavailable startup, exact-once current-focus final delivery,
+terminal-provider exact-once teardown, overlay dismissal, identical-error suppression, and private
+authentication feedback.
 
 `AudioRecorderRecoveryTests.swift` remains excluded from the test target because it is a recorded
 pre-existing AudioRecorder-owned blocker outside the #11/#12/#21 API recovery bundle.

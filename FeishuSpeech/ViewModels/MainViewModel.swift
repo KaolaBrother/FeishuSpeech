@@ -190,13 +190,24 @@ class MainViewModel: ObservableObject {
                 await self?.terminateAbnormally(message: nil, reportsError: false)
             }
         case .error(let message):
-            Task { @MainActor [weak self] in
-                await self?.terminateAbnormally(message: message, reportsError: true)
-            }
+            handleHotKeyError(message)
         case .recording, .transcribing:
             logger.warning("Ignoring retired whole-file hot-key state")
         }
         _ = startsTranscriptionTask
+    }
+
+    private func handleHotKeyError(_ message: String) {
+        guard activeSessionIdentity != nil else {
+            if status != .error(message) {
+                hideOverlay()
+                status = .error(message)
+            }
+            return
+        }
+        Task { @MainActor [weak self] in
+            await self?.terminateAbnormally(message: message, reportsError: true)
+        }
     }
 
     #if DEBUG
@@ -370,13 +381,18 @@ class MainViewModel: ObservableObject {
             }
             activeStreamingSession = session
 
-            try await consumePackets(from: ingress, with: session, identity: identity)
+            let receivedTerminalEvent = try await consumePackets(
+                from: ingress,
+                with: session,
+                identity: identity
+            )
             guard isActive(identity), !Task.isCancelled else { return }
+            guard !receivedTerminalEvent else { return }
             await finishConsumedAudio(with: session, identity: identity)
         } catch is CancellationError {
             return
         } catch {
-            await handleStreamingFailure(identity: identity)
+            await handleStreamingFailure(identity: identity, error: error)
         }
     }
 
@@ -384,16 +400,17 @@ class MainViewModel: ObservableObject {
         from ingress: ByteBoundedAudioIngress,
         with session: any SpeechStreamingSession,
         identity: StreamingSessionIdentity
-    ) async throws {
+    ) async throws -> Bool {
         for try await packet in ingress.stream {
-            guard isActive(identity), !Task.isCancelled else { return }
+            guard isActive(identity), !Task.isCancelled else { return true }
             let event = try await session.sendAudioPacket(packet)
-            guard isActive(identity), !Task.isCancelled else { return }
+            guard isActive(identity), !Task.isCancelled else { return true }
             acceptedPacket = true
             if handleStreamingEvent(event, identity: identity, isTerminal: false) {
-                return
+                return true
             }
         }
+        return false
     }
 
     private func finishConsumedAudio(
@@ -418,16 +435,32 @@ class MainViewModel: ObservableObject {
             guard isActive(identity), !Task.isCancelled else { return }
             _ = handleStreamingEvent(event, identity: identity, isTerminal: true)
         } catch {
-            await handleStreamingFailure(identity: identity)
+            await handleStreamingFailure(identity: identity, error: error)
         }
     }
 
-    private func handleStreamingFailure(identity: StreamingSessionIdentity) async {
+    private func handleStreamingFailure(
+        identity: StreamingSessionIdentity,
+        error: Error? = nil
+    ) async {
         guard isActive(identity), !Task.isCancelled else { return }
         if let cursorSession {
             try? cursorSession.handle(.failed(.network), generation: identity.generation)
         }
-        await terminateAbnormally(message: "流式识别失败", reportsError: true)
+        await terminateAbnormally(
+            message: streamingFailureMessage(for: error),
+            reportsError: true
+        )
+    }
+
+    private func streamingFailureMessage(for error: Error?) -> String {
+        guard let apiError = error as? FeishuAPIService.APIError else {
+            return "流式识别失败"
+        }
+        if case .authFailed = apiError {
+            return "认证失败，请检查应用凭据"
+        }
+        return "流式识别失败"
     }
 
     @discardableResult

@@ -482,6 +482,10 @@ class HotKeyService: ObservableObject {
     }
 
     func setError(_ message: String) {
+        guard state != .error(message) else {
+            logger.info("Ignoring repeated identical error state")
+            return
+        }
         logger.error("Setting error state: \(message)")
         cancelPendingTransition()
         invalidateActiveSession()

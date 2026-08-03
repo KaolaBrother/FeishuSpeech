@@ -77,6 +77,76 @@ final class StreamingMainViewModelTests: XCTestCase {
         XCTAssertFalse(visibleFeedback(context.viewModel).contains("无法确认输入位置"))
     }
 
+    func test_immediateProviderTerminalFailureDismissesOverlayAndTearsDownGenerationOnce() async {
+        let transcript = "PRIVATE_LATE_AFTER_PROVIDER_FAILURE"
+        let context = makeContext(
+            capability: .accessibilityUnavailable,
+            packetEvents: [.failed(.network)]
+        )
+        let identity = StreamingSessionIdentity(generation: 186)
+        context.recorder.onForceCleanup = {
+            XCTAssertNil(
+                context.viewModel.activeSessionIdentityForTesting,
+                "the failed generation must be invalid before recorder teardown"
+            )
+            XCTAssertNil(
+                context.overlayPresenter.visibleStatus,
+                "the recording overlay must be dismissed before recorder teardown"
+            )
+        }
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await context.provider.makeSessionCallCount == 1 }
+        XCTAssertEqual(context.overlayPresenter.visibleStatus, .streaming)
+
+        context.recorder.emit(Data(repeating: 0x57, count: 6_400))
+        await waitUntil { context.recorder.forceCleanupCallCount >= 1 }
+        await settle(iterations: 50)
+
+        XCTAssertNil(context.overlayPresenter.visibleStatus)
+        XCTAssertNil(context.viewModel.activeSessionIdentityForTesting)
+        XCTAssertEqual(
+            context.recorder.forceCleanupCallCount,
+            1,
+            "one terminal provider event must trigger exactly one teardown"
+        )
+        let cancelCallCount = await context.session.cancelCallCount
+        XCTAssertEqual(cancelCallCount, 1)
+
+        context.viewModel.handleStreamingEventForTesting(.partial(transcript), identity: identity)
+        context.viewModel.handleStreamingEventForTesting(.final(transcript), identity: identity)
+        XCTAssertEqual(context.accessibility.setSelectedTextCalls, [])
+        XCTAssertEqual(context.output.currentFocusInsertedTexts, [])
+        XCTAssertEqual(context.output.copiedTexts, [])
+        XCTAssertFalse(containsTranscript(context.viewModel, transcript: transcript))
+    }
+
+    func test_providerAuthFailureUsesFixedPrivateFeedbackAndTearsDownOnce() async {
+        let secret = "PRIVATE_AUTH_SECRET PRIVATE_TRANSCRIPT"
+        let context = makeContext(
+            capability: .accessibilityUnavailable,
+            providerError: .authFailed(secret)
+        )
+        let identity = StreamingSessionIdentity(generation: 187)
+        context.recorder.onForceCleanup = {
+            XCTAssertNil(context.viewModel.activeSessionIdentityForTesting)
+            XCTAssertNil(context.overlayPresenter.visibleStatus)
+        }
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { context.recorder.forceCleanupCallCount >= 1 }
+        await settle(iterations: 50)
+
+        XCTAssertEqual(context.viewModel.status, .error("认证失败，请检查应用凭据"))
+        XCTAssertNil(context.overlayPresenter.visibleStatus)
+        XCTAssertEqual(context.overlayPresenter.hideCallCount, 1)
+        XCTAssertEqual(context.recorder.forceCleanupCallCount, 1)
+        let cancelCallCount = await context.session.cancelCallCount
+        XCTAssertEqual(cancelCallCount, 0)
+        XCTAssertFalse(visibleFeedback(context.viewModel).contains(secret))
+        XCTAssertFalse(visibleFeedback(context.viewModel).contains("PRIVATE_TRANSCRIPT"))
+    }
+
     func test_unboundFallbackDeliversNonEmptyFinalToCurrentFocusExactlyOnce() async {
         let context = makeContext(
             capability: .accessibilityUnavailable,
@@ -609,7 +679,8 @@ final class StreamingMainViewModelTests: XCTestCase {
         autoInsert: Bool = true,
         packetEvents: [StreamingRecognitionEvent] = [],
         finishEvent: StreamingRecognitionEvent = .cancelled,
-        holdFirstPacketResponse: Bool = false
+        holdFirstPacketResponse: Bool = false,
+        providerError: FeishuAPIService.APIError? = nil
     ) -> StreamingCoordinatorContext {
         let recorder = CoordinatorAudioRecorder()
         let session = CoordinatorStreamingSession(
@@ -617,7 +688,10 @@ final class StreamingMainViewModelTests: XCTestCase {
             finishEvent: finishEvent,
             holdFirstPacketResponse: holdFirstPacketResponse
         )
-        let provider = CoordinatorStreamingProvider(session: session)
+        let provider = CoordinatorStreamingProvider(
+            session: session,
+            makeSessionError: providerError
+        )
         let accessibility = CoordinatorAccessibilityClient(capability: capability)
         let output = CoordinatorFinalTextOutput()
         let overlayPresenter = CoordinatorOverlayPresenter()
@@ -783,6 +857,7 @@ private final class CoordinatorOverlayPresenter: RecordingOverlayPresenting {
     private(set) var visibleStatus: RecordingState?
     private(set) var lastCompletionFeedback: RecordingState?
     private(set) var lastMinimumVisibleDuration: TimeInterval?
+    private(set) var hideCallCount = 0
     private var remainingVisibleDuration: TimeInterval?
 
     func show(status: RecordingState) {
@@ -795,6 +870,7 @@ private final class CoordinatorOverlayPresenter: RecordingOverlayPresenting {
     }
 
     func hide() {
+        hideCallCount += 1
         visibleStatus = nil
         remainingVisibleDuration = nil
     }
@@ -871,10 +947,15 @@ private actor CoordinatorStreamingSession: SpeechStreamingSession {
 
 private actor CoordinatorStreamingProvider: SpeechStreamingSessionProviding {
     private let session: CoordinatorStreamingSession
+    private let makeSessionError: FeishuAPIService.APIError?
     private(set) var makeSessionCallCount = 0
 
-    init(session: CoordinatorStreamingSession) {
+    init(
+        session: CoordinatorStreamingSession,
+        makeSessionError: FeishuAPIService.APIError? = nil
+    ) {
         self.session = session
+        self.makeSessionError = makeSessionError
     }
 
     func makeStreamingSession(
@@ -882,6 +963,9 @@ private actor CoordinatorStreamingProvider: SpeechStreamingSessionProviding {
         appSecret: String
     ) async throws -> any SpeechStreamingSession {
         makeSessionCallCount += 1
+        if let makeSessionError {
+            throw makeSessionError
+        }
         return session
     }
 }

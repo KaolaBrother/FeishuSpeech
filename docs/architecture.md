@@ -109,6 +109,16 @@ typed state/failure values, generations, sequence numbers, and byte counts, but 
 text, audio, credentials/tokens, stream IDs, focused-control contents, application/window titles,
 or clipboard payloads.
 
+A terminal provider or streaming event owns one abnormal exit. The coordinator invalidates the
+generation and cursor session, hides the overlay, then cleans recorder, ingress, transport, and
+timers once. A terminal packet does not fall through into normal `finish()`. When the resulting
+error is reflected through `HotKeyService`, an identical `.error(message)` is not republished;
+`MainViewModel` also does not start a second teardown after the active generation is gone. This
+keeps overlay animation generations finite and guarantees that the terminal hide can complete.
+
+An authentication-provider failure is surfaced only as `认证失败，请检查应用凭据`. The associated
+backend detail is not a public diagnostic surface.
+
 ## AudioRecorder — session lifecycle and recovery
 
 `AudioRecorder` wraps `AVCaptureSession` with a `forceCleanup()` recovery contract (issue #1,
@@ -332,11 +342,15 @@ recording overlay.
 ## Verification boundary
 
 The implementation and independent correctness/security reviews are complete. The recorded full
-macOS test run reports 171 passed, 0 failed, and 0 skipped, including ingress drain/reuse,
+macOS test run reports 184 passed, 0 failed, and 0 skipped, including ingress drain/reuse,
 post-callback-barrier sealing, strict serial finish/cancel races, cursor ownership, secure
-fail-closed output, generation cleanup, settings, and two-second transcript-free feedback.
+fail-closed output, generation cleanup, settings, two-second transcript-free feedback, terminal
+provider teardown, overlay dismissal, identical-error suppression, and private auth feedback.
 
 Credential-bearing Feishu behavior and cross-application Accessibility compatibility remain live
-UAT. The installed Release must still verify terminal encoding, real response and token-refresh
-behavior, PCM/tail handling, slow networks, native/browser/Electron/terminal/rich-text targets,
-focus/caret interference, Unicode, and undo. No broad application compatibility is claimed yet.
+UAT. The second installed-Release attempt was rejected while acquiring the tenant token, before
+the streaming endpoint; it does not establish live streaming success. A valid App ID/App Secret,
+speech scope, published application, supported edition, terminal encoding, real response and
+token-refresh behavior, PCM/tail handling, slow networks, native/browser/Electron/terminal/rich-text
+targets, focus/caret interference, Unicode, and undo remain owner-UAT gates. No broad application
+compatibility is claimed yet.

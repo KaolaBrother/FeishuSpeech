@@ -56,7 +56,7 @@ Accessibility behavior is application-dependent. Native AppKit, WebKit, Electron
 document-editor targets require live UAT before broad compatibility claims are made.
 
 Issue #26's independent correctness and security reviews pass. The recorded full macOS suite has
-171 passing tests, 0 failures, and 0 skips. Those fakes and deterministic regressions verify local
+184 passing tests, 0 failures, and 0 skips. Those fakes and deterministic regressions verify local
 state, byte, transport, cursor, output, and lifecycle contracts; they do not replace installed
 Release UAT against a real Feishu tenant or real third-party applications.
 
@@ -236,6 +236,13 @@ Request rules:
   has been emitted.
 - Public errors are sanitized. Raw response bodies and backend messages do not reach UI or logs.
 
+The provider obtains a tenant token before creating this actor or sending `action=1`. A token
+business rejection at that stage is therefore pre-stream authentication failure. It maps to the
+fixed public message `认证失败，请检查应用凭据`; no associated backend detail is exposed. The second
+installed-Release UAT reached this boundary and was rejected before `stream_recognize`, so real
+streaming remains an owner-UAT gate with valid credentials, speech scope, published application,
+and supported tenant edition.
+
 Events exposed to the coordinator are typed:
 
 ```text
@@ -384,6 +391,12 @@ and stream events in generation-bound tasks. Cleanup order is:
 6. release transient destination, audio, token-session, and overlay state;
 7. return hot-key and view-model state to idle or the bounded error state.
 
+A terminal packet or provider exception takes this sequence exactly once and cannot fall through
+to normal finishing. The overlay is hidden before recorder/transport cleanup. Once the active
+identity has been cleared, reflecting the same error back from `HotKeyService` updates no active
+interaction; identical hot-key errors are not published again. These guards prevent recursive
+teardown from continuously advancing the overlay generation and leaving its window visible.
+
 ## 11. UI and settings
 
 - The overlay continues to appear on the screen containing the mouse pointer.
@@ -398,6 +411,8 @@ and stream events in generation-bound tasks. Cleanup order is:
 - A target capability warning is per interaction; it does not silently change the saved setting.
 - Empty-final preservation and copy-only recovery feedback are fixed strings shown for two seconds;
   coordinator state may already be idle while the generation-guarded overlay remains visible.
+- Authentication failure uses the fixed private feedback `认证失败，请检查应用凭据`; provider detail,
+  credentials, and transcript content never appear in that message.
 
 ## 12. Privacy, security, and diagnostics
 
@@ -486,6 +501,9 @@ Test/production custody separation was preserved for the automated implementatio
 - new Fn press during sealing is ignored;
 - sleep/wake and manual reset invalidate before cleanup;
 - capture or stream failure cannot leave mic, overlay, writer, or hot-key state active;
+- an immediate terminal provider event and a provider-auth exception each hide the overlay and
+  clean the active generation exactly once;
+- repeated identical hot-key errors publish once and cannot re-enter coordinator teardown;
 - unbound fallback starts capture/streaming, double-samples Secure Input/frontmost PID, and sends
   one non-empty final to current focus through direct Unicode input without a captured destination
   or pasteboard mutation on success;
@@ -513,12 +531,15 @@ Test/production custody separation was preserved for the automated implementatio
 Issue #25 supplied the accepted contract. Issue #26 supplies the production implementation,
 RED-first tests, independent correctness/security review, and documentation docking. Initial UAT
 then superseded the strict AX destination startup gate with unbound final-only delivery. The prior
-full macOS suite recorded 171 passing tests with no failures or skips; the correction adds focused
-coordinator regressions, while installed Release verification remains pending. Candidate lint
-diagnostics are a strict subset of the recorded baseline diagnostics rather than new issue-26 lint
-debt.
+full macOS suite plus the UAT corrections now records 184 passing tests with no failures or skips,
+including exact-once terminal cleanup, overlay dismissal, identical-error suppression, and private
+authentication feedback. Installed Release verification remains pending. Candidate lint diagnostics
+are a strict subset of the recorded baseline diagnostics rather than new issue-26 lint debt.
 
 General-availability closure remains intentionally separate: the owner will self-test the installed
-Release with real Feishu credentials and the live target-application matrix above. Until that UAT
-is recorded, terminal request encoding, real response/token semantics, PCM/tail behavior, slow
-network handling, and broad cross-application AX compatibility remain unverified.
+Release with real Feishu credentials and the live target-application matrix above. The second UAT
+attempt was rejected during tenant-token acquisition, before the streaming endpoint, and is not a
+live-stream success signal. Until owner UAT succeeds with valid credentials, speech scope, a
+published application, and a supported tenant edition, terminal request encoding, real response/
+token semantics, PCM/tail behavior, slow-network handling, and broad cross-application AX
+compatibility remain unverified.
