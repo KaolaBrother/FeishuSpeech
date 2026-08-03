@@ -46,3 +46,10 @@ No run-discovered defect requires a new follow-up issue. The observed Feishu rej
 - Real tenant streaming semantics and the target-application matrix remain UAT evidence, not local implementation claims.
 
 ## Status: ARCHIVED AFTER FINAL GIT GATE
+
+## Sink Findings
+
+post_rebase_tests: skipped
+
+archived_paths:
+- kaola-workflow/archive/issue-26/finalization-summary.md
