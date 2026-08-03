@@ -6,6 +6,100 @@ import os.log
 
 private let logger = Logger(subsystem: "com.feishuspeech.app", category: "TextInputSimulator")
 
+@MainActor
+protocol FinalTextOutput: AnyObject {
+    func insertOnce(
+        _ text: String,
+        destination: CursorDestinationToken,
+        validateDestination: () throws -> Bool
+    ) -> FinalTextInsertionResult
+    func copyForManualRecovery(_ text: String)
+}
+
+@MainActor
+final class SystemFinalTextOutput: FinalTextOutput {
+    private let pasteboardWriter: FinalTextPasteboardWriting
+    private let keyEventPoster: FinalTextKeyEventPosting
+
+    init(
+        pasteboardWriter: FinalTextPasteboardWriting,
+        keyEventPoster: FinalTextKeyEventPosting
+    ) {
+        self.pasteboardWriter = pasteboardWriter
+        self.keyEventPoster = keyEventPoster
+    }
+
+    convenience init() {
+        self.init(
+            pasteboardWriter: SystemFinalTextPasteboardWriter(),
+            keyEventPoster: SystemFinalTextKeyEventPoster()
+        )
+    }
+
+    func insertOnce(
+        _ text: String,
+        destination: CursorDestinationToken,
+        validateDestination: () throws -> Bool
+    ) -> FinalTextInsertionResult {
+        guard TextInputSimulator.isSafeForAutomaticPaste(text) else {
+            return .deliveryFailed
+        }
+        do {
+            guard try validateDestination() else { return .destinationInvalid }
+        } catch {
+            return .destinationInvalid
+        }
+        guard pasteboardWriter.replaceContents(with: text),
+              keyEventPoster.postCommandV(to: destination.processIdentifier) else {
+            return .deliveryFailed
+        }
+        do {
+            return try validateDestination() ? .inserted : .destinationInvalid
+        } catch {
+            return .destinationInvalid
+        }
+    }
+
+    func copyForManualRecovery(_ text: String) {
+        TextInputSimulator.copyForManualRecovery(text)
+    }
+}
+
+@MainActor
+protocol FinalTextPasteboardWriting: AnyObject {
+    func replaceContents(with text: String) -> Bool
+}
+
+@MainActor
+protocol FinalTextKeyEventPosting: AnyObject {
+    func postCommandV(to processIdentifier: pid_t) -> Bool
+}
+
+@MainActor
+private final class SystemFinalTextPasteboardWriter: FinalTextPasteboardWriting {
+    func replaceContents(with text: String) -> Bool {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        return pasteboard.setString(text, forType: .string)
+    }
+}
+
+@MainActor
+private final class SystemFinalTextKeyEventPoster: FinalTextKeyEventPosting {
+    func postCommandV(to processIdentifier: pid_t) -> Bool {
+        guard let source = CGEventSource(stateID: .hidSystemState),
+              let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: true),
+              let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: false) else {
+            return false
+        }
+        keyDown.flags = .maskCommand
+        keyUp.flags = .maskCommand
+        keyDown.postToPid(processIdentifier)
+        keyUp.postToPid(processIdentifier)
+        return true
+    }
+}
+
 /// Snapshot of ALL pasteboard items before we overwrite the board.
 private struct PasteboardSnapshot {
     struct Item {
@@ -21,14 +115,25 @@ enum TextInputSimulator {
     /// Polling interval between changeCount checks.
     private static let pollIntervalSeconds: Double = 0.05
 
+    static func isSafeForAutomaticPaste(_ text: String) -> Bool {
+        !text.unicodeScalars.contains { scalar in
+            scalar.value < 0x20 || scalar.value == 0x7F || (0x80 ... 0x9F).contains(scalar.value)
+        }
+    }
+
     static func insertText(_ text: String) {
         insertTextViaPasteboard(text)
     }
 
     static func insertTextViaPasteboard(_ text: String) {
-        let sanitized = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !sanitized.isEmpty else {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             logger.warning("insertTextViaPasteboard called with empty/whitespace-only text — skipping")
+            return
+        }
+        guard isSafeForAutomaticPaste(text) else {
+            logger.warning("Automatic paste rejected action-capable control characters")
+            copyForManualRecovery(text)
+            showFallbackNotification()
             return
         }
 
@@ -39,7 +144,7 @@ enum TextInputSimulator {
 
         // 2. Write the recognised text and record the post-write changeCount.
         pasteboard.clearContents()
-        pasteboard.setString(sanitized, forType: .string)
+        pasteboard.setString(text, forType: .string)
         let postWriteChangeCount = pasteboard.changeCount
         logger.debug("Pasteboard written; changeCount after write = \(postWriteChangeCount)")
 
@@ -72,6 +177,20 @@ enum TextInputSimulator {
         }
     }
 
+    /// Keeps the exact recognized value available for a manual paste without
+    /// posting keyboard events or restoring the previous clipboard contents.
+    static func copyForManualRecovery(_ text: String) {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            logger.warning("copyForManualRecovery called with empty/whitespace-only text — skipping")
+            return
+        }
+
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+        logger.info("Recovery text copied to pasteboard")
+    }
+
     // MARK: - Private helpers
 
     /// Captures every item and every type currently on the pasteboard.
@@ -81,9 +200,9 @@ enum TextInputSimulator {
 
         for pbItem in pasteboard.pasteboardItems ?? [] {
             var dataByType: [NSPasteboard.PasteboardType: Data] = [:]
-            for type_ in pbItem.types {
-                if let data = pbItem.data(forType: type_) {
-                    dataByType[type_] = data
+            for pasteboardType in pbItem.types {
+                if let data = pbItem.data(forType: pasteboardType) {
+                    dataByType[pasteboardType] = data
                 }
             }
             if !dataByType.isEmpty {
@@ -103,8 +222,8 @@ enum TextInputSimulator {
 
         let newItems = snapshot.items.map { snapshotItem -> NSPasteboardItem in
             let pbItem = NSPasteboardItem()
-            for (type_, data) in snapshotItem.dataByType {
-                pbItem.setData(data, forType: type_)
+            for (pasteboardType, data) in snapshotItem.dataByType {
+                pbItem.setData(data, forType: pasteboardType)
             }
             return pbItem
         }

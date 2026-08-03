@@ -1,26 +1,45 @@
 import AppKit
-import SwiftUI
 import Combine
+import SwiftUI
+
 import os.log
 
 private let logger = Logger(subsystem: "com.feishuspeech.app", category: "OverlayWindowController")
 
 @MainActor
-final class OverlayWindowController: ObservableObject {
+protocol RecordingOverlayPresenting: AnyObject {
+    func show(status: RecordingState)
+    func update(status: RecordingState)
+    func hide()
+    func presentCompletionFeedback(
+        _ feedback: RecordingState,
+        minimumVisibleDuration: TimeInterval
+    )
+}
+
+@MainActor
+final class OverlayWindowController: ObservableObject, RecordingOverlayPresenting {
     static let shared = OverlayWindowController()
 
     private var window: NSPanel?
+    private var hostingView: NSHostingView<RecordingOverlayView>?
     private var cancellables = Set<AnyCancellable>()
-    private var generation: Int = 0
+    private var generation: UInt64 = 0
+    private var completionFeedbackTask: Task<Void, Never>?
 
     private let windowSize = NSSize(width: 280, height: 100)
 
     private init() {}
 
     func show() {
-        generation += 1
-        logger.debug("show — generation \(self.generation)")
-        ensureWindow()
+        show(status: .recording)
+    }
+
+    func show(status: RecordingState) {
+        let presentationGeneration = beginPresentation()
+        logger.debug("show — generation \(presentationGeneration)")
+        ensureWindow(status: status)
+        update(status: status)
 
         guard let window = window else { return }
 
@@ -39,10 +58,54 @@ final class OverlayWindowController: ObservableObject {
         }
     }
 
-    func hide() {
-        guard let window = window else { return }
+    func update(status: RecordingState) {
+        hostingView?.rootView = RecordingOverlayView(status: status)
+    }
 
-        let capturedGeneration = generation
+    func hide() {
+        let hideGeneration = beginPresentation()
+        animateHide(generation: hideGeneration)
+    }
+
+    func presentCompletionFeedback(
+        _ feedback: RecordingState,
+        minimumVisibleDuration: TimeInterval
+    ) {
+        let boundedDuration = min(max(minimumVisibleDuration, 1.0), 5.0)
+        let feedbackGeneration = beginPresentation()
+        logger.debug("completion feedback — generation \(feedbackGeneration)")
+        ensureWindow(status: feedback)
+        update(status: feedback)
+
+        guard let window else { return }
+        window.setFrame(centeredFrame(size: windowSize), display: true)
+        window.alphaValue = 1
+        window.orderFrontRegardless()
+
+        completionFeedbackTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(
+                    nanoseconds: UInt64(boundedDuration * 1_000_000_000)
+                )
+            } catch {
+                return
+            }
+            guard let self, self.generation == feedbackGeneration else { return }
+            self.completionFeedbackTask = nil
+            self.animateHide(generation: feedbackGeneration)
+        }
+    }
+
+    private func beginPresentation() -> UInt64 {
+        completionFeedbackTask?.cancel()
+        completionFeedbackTask = nil
+        generation &+= 1
+        return generation
+    }
+
+    private func animateHide(generation capturedGeneration: UInt64) {
+        guard let window else { return }
+
         logger.debug("hide — capturedGeneration \(capturedGeneration)")
         let targetFrame = window.frame.offsetBy(dx: 0, dy: 20)
 
@@ -63,7 +126,7 @@ final class OverlayWindowController: ObservableObject {
         }
     }
     
-    private func ensureWindow() {
+    private func ensureWindow(status: RecordingState) {
         guard window == nil else { return }
         
         let panel = NSPanel(
@@ -85,10 +148,11 @@ final class OverlayWindowController: ObservableObject {
         panel.titleVisibility = .hidden
         panel.titlebarAppearsTransparent = true
         
-        let hostingView = NSHostingView(rootView: RecordingOverlayView())
+        let hostingView = NSHostingView(rootView: RecordingOverlayView(status: status))
         hostingView.frame = NSRect(origin: .zero, size: windowSize)
         panel.contentView = hostingView
         
+        self.hostingView = hostingView
         self.window = panel
     }
     
@@ -106,10 +170,8 @@ final class OverlayWindowController: ObservableObject {
     private func getActiveScreen() -> NSScreen {
         let mouseLocation = NSEvent.mouseLocation
         
-        for screen in NSScreen.screens {
-            if screen.frame.contains(mouseLocation) {
-                return screen
-            }
+        for screen in NSScreen.screens where screen.frame.contains(mouseLocation) {
+            return screen
         }
         
         return NSScreen.main ?? NSScreen.screens.first ?? NSScreen()

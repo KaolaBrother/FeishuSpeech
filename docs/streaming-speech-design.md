@@ -1,6 +1,7 @@
 # Cursor-bound streaming speech design
 
-Status: accepted design for issue #25; implementation has not started.
+Status: implemented in issue #26 with automated review/test evidence; credential-bearing Feishu
+and cross-application AX UAT pending.
 
 ## 1. Outcome
 
@@ -10,7 +11,7 @@ cursor that was active when the interaction began. Releasing Fn seals the stream
 same range with the final response. The FeishuSpeech overlay reports state only; it does not host a
 transcript preview, editable draft, or send button.
 
-The design ports KaolaTerminal's proven stream transport and bounded-ingress rules, but deliberately
+The implementation ports KaolaTerminal's stream transport and bounded-ingress rules, but deliberately
 replaces its preview/review UI with a macOS Accessibility writer bound to the original editable
 control.
 
@@ -50,6 +51,11 @@ opaque replacement state for the current moment.
 Accessibility behavior is application-dependent. Native AppKit, WebKit, Electron, terminal, and
 document-editor targets require live UAT before broad compatibility claims are made.
 
+Issue #26's independent correctness and security reviews pass. The recorded full macOS suite has
+171 passing tests, 0 failures, and 0 skips. Those fakes and deterministic regressions verify local
+state, byte, transport, cursor, output, and lifecycle contracts; they do not replace installed
+Release UAT against a real Feishu tenant or real third-party applications.
+
 ## 3. Goals and non-goals
 
 ### Goals
@@ -70,7 +76,7 @@ document-editor targets require live UAT before broad compatibility claims are m
 - Translation, speaker diarization, punctuation controls, or multiple simultaneous streams.
 - A universal input-method extension or custom IME.
 - Removing or redefining the existing `autoInsert` preference.
-- Swift production or test changes in issue #25.
+- Changing the compatibility-only whole-file API into a fallback for a streaming interaction.
 
 ## 4. End-to-end architecture
 
@@ -87,7 +93,7 @@ MainViewModel (@MainActor)          CursorTextSession (@MainActor)
         | generation + lifecycle             | captured AXUIElement
         |                                    | owned provisional range
         v                                    | verify -> replace -> verify
-StreamingAudioRecorder                       v
+AudioRecorder                                v
         | ordered 16 kHz Int16 PCM      original target application
         | 6,400-byte coalesced chunks
         v
@@ -102,8 +108,9 @@ partial / final / cancelled / failed
         +--------------> MainViewModel generation gate
 ```
 
-No component other than `CursorTextSession` writes to the target application. The transport does
-not know about focus or UI. The writer does not know about audio, credentials, or HTTP.
+Live partial/final AX writes belong only to `CursorTextSession`. Final-only delivery belongs to the
+captured-PID output adapter after coordinator revalidation. The transport does not know about focus
+or UI, and neither output boundary knows about audio, credentials, or HTTP.
 
 ## 5. State model
 
@@ -125,10 +132,11 @@ response.
 
 ### Session generation
 
-Every accepted hold increments a monotonically increasing generation. Audio callbacks, stream
+Every accepted hold receives a monotonically increasing generation. Audio callbacks, stream
 events, cursor writes, timers, overlay updates, and cleanup capture that generation. Reset,
-sleep/wake, permission loss, manual service reset, and terminal failure increment it before
-cancelling work. A callback whose generation is not current is a no-op.
+sleep/wake, permission loss, manual service reset, and terminal failure invalidate the active
+identity and cursor ownership before cancelling work. A callback whose identity is no longer
+current is a no-op.
 
 ### Writer state
 
@@ -153,8 +161,8 @@ the writer.
 
 ## 6. Audio and backpressure
 
-The current recorder already converts capture to 16 kHz, mono, signed Int16 PCM. The redesign
-changes ownership from one complete `Data` buffer to ordered streaming elements:
+The recorder converts capture to 16 kHz, mono, signed Int16 PCM and, in production streaming mode,
+routes it to ordered streaming elements rather than the compatibility whole buffer:
 
 - raw `AVCaptureAudioDataOutput` callbacks remain on `audioQueue`;
 - converted PCM is coalesced on the serial buffer boundary;
@@ -163,7 +171,8 @@ changes ownership from one complete `Data` buffer to ordered streaming elements:
 - after `action=1` is accepted, a tail shorter than 3,200 bytes is padded with PCM silence to the
   100 ms minimum before normal finish;
 - if no first packet was emitted, release cancels locally and sends neither finish nor abort;
-- yielded elements enter a non-blocking `AsyncThrowingStream<Data>` bounded by bytes.
+- yielded elements enter a custom non-blocking async stream bounded by exact queued plus pending
+  bytes; dequeue releases the packet's exact capacity before resuming the consumer.
 
 Capacity calculation for the retained 60-second maximum:
 
@@ -209,8 +218,9 @@ Request rules:
   and retry the same action/sequence. It does not consume a new sequence number.
 - After acceptance, any HTTP, backend, decoding, timeout, or connectivity failure terminates that
   stream. There is no replay, retry loop, or `file_recognize` fallback.
-- `finish()` and `cancel()` are idempotent. Cancellation abort has a short bounded deadline and is
-  best-effort.
+- `finish()` and `cancel()` are idempotent. Cancellation abort has one total one-second deadline,
+  remains strictly behind an established in-flight continuation, and is suppressed after action 2
+  has been emitted.
 - Public errors are sanitized. Raw response bodies and backend messages do not reach UI or logs.
 
 Events exposed to the coordinator are typed:
@@ -231,14 +241,16 @@ At the transition from `pending` to `streaming`, `CursorTextSession.begin()`:
 1. Confirms Accessibility trust and rejects Secure Event Input.
 2. Reads the system-wide focused UI element once.
 3. Captures its PID and verifies it is still the frontmost application.
-4. Rejects a secure-text subrole or non-editable element.
+4. Rejects a secure-text subrole, non-editable element, or role/subrole whose safety cannot be
+   established.
 5. Reads the original `kAXSelectedTextRangeAttribute`.
 6. Requires selected-text and selected-range attributes to be settable.
 7. Requires string-for-range support for read-back verification.
 8. Creates an in-memory destination token; it is never persisted or logged with control content.
 
-Failure at steps 4–7 selects final-only mode. Secure-input failure rejects the interaction
-entirely.
+An affirmatively safe editable target that lacks usable selection/range verification selects
+final-only mode. Security, trust, role/subrole, or editability uncertainty rejects the interaction
+entirely rather than being downgraded.
 
 ### First partial
 
@@ -302,9 +314,13 @@ Unsupported editable controls do not receive experimental key-event replacement.
 2. The coordinator retains only the latest opaque response in memory.
 3. The overlay shows that output will be inserted on release.
 4. On non-empty final, the app revalidates the original PID and focused element.
-5. If valid, `TextInputSimulator` performs one pasteboard/Cmd+V insertion.
-6. If stale, the app posts no synthetic input, leaves the final text on the clipboard for manual
-   recovery, and reports the reason.
+5. If valid and free of C0/C1 control scalars, the output adapter writes the pasteboard and posts
+   one Cmd+V to the captured PID, then revalidates the destination.
+6. If the target is stale, delivery becomes uncertain, or the value contains action-capable
+   controls, the app posts no further synthetic input, copies the exact final value for manual
+   recovery, and shows fixed transcript-free feedback for two seconds.
+7. If security is no longer affirmatively safe, the app performs neither synthetic input nor
+   clipboard recovery.
 
 This mode preserves compatibility without pretending to provide safe live replacement. Secure
 fields are rejected rather than downgraded.
@@ -323,7 +339,7 @@ fields are rejected rather than downgraded.
 The coordinator starts capture and stream setup without blocking the main actor. It consumes audio
 and stream events in generation-bound tasks. Cleanup order is:
 
-1. advance generation and mark the interaction terminal;
+1. invalidate the active identity and mark the interaction terminal;
 2. stop accepting cursor events;
 3. stop recorder/ingress;
 4. finish or best-effort cancel the Feishu stream as appropriate;
@@ -339,8 +355,11 @@ and stream events in generation-bound tasks. Cleanup order is:
   labels owned by FeishuSpeech.
 - `playSound` may retain start/final feedback but must not play once per partial.
 - `autoInsert=true` enables live cursor writing and final-only target fallback.
-- `autoInsert=false` retains its existing no-insertion meaning. Redefining it is outside issue #25.
+- `autoInsert=false` keeps streaming recognition active but discards cursor-writing capability and
+  performs no target or pasteboard mutation. Secure target probing remains fail-closed.
 - A target capability warning is per interaction; it does not silently change the saved setting.
+- Empty-final preservation and copy-only recovery feedback are fixed strings shown for two seconds;
+  coordinator state may already be idle while the generation-guarded overlay remains visible.
 
 ## 12. Privacy, security, and diagnostics
 
@@ -360,33 +379,33 @@ Forbidden diagnostic fields:
 
 No cursor destination survives the process lifetime or is persisted to UserDefaults.
 
-## 13. Implementation slices for a later issue
+## 13. Implemented slices and remaining live gate
 
-1. **Contract seams and fakes**
-   - Define typed stream events/failures, audio-ingress configuration, and an Accessibility client
-     seam. Add no behavior until tests own these contracts.
-2. **Bounded streaming recorder**
-   - Coalesce converted PCM to fixed elements, expose a byte-bounded async stream, and prove stop,
-     tail, overflow, interruption, and cleanup behavior.
-3. **Feishu streaming actor**
-   - Add request models, stream ID generation, strict sequencing, first-packet token refresh, finish,
-     bounded abort, and sanitized errors.
-4. **Cursor text session**
-   - Add capability probe, captured destination, replace/read-back loop, invalidation, final commit,
-     and final-only fallback policy behind a fake AX client.
-5. **Coordinator/state migration**
-   - Replace the whole-file production path with streaming/sealing tasks and generation-owned
-     cleanup. Keep legacy code only where an explicit compatibility test still requires it.
-6. **UI/settings docking**
-   - Add status-only listening/sealing/fallback feedback and preserve current settings semantics.
-7. **Live compatibility gate**
-   - Run credential-bearing Feishu and cross-application Accessibility UAT before declaring general
-     availability.
+1. **Contract seams and fakes — complete**
+   - Typed stream events/failures, audio-ingress configuration, Accessibility client, streaming
+     provider, output, and overlay seams are present and test-owned.
+2. **Bounded streaming recorder — complete**
+   - Capture-order coalescing, exact drain-aware byte accounting, callback-barrier sealing, tail,
+     overflow, interruption, and cleanup behavior are implemented and covered.
+3. **Feishu streaming actor — complete locally**
+   - Request models, stream ID generation, explicit serial gate, first-packet token refresh,
+     exact-once finish, bounded abort, and sanitized errors are implemented and covered.
+4. **Cursor text session — complete locally**
+   - Capability probe, captured destination, replace/read-back loop, invalidation, final commit, and
+     final-only security policy are implemented and covered with fake AX clients.
+5. **Coordinator/state migration — complete**
+   - Production hot-key work uses streaming/sealing tasks and identity-owned cleanup. Whole-file
+     recognition remains compatibility-only and is not a production fallback.
+6. **UI/settings docking — complete**
+   - Status-only listening/sealing/final-only and fixed completion feedback preserve `autoInsert`
+     and `playSound` semantics without exposing recognized text.
+7. **Live compatibility gate — pending owner UAT**
+   - Credential-bearing Feishu and cross-application Accessibility behavior must be tested in the
+     installed Release before declaring general availability.
 
-Each implementation slice should preserve test/production custody separation required by
-`CLAUDE.md`.
+Test/production custody separation was preserved for the automated implementation cycle.
 
-## 14. Test blueprint
+## 14. Automated test evidence
 
 ### Transport
 
@@ -444,6 +463,12 @@ Each implementation slice should preserve test/production custody separation req
 
 ## 15. Completion boundary
 
-Issue #25 is complete when this design, D-25-01, architecture docking, and API docking agree and no
-production or test source has changed. Implementation requires a separate issue with RED-first
-tests, focused suites, full build/test/lint validation, and live microphone/target-application UAT.
+Issue #25 supplied the accepted contract. Issue #26 supplies the production implementation,
+RED-first tests, independent correctness/security review, and documentation docking. The full
+macOS suite records 171 passing tests with no failures or skips; candidate lint diagnostics are a
+strict subset of the recorded baseline diagnostics rather than new issue-26 lint debt.
+
+General-availability closure remains intentionally separate: the owner will self-test the installed
+Release with real Feishu credentials and the live target-application matrix above. Until that UAT
+is recorded, terminal request encoding, real response/token semantics, PCM/tail behavior, slow
+network handling, and broad cross-application AX compatibility remain unverified.

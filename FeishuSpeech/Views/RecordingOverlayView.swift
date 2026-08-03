@@ -1,14 +1,16 @@
 import SwiftUI
 
 struct RecordingOverlayView: View {
+    let status: RecordingState
+
     var body: some View {
         VStack(spacing: 12) {
-            Image(systemName: "mic.fill")
+            Image(systemName: status.icon)
                 .font(.system(size: 32))
-                .foregroundStyle(.white)
+                .foregroundStyle(status.color)
                 .symbolEffect(.pulse, options: .repeating.speed(0.5))
             
-            Text("🎤 可以开始说话...")
+            Text(status.text)
                 .font(.system(size: 18, weight: .medium))
                 .foregroundStyle(.white)
         }
@@ -27,7 +29,7 @@ struct RecordingOverlayView: View {
 }
 
 #Preview {
-    RecordingOverlayView()
+    RecordingOverlayView(status: .streaming)
         .frame(width: 300, height: 120)
         .background(Color.gray.opacity(0.3))
 }

@@ -1,7 +1,7 @@
 import Foundation
 import Network
-import Security
 import os.log
+import Security
 
 private nonisolated(unsafe) let logger = Logger(subsystem: "com.feishuspeech.app", category: "API")
 
@@ -27,6 +27,13 @@ private typealias DirectRequestSender = (
     TimeInterval
 ) async throws -> DirectHTTPResponse
 private typealias URLSessionRequestSender = (String, [String: String], Data) async throws -> DirectHTTPResponse
+
+private struct DirectRequestContext {
+    let path: String
+    let headers: [String: String]
+    let body: Data
+    let ipAddresses: [String]
+}
 
 #if DEBUG
 typealias TestRequestSender = @Sendable (URLRequest) async throws -> DirectHTTPResponse
@@ -330,7 +337,7 @@ private nonisolated final class DirectFeishuHTTPClient {
     }
 }
 
-actor FeishuAPIService {
+actor FeishuAPIService: SpeechStreamingSessionProviding {
     static let shared = FeishuAPIService()
 
     private var cachedToken: String?
@@ -484,10 +491,12 @@ actor FeishuAPIService {
         fallbackSend: @escaping () async throws -> DirectHTTPResponse
     ) async throws -> DirectHTTPResponse {
         try await sendDirectRequest(
-            path: authPath,
-            headers: [:],
-            body: Data(),
-            ipAddresses: ipAddresses,
+            DirectRequestContext(
+                path: authPath,
+                headers: [:],
+                body: Data(),
+                ipAddresses: ipAddresses
+            ),
             directSend: { ipAddress, _, _, _, _ in
                 try await directSend(ipAddress)
             },
@@ -519,6 +528,29 @@ actor FeishuAPIService {
         return try await withRecognitionTimeout(seconds: timeout) {
             try await self.performRecognition(audioData: audioData, appId: appId, appSecret: appSecret)
         }
+    }
+
+    func makeStreamingSession(
+        appId: String,
+        appSecret: String
+    ) async throws -> any SpeechStreamingSession {
+        try ensureNetworkAvailable()
+        let initialToken = try await getAccessToken(appId: appId, appSecret: appSecret)
+
+        return FeishuStreamingSession(
+            initialToken: initialToken,
+            refreshToken: { [weak self] in
+                guard let self else { throw APIError.authenticationUnavailable }
+                return try await self.refreshStreamingAccessToken(
+                    appId: appId,
+                    appSecret: appSecret
+                )
+            },
+            requestSender: { [weak self] request in
+                guard let self else { throw APIError.connectionFailed }
+                return try await self.sendStreamingRequest(request)
+            }
+        )
     }
 
     private func performRecognition(audioData: Data, appId: String, appSecret: String) async throws -> String {
@@ -582,7 +614,7 @@ actor FeishuAPIService {
             } catch {
                 try Task.checkCancellation()
                 lastError = error
-                logger.warning("Attempt \(attempt)/\(maxAttempts) failed: \(error.localizedDescription)")
+                logger.warning("Attempt \(attempt)/\(maxAttempts) failed with an unclassified error")
 
                 if attempt < maxAttempts {
                     try Task.checkCancellation()
@@ -635,8 +667,8 @@ actor FeishuAPIService {
         let authResponse = try decoder.decode(AuthResponse.self, from: response.body)
 
         guard authResponse.code == 0, let token = authResponse.tenantAccessToken else {
-            logger.error("Auth failed: \(authResponse.msg)")
-            throw APIError.authFailed(authResponse.msg)
+            logger.error("Authentication request was rejected")
+            throw APIError.authFailed("")
         }
 
         cachedToken = token
@@ -644,6 +676,32 @@ actor FeishuAPIService {
 
         logger.info("Access token obtained successfully")
         return token
+    }
+
+    private func refreshStreamingAccessToken(
+        appId: String,
+        appSecret: String
+    ) async throws -> String {
+        cachedToken = nil
+        tokenExpiry = nil
+        try ensureNetworkAvailable()
+        return try await getAccessToken(appId: appId, appSecret: appSecret)
+    }
+
+    private func sendStreamingRequest(_ request: URLRequest) async throws -> DirectHTTPResponse {
+        try ensureNetworkAvailable()
+#if DEBUG
+        if let requestSenderForTesting {
+            return try await requestSenderForTesting(request)
+        }
+#endif
+        return try await executeURLRequest(request)
+    }
+
+    private func ensureNetworkAvailable() throws {
+        guard isNetworkAvailable else {
+            throw APIError.networkUnavailable
+        }
     }
 
     private func sendSpeechRequest(audioData: Data, token: String) async throws -> String {
@@ -654,7 +712,7 @@ actor FeishuAPIService {
         )
         let requestBody = try encoder.encode(speechRequest)
 
-        logger.info("Sending speech request with fileId: \(fileId)")
+        logger.info("Sending whole-file speech request")
 
         let response = try await sendRequest(
             path: speechPath,
@@ -668,8 +726,7 @@ actor FeishuAPIService {
         logger.info("Speech API response status: \(response.statusCode)")
 
         guard response.statusCode == 200 else {
-            let responseString = String(data: response.body, encoding: .utf8) ?? "No response body"
-            logger.error("Speech API error response: \(responseString)")
+            logger.error("Speech API returned HTTP status \(response.statusCode)")
 
             if response.statusCode == 400 || response.statusCode == 401 {
                 cachedToken = nil
@@ -682,11 +739,11 @@ actor FeishuAPIService {
         let speechResponse = try decoder.decode(SpeechResponse.self, from: response.body)
 
         guard speechResponse.code == 0, let result = speechResponse.data else {
-            logger.error("Recognition failed: \(speechResponse.msg)")
-            throw APIError.recognitionFailed(speechResponse.msg)
+            logger.error("Speech recognition request was rejected")
+            throw APIError.recognitionFailed("")
         }
 
-        logger.info("Recognition successful: \(result.recognitionText)")
+        logger.info("Speech recognition completed")
         return result.recognitionText
     }
 
@@ -706,29 +763,32 @@ actor FeishuAPIService {
     }
 
     private func sendDirectRequest(
-        path: String,
-        headers: [String: String],
-        body: Data,
-        ipAddresses: [String],
+        _ request: DirectRequestContext,
         directSend: DirectRequestSender?,
         fallbackSend: URLSessionRequestSender?
     ) async throws -> DirectHTTPResponse {
         var lastError: Error?
 
-        for ipAddress in ipAddresses {
+        for ipAddress in request.ipAddresses {
             try Task.checkCancellation()
 
             do {
                 let response: DirectHTTPResponse
                 if let directSend {
-                    response = try await directSend(ipAddress, path, headers, body, requestTimeout)
+                    response = try await directSend(
+                        ipAddress,
+                        request.path,
+                        request.headers,
+                        request.body,
+                        requestTimeout
+                    )
                 } else {
                     let client = DirectFeishuHTTPClient(
                         host: feishuAPIHost,
                         ipAddress: ipAddress,
-                        path: path,
-                        headers: headers,
-                        body: body,
+                        path: request.path,
+                        headers: request.headers,
+                        body: request.body,
                         timeout: requestTimeout
                     )
                     response = try await client.send()
@@ -740,11 +800,11 @@ actor FeishuAPIService {
             } catch let error as APIError {
                 try Task.checkCancellation()
                 lastError = error
-                logger.warning("Direct Feishu request via \(ipAddress) failed: \(error.localizedDescription)")
+                logger.warning("Direct Feishu request failed with a typed API error")
             } catch {
                 try Task.checkCancellation()
                 lastError = error
-                logger.warning("Direct Feishu request via \(ipAddress) failed: \(error.localizedDescription)")
+                logger.warning("Direct Feishu request failed")
             }
         }
 
@@ -754,15 +814,19 @@ actor FeishuAPIService {
         do {
             logger.warning("All direct IPs failed, falling back to URLSession DNS")
             if let fallbackSend {
-                return try await fallbackSend(path, headers, body)
+                return try await fallbackSend(request.path, request.headers, request.body)
             }
-            return try await sendViaURLSession(path: path, headers: headers, body: body)
+            return try await sendViaURLSession(
+                path: request.path,
+                headers: request.headers,
+                body: request.body
+            )
         } catch let error as CancellationError {
             throw error
         } catch {
             try Task.checkCancellation()
             lastError = error
-            logger.warning("URLSession DNS fallback failed: \(error.localizedDescription)")
+            logger.warning("URLSession DNS fallback failed")
         }
 
         if let error = lastError as? APIError {
@@ -813,11 +877,11 @@ actor FeishuAPIService {
             if error.code == .timedOut {
                 throw APIError.timeout
             }
-            throw APIError.networkError(error.localizedDescription)
+            throw APIError.networkError("")
         }
     }
 
-    enum APIError: LocalizedError {
+    enum APIError: LocalizedError, CustomStringConvertible, CustomDebugStringConvertible {
         case invalidResponse
         case httpError(Int)
         case authFailed(String)
@@ -826,6 +890,7 @@ actor FeishuAPIService {
         case networkUnavailable
         case connectionFailed
         case networkError(String)
+        case authenticationUnavailable
         case unknown
 
         var isRetriable: Bool {
@@ -834,7 +899,8 @@ actor FeishuAPIService {
                 return true
             case .httpError(let code):
                 return code == 400 || code == 401 || (500...599).contains(code)
-            case .networkUnavailable, .authFailed, .recognitionFailed, .invalidResponse, .unknown:
+            case .networkUnavailable, .authFailed, .recognitionFailed, .invalidResponse,
+                 .authenticationUnavailable, .unknown:
                 return false
             }
         }
@@ -845,21 +911,52 @@ actor FeishuAPIService {
                 return "无效响应"
             case .httpError(let code):
                 return "HTTP 错误: \(code)"
-            case .authFailed(let msg):
-                return "认证失败: \(msg)"
-            case .recognitionFailed(let msg):
-                return "识别失败: \(msg)"
+            case .authFailed:
+                return "认证失败，请检查应用凭据"
+            case .recognitionFailed:
+                return "识别失败，请稍后重试"
             case .timeout:
                 return "请求超时，请检查网络"
             case .networkUnavailable:
                 return "网络不可用，请检查网络连接"
             case .connectionFailed:
                 return "无法连接到服务器"
-            case .networkError(let msg):
-                return "网络错误: \(msg)"
+            case .networkError:
+                return "网络错误，请检查网络连接"
+            case .authenticationUnavailable:
+                return "认证服务暂时不可用"
             case .unknown:
                 return "未知错误"
             }
+        }
+
+        var debugDescription: String {
+            switch self {
+            case .invalidResponse:
+                return "FeishuAPIService.APIError.invalidResponse"
+            case .httpError(let code):
+                return "FeishuAPIService.APIError.httpError(\(code))"
+            case .authFailed:
+                return "FeishuAPIService.APIError.authFailed"
+            case .recognitionFailed:
+                return "FeishuAPIService.APIError.recognitionFailed"
+            case .timeout:
+                return "FeishuAPIService.APIError.timeout"
+            case .networkUnavailable:
+                return "FeishuAPIService.APIError.networkUnavailable"
+            case .connectionFailed:
+                return "FeishuAPIService.APIError.connectionFailed"
+            case .networkError:
+                return "FeishuAPIService.APIError.networkError"
+            case .authenticationUnavailable:
+                return "FeishuAPIService.APIError.authenticationUnavailable"
+            case .unknown:
+                return "FeishuAPIService.APIError.unknown"
+            }
+        }
+
+        var description: String {
+            debugDescription
         }
     }
 }

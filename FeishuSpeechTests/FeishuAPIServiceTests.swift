@@ -405,6 +405,120 @@ final class FeishuAPIServiceTests: XCTestCase {
         XCTAssertTrue(snapshot.isNetworkAvailable, "wake reset must allow fresh network checks after wake")
     }
 
+    func test_streamingProvider_reusesCachedTokenAndRoutesPacketsThroughRawSenderWithoutWholeFilePath() async throws {
+        let transport = StreamingFactoryRequestStub(
+            authResults: [.success(token: "cached-stream-token")],
+            streamResults: [.success(text: "first"), .success(text: "second")]
+        )
+        await service.setRequestSenderForTesting(transport.send)
+        let provider: any SpeechStreamingSessionProviding = service
+
+        let firstSession = try await provider.makeStreamingSession(appId: "app", appSecret: "secret")
+        _ = try await firstSession.sendAudioPacket(Data(repeating: 0x11, count: 6_400))
+        let secondSession = try await provider.makeStreamingSession(appId: "app", appSecret: "secret")
+        _ = try await secondSession.sendAudioPacket(Data(repeating: 0x22, count: 6_400))
+
+        XCTAssertEqual(transport.paths, [
+            FeishuAPIService.authPathForTesting,
+            "/open-apis/speech_to_text/v1/speech/stream_recognize",
+            "/open-apis/speech_to_text/v1/speech/stream_recognize"
+        ])
+        XCTAssertEqual(transport.streamAuthorizations, [
+            "Bearer cached-stream-token",
+            "Bearer cached-stream-token"
+        ])
+        XCTAssertFalse(transport.paths.contains(FeishuAPIService.speechPathForTesting))
+    }
+
+    func test_streamingProvider_knownFirstTokenFailureForcesOneFreshAuthAndSamePreparedRequest() async throws {
+        let transport = StreamingFactoryRequestStub(
+            authResults: [
+                .success(token: "stale-stream-token"),
+                .success(token: "fresh-stream-token")
+            ],
+            streamResults: [
+                .businessFailure(code: 9_999_1663, message: "PRIVATE_BACKEND_MESSAGE"),
+                .success(text: "accepted")
+            ]
+        )
+        await service.setRequestSenderForTesting(transport.send)
+
+        let session = try await service.makeStreamingSession(appId: "app", appSecret: "secret")
+        let event = try await session.sendAudioPacket(Data(repeating: 0x31, count: 6_400))
+
+        XCTAssertEqual(event, .partial("accepted"))
+        XCTAssertEqual(transport.paths, [
+            FeishuAPIService.authPathForTesting,
+            "/open-apis/speech_to_text/v1/speech/stream_recognize",
+            FeishuAPIService.authPathForTesting,
+            "/open-apis/speech_to_text/v1/speech/stream_recognize"
+        ])
+        XCTAssertEqual(transport.streamActions, [1, 1])
+        XCTAssertEqual(transport.streamSequences, [0, 0])
+        XCTAssertEqual(transport.streamAuthorizations, [
+            "Bearer stale-stream-token",
+            "Bearer fresh-stream-token"
+        ])
+    }
+
+    func test_streamingProvider_rawHTTPFailureIsSingleAttemptAndSanitized() async {
+        let transport = StreamingFactoryRequestStub(
+            authResults: [.success(token: "PRIVATE_TOKEN")],
+            streamResults: [
+                .rawHTTP(
+                    statusCode: 500,
+                    body: "RAW_BACKEND_BODY PRIVATE_TRANSCRIPT PRIVATE_STREAM_ID PRIVATE_TOKEN"
+                )
+            ]
+        )
+        await service.setRequestSenderForTesting(transport.send)
+
+        do {
+            let session = try await service.makeStreamingSession(appId: "app", appSecret: "PRIVATE_SECRET")
+            _ = try await session.sendAudioPacket(Data(repeating: 0x41, count: 6_400))
+            XCTFail("raw streaming failure must terminate without whole-file retry")
+        } catch {
+            let publicSurface = error.localizedDescription + String(reflecting: error)
+            for denied in [
+                "RAW_BACKEND_BODY", "PRIVATE_TRANSCRIPT", "PRIVATE_STREAM_ID",
+                "PRIVATE_TOKEN", "PRIVATE_SECRET"
+            ] {
+                XCTAssertFalse(publicSurface.contains(denied), "streaming provider leaked \(denied)")
+            }
+        }
+
+        XCTAssertEqual(transport.paths, [
+            FeishuAPIService.authPathForTesting,
+            "/open-apis/speech_to_text/v1/speech/stream_recognize"
+        ])
+        XCTAssertFalse(transport.paths.contains(FeishuAPIService.speechPathForTesting))
+    }
+
+    func test_streamingProvider_authFailureScrubsRawBackendAndCredentialValues() async {
+        let transport = StreamingFactoryRequestStub(
+            authResults: [
+                .failure(code: 1, message: "RAW_AUTH_MESSAGE PRIVATE_TOKEN PRIVATE_TRANSCRIPT")
+            ],
+            streamResults: []
+        )
+        await service.setRequestSenderForTesting(transport.send)
+
+        do {
+            _ = try await service.makeStreamingSession(appId: "PRIVATE_APP", appSecret: "PRIVATE_SECRET")
+            XCTFail("authentication failure must prevent streaming session creation")
+        } catch {
+            let publicSurface = error.localizedDescription + String(reflecting: error)
+            for denied in [
+                "RAW_AUTH_MESSAGE", "PRIVATE_TOKEN", "PRIVATE_TRANSCRIPT",
+                "PRIVATE_APP", "PRIVATE_SECRET"
+            ] {
+                XCTAssertFalse(publicSurface.contains(denied), "streaming auth failure leaked \(denied)")
+            }
+        }
+
+        XCTAssertEqual(transport.paths, [FeishuAPIService.authPathForTesting])
+    }
+
     private func assertSpeechHTTPErrorRefreshesToken(statusCode: Int) async throws {
         let transport = MockFeishuRequestSequence([
             .success(jsonResponse(authJSON(token: "stale-token"))),
@@ -426,6 +540,112 @@ final class FeishuAPIServiceTests: XCTestCase {
         XCTAssertEqual(transport.authorizationHeaders(), [
             "Bearer stale-token",
             "Bearer fresh-token"
+        ])
+    }
+}
+
+private final class StreamingFactoryRequestStub: @unchecked Sendable {
+    enum AuthResult {
+        case success(token: String)
+        case failure(code: Int, message: String)
+    }
+
+    enum StreamResult {
+        case success(text: String)
+        case businessFailure(code: Int, message: String)
+        case rawHTTP(statusCode: Int, body: String)
+    }
+
+    private let lock = NSLock()
+    private var authResults: [AuthResult]
+    private var streamResults: [StreamResult]
+    private var recordedPaths: [String] = []
+    private var recordedStreamAuthorizations: [String] = []
+    private var recordedStreamActions: [Int] = []
+    private var recordedStreamSequences: [Int] = []
+
+    init(authResults: [AuthResult], streamResults: [StreamResult]) {
+        self.authResults = authResults
+        self.streamResults = streamResults
+    }
+
+    var paths: [String] { lock.withLock { recordedPaths } }
+    var streamAuthorizations: [String] { lock.withLock { recordedStreamAuthorizations } }
+    var streamActions: [Int] { lock.withLock { recordedStreamActions } }
+    var streamSequences: [Int] { lock.withLock { recordedStreamSequences } }
+
+    func send(_ request: URLRequest) async throws -> DirectHTTPResponse {
+        try lock.withLock {
+            let path = request.url?.path ?? ""
+            recordedPaths.append(path)
+            if path == FeishuAPIService.authPathForTesting {
+                guard !authResults.isEmpty else { throw URLError(.badServerResponse) }
+                switch authResults.removeFirst() {
+                case .success(let token):
+                    return jsonResponse(authJSON(token: token))
+                case .failure(let code, let message):
+                    return jsonResponse(["code": code, "msg": message])
+                }
+            }
+
+            let requestFields = try parseStreamingRequest(request)
+            recordedStreamAuthorizations.append(
+                request.value(forHTTPHeaderField: "Authorization") ?? ""
+            )
+            recordedStreamActions.append(requestFields.action)
+            recordedStreamSequences.append(requestFields.sequence)
+            guard !streamResults.isEmpty else { throw URLError(.badServerResponse) }
+            switch streamResults.removeFirst() {
+            case .success(let text):
+                return streamingResponse(
+                    code: 0,
+                    message: "ok",
+                    text: text,
+                    streamID: requestFields.streamID,
+                    sequence: requestFields.sequence
+                )
+            case .businessFailure(let code, let message):
+                return streamingResponse(
+                    code: code,
+                    message: message,
+                    text: "PRIVATE_TRANSCRIPT",
+                    streamID: requestFields.streamID,
+                    sequence: requestFields.sequence
+                )
+            case .rawHTTP(let statusCode, let body):
+                return DirectHTTPResponse(statusCode: statusCode, body: Data(body.utf8))
+            }
+        }
+    }
+
+    private func parseStreamingRequest(
+        _ request: URLRequest
+    ) throws -> (action: Int, sequence: Int, streamID: String) {
+        let body = try XCTUnwrap(request.httpBody)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let config = try XCTUnwrap(object["config"] as? [String: Any])
+        return (
+            action: try XCTUnwrap(config["action"] as? Int),
+            sequence: try XCTUnwrap(config["sequence_id"] as? Int),
+            streamID: try XCTUnwrap(config["stream_id"] as? String)
+        )
+    }
+
+    private func streamingResponse(
+        code: Int,
+        message: String,
+        text: String,
+        streamID: String,
+        sequence: Int
+    ) -> DirectHTTPResponse {
+        jsonResponse([
+            "code": code,
+            "msg": message,
+            "data": [
+                "stream_id": streamID,
+                "sequence_id": sequence,
+                "recognition_text": text
+            ]
         ])
     }
 }

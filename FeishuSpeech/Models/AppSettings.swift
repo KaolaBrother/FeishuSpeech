@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+
 import os.log
 
 private let logger = Logger(subsystem: "com.feishuspeech.app", category: "AppSettings")

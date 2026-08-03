@@ -4,9 +4,10 @@ macOS 本地语音输入工具，使用飞书语音识别 API。
 
 ## 功能
 
-- 🎤 按住 **Fn 键** 开始录音
-- 🎯 松开自动识别并输入文字
-- ⌨️ 文字自动输入到当前光标位置
+- 🎤 按住 **Fn 键** 0.3 秒开始流式识别
+- ⌨️ 在支持安全范围替换的输入框中，识别结果会在说话时更新到按键开始时的光标位置
+- 🎯 松开 **Fn 键** 后完成流并提交最终结果；不支持实时替换的输入框使用一次性最终输入
+- 🔒 安全输入和密码框会拒绝启动；焦点或光标发生变化时停止自动写入，避免把文字送到错误位置
 
 ## 系统要求
 
@@ -20,7 +21,7 @@ macOS 本地语音输入工具，使用飞书语音识别 API。
 1. 访问 [飞书开放平台](https://open.feishu.cn/app)
 2. 创建「企业自建应用」
 3. 在「权限管理」中开通以下权限：
-   - `speech_to_text:read` - 语音识别
+   - `speech_to_text:speech` - 语音识别
 4. 发布应用版本
 
 ### 2. 构建
@@ -58,10 +59,14 @@ cp -R build/Build/Products/Release/FeishuSpeech.app /Applications/
 ## 使用方法
 
 1. 将光标放在任意输入框中
-2. 按住 **Fn 键** 开始录音（菜单栏图标变红）
-3. 说话
-4. 松开 **Fn 键**，等待识别
-5. 文字自动输入到光标位置
+2. 按住 **Fn 键** 0.3 秒（菜单栏图标变红）
+3. 继续按住并说话；支持的输入框会在原始光标处实时替换暂定结果
+4. 松开 **Fn 键**，等待“正在完成识别…”结束
+5. 不支持实时替换的非安全输入框会在目标仍然有效时输入一次最终结果；若焦点/目标元素已变化或结果含控制字符，则不发送 Cmd+V，改为复制结果并显示固定 2 秒提示；若一次发送后无法确认交付，则不再发送并保持结果可手动粘贴；若安全状态无法确认，则既不发送 Cmd+V，也不写入剪贴板
+
+“自动输入”关闭时仍会进行流式识别，但不会修改目标输入框或粘贴板。浮窗和日志只显示状态与分类错误，不显示识别文本、音频、凭据、token、stream ID、目标控件内容或剪贴板内容。
+
+> 当前实现已经通过自动化构建与测试验证，但真实飞书凭据下的流式请求细节，以及 TextEdit、浏览器、Electron、终端和富文本编辑器之间的 Accessibility 差异，仍需已安装 Release 版本的实机 UAT。请勿将尚未实测的应用视为已承诺兼容。
 
 ## 常见问题
 
@@ -78,13 +83,17 @@ cp -R build/Build/Products/Release/FeishuSpeech.app /Applications/
 通常是 API 凭据错误或 token 过期导致。尝试以下步骤：
 1. 点击菜单栏图标 → **重置服务**
 2. 检查设置中的 App ID 和 App Secret 是否正确
-3. 确认飞书应用已开通 `speech_to_text:read` 权限并已发布
+3. 确认飞书应用已开通 `speech_to_text:speech` 权限并已发布
 
 应用会在连续失败 3 次后自动重置服务状态。
 
 ### 识别卡在「识别中」很久
 
-应用始终通过系统 DNS 解析 `open.feishu.cn`，由 Feishu CDN 选择当前可用节点，不再依赖可能过期的硬编码 IP。一次完整识别（包括认证、重试和语音请求）共享 30 秒总超时；到期后底层 URLSession 请求会被取消，避免迟到结果覆盖当前状态。
+生产热键流程使用严格串行的飞书流式请求。建立流后不会重放音频、回退到整段文件识别或并发发送分片；取消、睡眠/唤醒、重置和失败都会先使当前会话代次失效，再清理录音、网络和光标会话。若持续异常，请使用菜单栏的“重置服务”，并检查网络、凭据和飞书应用权限。
+
+### 没有实时显示文字
+
+部分应用不提供可验证的 Accessibility 选区与范围读取能力，因此会显示“正在聆听，松开后输入…”，并在松开 Fn 后只尝试一次最终输入。若发送前发现焦点或目标元素已变化，应用不会发送 Cmd+V，而会把结果复制到剪贴板；若发送后无法确认交付，应用不会再次发送，并把同一结果保留在剪贴板。两种情况都显示固定 2 秒的无识别文本手动恢复提示。若重新校验时发现安全输入、无法证明目标安全，或 Accessibility 安全查询失败，应用会完全拒绝输出：不发送 Cmd+V，也不写入剪贴板。密码框和安全输入不会使用手动恢复回退。
 
 ### 开机启动
 
@@ -100,11 +109,16 @@ FeishuSpeech/
 ├── Models/
 │   ├── AppSettings.swift        # 设置
 │   ├── RecordingState.swift     # 状态
-│   └── SpeechResult.swift       # API 模型
+│   ├── StreamingSpeechModels.swift # 流式事件与音频入口模型
+│   └── CursorTextModels.swift   # 光标目标与范围模型
 ├── Services/
 │   ├── HotKeyService.swift      # Fn 键监听
-│   ├── AudioRecorder.swift      # 录音
-│   ├── FeishuAPIService.swift   # 飞书 API
+│   ├── AudioRecorder.swift      # 录音与流式 PCM 输出
+│   ├── ByteBoundedAudioIngress.swift # 精确字节上限的音频入口
+│   ├── FeishuStreamingSession.swift # 严格串行的飞书流
+│   ├── AccessibilityClient.swift # 原始目标捕获与安全校验
+│   ├── CursorTextSession.swift  # 暂定文本范围替换
+│   ├── FeishuAPIService.swift   # token 与 HTTP 传输
 │   ├── LoginItemService.swift   # 开机启动
 │   ├── PermissionManager.swift  # 权限管理
 │   └── TextInputSimulator.swift # 文字输入
@@ -122,9 +136,9 @@ FeishuSpeech/
 
 - **语言**: Swift 5.9+
 - **UI**: SwiftUI + Menu Bar App
-- **音频**: AVAudioEngine (PCM 16kHz mono)
+- **音频**: AVCaptureSession + AVAudioConverter（PCM 16kHz mono Int16）
 - **全局快捷键**: CGEventTap
-- **API**: 飞书语音识别 API
+- **API**: 飞书流式语音识别 API
 
 ## 许可证
 

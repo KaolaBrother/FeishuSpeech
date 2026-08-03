@@ -1,6 +1,6 @@
-import Foundation
 import AVFoundation
 import Combine
+import Foundation
 import os.log
 
 private let logger = Logger(subsystem: "com.feishuspeech.app", category: "Audio")
@@ -9,11 +9,33 @@ private let targetSampleRate: Double = 16000
 private let maxRecordingSeconds: Double = 60.0
 private let estimatedMaxBufferSize = Int(targetSampleRate * 2 * maxRecordingSeconds)
 
+private struct CapturedAudioSample {
+    let blockBuffer: CMBlockBuffer
+    let sampleRate: Double
+    let channelCount: Int
+    let bitsPerChannel: Int
+
+    var dataLength: Int {
+        CMBlockBufferGetDataLength(blockBuffer)
+    }
+
+    var inputFrameCount: Int {
+        dataLength / channelCount / (bitsPerChannel / 8)
+    }
+}
+
+private struct AudioConversionInput {
+    let buffer: AVAudioPCMBuffer
+    let outputFormat: AVAudioFormat
+    let converter: AVAudioConverter
+}
+
 enum RecordingFailure: LocalizedError, Equatable {
     case runtime
     case interrupted
     case deviceLost
     case formatConversion
+    case ingressOverflow
 
     var errorDescription: String? {
         switch self {
@@ -25,6 +47,8 @@ enum RecordingFailure: LocalizedError, Equatable {
             return "录音失败：麦克风设备断开"
         case .formatConversion:
             return "录音失败：音频格式转换失败"
+        case .ingressOverflow:
+            return "录音失败：音频处理速度不足"
         }
     }
 }
@@ -36,6 +60,7 @@ class AudioRecorder: NSObject, ObservableObject {
     private var captureSession: AVCaptureSession?
     private var audioDataOutput: AVCaptureAudioDataOutput?
     private var audioBuffer = Data(capacity: estimatedMaxBufferSize)
+    private var activeStreamingIngress: ByteBoundedAudioIngress?
     private let audioQueue = DispatchQueue(label: "com.feishuspeech.audio.queue")
     private let bufferQueue = DispatchQueue(label: "com.feishuspeech.audio.buffer")
     // Issue #9: AVCaptureSession.startRunning()/stopRunning() block synchronously, so they
@@ -69,13 +94,31 @@ class AudioRecorder: NSObject, ObservableObject {
     /// only observe `isRecording` keep working unchanged via the default no-op closure.
     @discardableResult
     func startRecording(completion: @escaping (_ started: Bool) -> Void = { _ in }) -> Bool {
+        startCapture(streamingIngress: nil, completion: completion)
+    }
+
+    @discardableResult
+    func startStreamingRecording(
+        ingress: ByteBoundedAudioIngress,
+        completion: @escaping (_ started: Bool) -> Void
+    ) -> Bool {
+        startCapture(streamingIngress: ingress, completion: completion)
+    }
+
+    private func startCapture(
+        streamingIngress: ByteBoundedAudioIngress?,
+        completion: @escaping (_ started: Bool) -> Void
+    ) -> Bool {
         // Always run forceCleanup() first so a stale isRecording flag (e.g. left over from a
         // cancelled or errored recording that forgot to reset state) never permanently prevents
         // a new session from starting.  forceCleanup() stops any running session and resets
         // isRecording to false, so every call to startRecording() starts from a clean slate.
         forceCleanup()
 
-        audioBuffer.reserveCapacity(estimatedMaxBufferSize)
+        bufferQueue.sync {
+            activeStreamingIngress = streamingIngress
+            audioBuffer.reserveCapacity(estimatedMaxBufferSize)
+        }
         audioConverter = nil
         inputFormat = nil
         outputFormat = nil
@@ -86,6 +129,7 @@ class AudioRecorder: NSObject, ObservableObject {
         
         guard let microphone = AVCaptureDevice.default(for: .audio) else {
             logger.error("No microphone device available")
+            failStreamingCaptureSetupIfNeeded()
             completion(false)
             return false
         }
@@ -97,6 +141,7 @@ class AudioRecorder: NSObject, ObservableObject {
 
             guard session.canAddInput(input) else {
                 logger.error("Cannot add audio input to session")
+                failStreamingCaptureSetupIfNeeded()
                 completion(false)
                 return false
             }
@@ -107,6 +152,7 @@ class AudioRecorder: NSObject, ObservableObject {
 
             guard session.canAddOutput(output) else {
                 logger.error("Cannot add audio output to session")
+                failStreamingCaptureSetupIfNeeded()
                 completion(false)
                 return false
             }
@@ -126,8 +172,8 @@ class AudioRecorder: NSObject, ObservableObject {
                 let started = session.isRunning
                 DispatchQueue.main.async {
                     if !started {
-                        self?.isRecording = false
                         logger.error("AVCaptureSession failed to start running")
+                        self?.finishAbortingRecording(with: .runtime)
                     } else {
                         logger.info("Recording started successfully")
                     }
@@ -139,6 +185,7 @@ class AudioRecorder: NSObject, ObservableObject {
 
         } catch {
             logger.error("Failed to create audio input: \(error.localizedDescription)")
+            terminateActiveIngress(with: .captureFailed)
             forceCleanup()
             completion(false)
             return false
@@ -157,24 +204,62 @@ class AudioRecorder: NSObject, ObservableObject {
         
         return data
     }
+
+    func stopStreamingRecording(streamEstablished: Bool) async {
+        logger.info("Stopping streaming recording")
+        removeSessionNotifications()
+
+        let session = captureSession
+        let output = audioDataOutput
+        isRecording = false
+
+        await withCheckedContinuation { continuation in
+            sessionQueue.async {
+                Self.tearDown(session)
+                continuation.resume()
+            }
+        }
+
+        await withCheckedContinuation { continuation in
+            audioQueue.async { [weak self] in
+                // stopRunning() has returned, so no new callbacks for this output can be
+                // scheduled. Reaching this block proves every callback already queued on the
+                // real delegate queue has finished while the output identity was still valid.
+                if self?.audioDataOutput === output {
+                    self?.audioDataOutput = nil
+                }
+                continuation.resume()
+            }
+        }
+
+        if captureSession === session {
+            captureSession = nil
+        }
+
+        bufferQueue.sync {
+            let ingress = activeStreamingIngress
+            activeStreamingIngress = nil
+            let establishedAfterBarrier = streamEstablished
+                || ingress?.hasEmittedFullPacket == true
+            ingress?.finish(streamEstablished: establishedAfterBarrier)
+        }
+
+        audioConverter = nil
+        inputFormat = nil
+        outputFormat = nil
+        logger.info("Streaming audio resources released")
+    }
     
     func forceCleanup() {
         logger.info("Force cleanup - releasing all audio resources")
+        terminateActiveIngress(with: .cancelled)
         removeSessionNotifications()
 
         // Issue #9: session.stopRunning() blocks — tear the session down on sessionQueue,
         // never on the main actor. Hand off the captured session before nil'ing references.
         if let session = captureSession {
             sessionQueue.async {
-                if session.isRunning {
-                    session.stopRunning()
-                }
-                for input in session.inputs {
-                    session.removeInput(input)
-                }
-                for output in session.outputs {
-                    session.removeOutput(output)
-                }
+                Self.tearDown(session)
             }
         }
 
@@ -240,8 +325,37 @@ class AudioRecorder: NSObject, ObservableObject {
     }
 
     private func finishAbortingRecording(with failure: RecordingFailure) {
+        terminateActiveIngress(with: .captureFailed)
         forceCleanup()
         self.failure = failure
+    }
+
+    private func failStreamingCaptureSetupIfNeeded() {
+        terminateActiveIngress(with: .captureFailed)
+        captureSession = nil
+        audioDataOutput = nil
+        isRecording = false
+    }
+
+    private func terminateActiveIngress(with error: AudioIngressError) {
+        bufferQueue.sync {
+            let ingress = activeStreamingIngress
+            activeStreamingIngress = nil
+            ingress?.fail(error)
+        }
+    }
+
+    private static func tearDown(_ session: AVCaptureSession?) {
+        guard let session else { return }
+        if session.isRunning {
+            session.stopRunning()
+        }
+        for input in session.inputs {
+            session.removeInput(input)
+        }
+        for output in session.outputs {
+            session.removeOutput(output)
+        }
     }
 
     private func incrementConversionErrorAndAbortIfNeeded() {
@@ -254,131 +368,236 @@ class AudioRecorder: NSObject, ObservableObject {
 
 extension AudioRecorder: AVCaptureAudioDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        guard output === audioDataOutput else { return }
         guard conversionErrorCount < maxConversionErrors else {
             abortRecording(with: .formatConversion)
             return
         }
-        
+
+        guard let sample = capturedAudioSample(from: sampleBuffer),
+              configureConverterIfNeeded(for: sample),
+              let input = makeConversionInput(for: sample),
+              let outputBuffer = convert(sample: sample, input: input),
+              let data = convertedData(from: outputBuffer) else { return }
+
+        publishConvertedAudio(data)
+    }
+
+    private func capturedAudioSample(from sampleBuffer: CMSampleBuffer) -> CapturedAudioSample? {
         guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer),
               let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else {
             logger.error("Invalid sample buffer")
             incrementConversionErrorAndAbortIfNeeded()
-            return
+            return nil
         }
-        
+
         let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription)
-        let inputSampleRate = asbd?.pointee.mSampleRate ?? 48000
-        let inputChannels = Int(asbd?.pointee.mChannelsPerFrame ?? 1)
+        let sampleRate = asbd?.pointee.mSampleRate ?? 48000
+        let channelCount = Int(asbd?.pointee.mChannelsPerFrame ?? 1)
         let bitsPerChannel = Int(asbd?.pointee.mBitsPerChannel ?? 32)
-        
-        guard inputSampleRate > 0, inputChannels > 0, bitsPerChannel > 0 else {
-            logger.error("Invalid audio format: rate=\(inputSampleRate), channels=\(inputChannels), bits=\(bitsPerChannel)")
+
+        guard sampleRate > 0, channelCount > 0, bitsPerChannel > 0 else {
+            logger.error("Invalid audio format: rate=\(sampleRate), channels=\(channelCount), bits=\(bitsPerChannel)")
             incrementConversionErrorAndAbortIfNeeded()
-            return
+            return nil
         }
-        
-        if audioConverter == nil {
-            let commonFormat: AVAudioCommonFormat = (bitsPerChannel == 32) ? .pcmFormatFloat32 : .pcmFormatInt16
-            inputFormat = AVAudioFormat(commonFormat: commonFormat, sampleRate: inputSampleRate, channels: AVAudioChannelCount(inputChannels), interleaved: false)
-            outputFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: targetSampleRate, channels: 1, interleaved: true)
-            
-            guard let inputFmt = inputFormat, let outputFmt = outputFormat else {
-                logger.error("Failed to create audio formats")
-                incrementConversionErrorAndAbortIfNeeded()
-                return
-            }
-            
-            audioConverter = AVAudioConverter(from: inputFmt, to: outputFmt)
-            
-            if audioConverter != nil {
-                logger.info("Converter created: \(inputSampleRate)Hz/\(bitsPerChannel)bit/\(inputChannels)ch -> \(targetSampleRate)Hz/16bit/1ch")
-            } else {
-                logger.error("Failed to create audio converter")
-                incrementConversionErrorAndAbortIfNeeded()
-                return
-            }
+
+        return CapturedAudioSample(
+            blockBuffer: blockBuffer,
+            sampleRate: sampleRate,
+            channelCount: channelCount,
+            bitsPerChannel: bitsPerChannel
+        )
+    }
+
+    private func configureConverterIfNeeded(for sample: CapturedAudioSample) -> Bool {
+        guard audioConverter == nil else { return true }
+
+        let commonFormat: AVAudioCommonFormat = sample.bitsPerChannel == 32
+            ? .pcmFormatFloat32
+            : .pcmFormatInt16
+        inputFormat = AVAudioFormat(
+            commonFormat: commonFormat,
+            sampleRate: sample.sampleRate,
+            channels: AVAudioChannelCount(sample.channelCount),
+            interleaved: false
+        )
+        outputFormat = AVAudioFormat(
+            commonFormat: .pcmFormatInt16,
+            sampleRate: targetSampleRate,
+            channels: 1,
+            interleaved: true
+        )
+
+        guard let inputFormat, let outputFormat else {
+            logger.error("Failed to create audio formats")
+            incrementConversionErrorAndAbortIfNeeded()
+            return false
         }
-        
-        let bytesPerSample = bitsPerChannel / 8
-        let inputFrameCount = CMBlockBufferGetDataLength(blockBuffer) / Int(inputChannels) / bytesPerSample
-        
-        guard inputFrameCount > 0,
-              let inputFmt = inputFormat,
-              let outputFmt = outputFormat,
+
+        audioConverter = AVAudioConverter(from: inputFormat, to: outputFormat)
+
+        guard audioConverter != nil else {
+            logger.error("Failed to create audio converter")
+            incrementConversionErrorAndAbortIfNeeded()
+            return false
+        }
+
+        logger.info("Converter created: \(sample.sampleRate)Hz/\(sample.bitsPerChannel)bit/\(sample.channelCount)ch -> \(targetSampleRate)Hz/16bit/1ch")
+        return true
+    }
+
+    private func makeConversionInput(for sample: CapturedAudioSample) -> AudioConversionInput? {
+        guard sample.inputFrameCount > 0,
+              let inputFormat,
+              let outputFormat,
               let converter = audioConverter,
-              let inputBuffer = AVAudioPCMBuffer(pcmFormat: inputFmt, frameCapacity: AVAudioFrameCount(inputFrameCount)) else {
+              let inputBuffer = AVAudioPCMBuffer(
+                  pcmFormat: inputFormat,
+                  frameCapacity: AVAudioFrameCount(sample.inputFrameCount)
+              ) else {
             logger.error("Failed to create input buffer")
             incrementConversionErrorAndAbortIfNeeded()
-            return
+            return nil
         }
-        
-        inputBuffer.frameLength = AVAudioFrameCount(inputFrameCount)
-        
-        let dataLength = CMBlockBufferGetDataLength(blockBuffer)
-        
-        if bitsPerChannel == 32 {
-            var rawData = Data(count: dataLength)
+
+        inputBuffer.frameLength = AVAudioFrameCount(sample.inputFrameCount)
+        guard populate(inputBuffer, from: sample) else {
+            incrementConversionErrorAndAbortIfNeeded()
+            return nil
+        }
+
+        return AudioConversionInput(
+            buffer: inputBuffer,
+            outputFormat: outputFormat,
+            converter: converter
+        )
+    }
+
+    private func populate(_ inputBuffer: AVAudioPCMBuffer, from sample: CapturedAudioSample) -> Bool {
+        if sample.bitsPerChannel == 32 {
+            var rawData = Data(count: sample.dataLength)
             rawData.withUnsafeMutableBytes { rawBufferPointer in
                 guard let baseAddress = rawBufferPointer.baseAddress else { return }
-                CMBlockBufferCopyDataBytes(blockBuffer, atOffset: 0, dataLength: dataLength, destination: baseAddress)
+                CMBlockBufferCopyDataBytes(
+                    sample.blockBuffer,
+                    atOffset: 0,
+                    dataLength: sample.dataLength,
+                    destination: baseAddress
+                )
             }
-            
+
             if let floatData = inputBuffer.floatChannelData?[0] {
                 rawData.withUnsafeBytes { rawBufferPointer in
                     if let baseAddress = rawBufferPointer.baseAddress?.assumingMemoryBound(to: Float.self) {
-                        floatData.initialize(from: baseAddress, count: dataLength / 4)
+                        floatData.initialize(from: baseAddress, count: sample.dataLength / 4)
                     }
                 }
             }
-        } else {
-            guard let channelData = inputBuffer.int16ChannelData?[0] else {
-                incrementConversionErrorAndAbortIfNeeded()
-                return
-            }
-            CMBlockBufferCopyDataBytes(blockBuffer, atOffset: 0, dataLength: dataLength, destination: channelData)
+            return true
         }
-        
-        let outputFrameCount = AVAudioFrameCount(Double(inputFrameCount) * targetSampleRate / inputSampleRate)
+
+        guard let channelData = inputBuffer.int16ChannelData?[0] else { return false }
+        CMBlockBufferCopyDataBytes(
+            sample.blockBuffer,
+            atOffset: 0,
+            dataLength: sample.dataLength,
+            destination: channelData
+        )
+        return true
+    }
+
+    private func convert(
+        sample: CapturedAudioSample,
+        input: AudioConversionInput
+    ) -> AVAudioPCMBuffer? {
+        let outputFrameCount = AVAudioFrameCount(
+            Double(sample.inputFrameCount) * targetSampleRate / sample.sampleRate
+        )
         guard outputFrameCount > 0,
-              let outputBuffer = AVAudioPCMBuffer(pcmFormat: outputFmt, frameCapacity: outputFrameCount) else {
+              let outputBuffer = AVAudioPCMBuffer(
+                  pcmFormat: input.outputFormat,
+                  frameCapacity: outputFrameCount
+              ) else {
             logger.error("Failed to create output buffer")
             incrementConversionErrorAndAbortIfNeeded()
-            return
+            return nil
         }
-        
+
         var error: NSError?
         let inputBlock: AVAudioConverterInputBlock = { _, outStatus in
             outStatus.pointee = .haveData
-            return inputBuffer
+            return input.buffer
         }
-        
-        converter.convert(to: outputBuffer, error: &error, withInputFrom: inputBlock)
-        
-        if let error = error {
+
+        input.converter.convert(to: outputBuffer, error: &error, withInputFrom: inputBlock)
+
+        if let error {
             logger.error("Conversion error: \(error.localizedDescription)")
             incrementConversionErrorAndAbortIfNeeded()
-            return
+            return nil
         }
-        
-        if let channelData = outputBuffer.int16ChannelData {
-            let bytesToCopy = Int(outputBuffer.frameLength) * 2
-            guard bytesToCopy > 0 else { return }
-            
-            let data = Data(bytes: channelData[0], count: bytesToCopy)
-            
-            bufferQueue.sync {
-                guard self.audioBuffer.count + data.count <= estimatedMaxBufferSize else {
-                    logger.warning("Buffer overflow prevented")
-                    return
-                }
-                self.audioBuffer.append(data)
+
+        return outputBuffer
+    }
+
+    private func convertedData(from outputBuffer: AVAudioPCMBuffer) -> Data? {
+        guard let channelData = outputBuffer.int16ChannelData else { return nil }
+        let bytesToCopy = Int(outputBuffer.frameLength) * 2
+        guard bytesToCopy > 0 else { return nil }
+        return Data(bytes: channelData[0], count: bytesToCopy)
+    }
+
+    private func publishConvertedAudio(_ data: Data) {
+        let streamingError = bufferQueue.sync { () -> AudioIngressError? in
+            if let activeStreamingIngress {
+                return activeStreamingIngress.append(data)
             }
+
+            guard audioBuffer.count + data.count <= estimatedMaxBufferSize else {
+                logger.warning("Buffer overflow prevented")
+                return nil
+            }
+            audioBuffer.append(data)
+            return nil
+        }
+
+        if streamingError == .ingressOverflow {
+            abortRecording(with: .ingressOverflow)
         }
     }
 }
 
 #if DEBUG
 extension AudioRecorder {
+    func attachStreamingIngressForTesting(_ ingress: ByteBoundedAudioIngress) {
+        forceCleanup()
+        bufferQueue.sync {
+            activeStreamingIngress = ingress
+        }
+        isRecording = true
+    }
+
+    func publishConvertedAudioForTesting(_ data: Data) {
+        publishConvertedAudio(data)
+    }
+
+    func enqueueConvertedAudioCallbackForTesting(
+        _ data: Data,
+        started: @escaping () -> Void,
+        release: @escaping () -> Void
+    ) {
+        audioQueue.async { [weak self] in
+            started()
+            release()
+            self?.publishConvertedAudio(data)
+        }
+    }
+
+    func sealStreamingForTesting(streamEstablished: Bool) async {
+        await stopStreamingRecording(streamEstablished: streamEstablished)
+    }
+
     func forceSetRecordingForTesting(_ value: Bool) {
         isRecording = value
     }

@@ -32,13 +32,19 @@ final class HotKeyServiceTests: XCTestCase {
         XCTAssertFalse(sut.state.shouldShowOverlay)
     }
     
-    func test_recording_isActive() {
-        let state: HotKeyState = .recording
+    func test_streaming_isActive() {
+        let state: HotKeyState = .streaming(sessionID: StreamingSessionIdentity(generation: 1))
         XCTAssertTrue(state.isActive)
     }
     
-    func test_recording_shouldShowOverlay() {
-        let state: HotKeyState = .recording
+    func test_streaming_shouldShowOverlay() {
+        let state: HotKeyState = .streaming(sessionID: StreamingSessionIdentity(generation: 1))
+        XCTAssertTrue(state.shouldShowOverlay)
+    }
+
+    func test_sealing_isNotActiveButKeepsOverlayVisible() {
+        let state: HotKeyState = .sealing(sessionID: StreamingSessionIdentity(generation: 1))
+        XCTAssertFalse(state.isActive)
         XCTAssertTrue(state.shouldShowOverlay)
     }
     
@@ -73,52 +79,46 @@ final class HotKeyServiceTests: XCTestCase {
         XCTAssertEqual(sut.state, .error("Test error message"))
     }
 
-    // MARK: - Issue #7: forceTranscribing() for max-duration auto-stop
+    // MARK: - Issue #7/#26: max-duration sealing
 
-    func test_forceTranscribing_fromRecording_transitionsToTranscribing() {
-        // Arrange: force state to .recording to simulate an active recording session
-        sut.forceState(.recording)
+    func test_forceSealing_fromStreaming_preservesIdentity() {
+        let identity = StreamingSessionIdentity(generation: 7)
+        sut.forceState(.streaming(sessionID: identity))
 
-        // Act: trigger forceTranscribing() as the max-duration handler would
-        sut.forceTranscribing()
+        sut.forceSealing()
 
-        // Assert: state must be .transcribing so the $state sink routes to stopRecordingAndTranscribe
         XCTAssertEqual(
             sut.state,
-            .transcribing,
-            "forceTranscribing() from .recording must transition to .transcribing; got \(sut.state) instead"
+            .sealing(sessionID: identity),
+            "the duration cap must seal the same accepted hold"
         )
     }
 
-    func test_forceTranscribing_whenAlreadyTranscribing_isNoOp() {
-        // Arrange: state is already .transcribing (e.g. Fn released just before timer fired)
-        sut.forceState(.transcribing)
+    func test_forceSealing_whenAlreadySealing_isNoOp() {
+        let identity = StreamingSessionIdentity(generation: 8)
+        sut.forceState(.sealing(sessionID: identity))
 
-        // Act: timer fires and calls forceTranscribing() a second time
-        sut.forceTranscribing()
+        sut.forceSealing()
 
-        // Assert: state must remain .transcribing — idempotent, no double-stop
         XCTAssertEqual(
             sut.state,
-            .transcribing,
-            "forceTranscribing() when already .transcribing must be a no-op; got \(sut.state) instead"
+            .sealing(sessionID: identity),
+            "a release/cap race must not replace or re-seal the interaction"
         )
     }
 
-    // MARK: - Issue #6: Fn release during .transcribing must not reset state
+    // MARK: - Issue #6/#26: Fn release during sealing must not reset state
 
-    func test_fnReleasedDuringTranscribing_stateRemainsTranscribing() {
-        // Arrange: force state to .transcribing to simulate an in-flight API call
-        sut.forceState(.transcribing)
+    func test_fnReleasedDuringSealing_stateRemainsSealing() {
+        let identity = StreamingSessionIdentity(generation: 9)
+        sut.forceState(.sealing(sessionID: identity))
 
-        // Act: simulate a Fn key release event while already transcribing
         sut.handleFnReleased()
 
-        // Assert: state must NOT revert to .idle (no concurrent session allowed)
         XCTAssertEqual(
             sut.state,
-            .transcribing,
-            "Fn release during .transcribing must be a no-op; got \(sut.state) instead"
+            .sealing(sessionID: identity),
+            "Fn release during sealing must be a no-op"
         )
     }
 
@@ -238,19 +238,20 @@ final class HotKeyServiceTests: XCTestCase {
     /// If previousFlags said Fn-was-down but the live state says Fn-is-up, the resync
     /// must invoke handleFnReleased().
     func test_postTimeoutResync_missedFnRelease_triggersHandleFnReleased() {
-        // Arrange: simulate that we believed Fn was held (e.g. .recording), and the
+        // Arrange: simulate that we believed Fn was held (streaming), and the
         // live state reports Fn is no longer down (the user released it during the gap).
-        sut.forceState(.recording)
+        let identity = StreamingSessionIdentity(generation: 10)
+        sut.forceState(.streaming(sessionID: identity))
         sut.setPreviousFlagsForTesting(CGEventFlags.maskSecondaryFn)
 
         // Act: run the resync with a live snapshot in which Fn is NOT pressed.
         sut.resyncFnStateForTesting(liveFlags: [])
 
-        // Assert: the missed release must transition .recording -> .transcribing,
+        // Assert: the missed release must transition streaming -> sealing,
         // exactly as handleFnReleased() does for the recording case.
         XCTAssertEqual(
             sut.state,
-            .transcribing,
+            .sealing(sessionID: identity),
             "Missed Fn release during tap-timeout must trigger handleFnReleased(); got \(sut.state)"
         )
         // And previousFlags must now mirror the live (Fn-up) state.
@@ -262,16 +263,17 @@ final class HotKeyServiceTests: XCTestCase {
 
     /// When the live state still reports Fn down after re-enable, no release is fired.
     func test_postTimeoutResync_fnStillHeld_doesNotTriggerRelease() {
-        sut.forceState(.recording)
+        let identity = StreamingSessionIdentity(generation: 11)
+        sut.forceState(.streaming(sessionID: identity))
         sut.setPreviousFlagsForTesting(CGEventFlags.maskSecondaryFn)
 
         // Act: live state still has Fn down — no missed release.
         sut.resyncFnStateForTesting(liveFlags: CGEventFlags.maskSecondaryFn)
 
-        // Assert: state stays .recording (no release fired).
+        // Assert: state stays streaming (no release fired).
         XCTAssertEqual(
             sut.state,
-            .recording,
+            .streaming(sessionID: identity),
             "Resync with Fn still held must not fire a release; got \(sut.state)"
         )
     }

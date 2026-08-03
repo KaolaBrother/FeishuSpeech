@@ -2,11 +2,10 @@
 
 Document system boundaries, major components, data flow, and deployment shape.
 
-## Planned cursor-bound streaming speech architecture (issue #25)
+## Cursor-bound streaming speech architecture (issues #25/#26)
 
-Issue #25 accepts the design in `docs/decisions/D-25-01.md` and
-`docs/streaming-speech-design.md`; it does not implement it. The production architecture will move
-from whole-file capture followed by one paste to a generation-bound streaming pipeline:
+Issue #25 accepted the design in `docs/decisions/D-25-01.md`; issue #26 implements the production
+generation-bound streaming pipeline:
 
 ```text
 HotKeyService
@@ -16,32 +15,45 @@ HotKeyService
       -> CursorTextSession (@MainActor) -> original AX editable element
 ```
 
-The hot-key state becomes `idle -> pending -> streaming -> sealing -> idle | error`.
+The production hot-key state is `idle -> pending -> streaming -> sealing -> idle | error`.
 `pending` retains the 0.3-second gate. `streaming` owns one recorder, Feishu stream, and optional
 cursor writer. Fn release or the 60-second cap enters `sealing`, closes capture, flushes at most one
 audio tail, emits one normal finish, and waits for the final response. A new hold cannot start while
-sealing. Reset, sleep/wake, cancellation, or failure advances the session generation before cleanup
-so late callbacks are inert.
+sealing. Reset, sleep/wake, cancellation, or failure invalidates the active session identity before
+cleanup so late callbacks are inert.
 
 ### Streaming audio boundary
 
-Converted 16 kHz mono signed Int16 PCM is coalesced in capture order into 6,400-byte elements
+`AudioRecorder` sends converted 16 kHz mono signed Int16 PCM to
+`ByteBoundedAudioIngress`, which coalesces capture-order bytes into 6,400-byte elements
 (about 200 ms) before entering a non-blocking async stream. The retained 60-second cap is
 1,920,000 bytes / 300 elements. This is a byte/duration bound, not a raw callback-count bound.
-An established stream may pad its final non-empty tail to the 3,200-byte (100 ms) minimum.
+The ingress owns queued packets, pending coalescing bytes, terminal state, and waiters under one
+lock. Dequeue subtracts the exact packet size before resuming the consumer, so drained capacity is
+immediately reusable. After the real audio callback queue barrier, an established stream may pad
+its final non-empty tail to the 3,200-byte (100 ms) local minimum.
 Overflow fails the current stream explicitly; the pipeline never drops, reorders, replays, or sends
 PCM packets in parallel.
 
 ### Streaming transport boundary
 
-`FeishuStreamingSession` is an actor that owns stream ID, cached token snapshot, sequence number,
+`FeishuStreamingSession` is an actor with an explicit FIFO request gate. It owns stream ID, cached
+token snapshot, sequence number,
 first-packet acknowledgement, terminal intent, active request, and completion state. It serializes
 `action=1` open, `action=0` continuation, `action=2` finish, and bounded best-effort `action=3`
-abort requests. A known invalid token may refresh only before the first packet is accepted.
+abort requests; action 3 has one total one-second best-effort deadline and cannot overlap an audio
+or finish request. Only the exact known invalid-token business code in a bounded HTTP 400/401
+response may refresh before the first packet is accepted, retrying that same first action and
+sequence once.
 An established stream has no whole-file fallback or whole-audio retry.
 
 Intermediate `recognition_text` is treated as opaque replacement state because Feishu does not
 document whether it is delta, cumulative, stabilized, or revisable.
+
+These packet sizes, tail padding, lowercase stream IDs, same-sequence token retry, strict
+serialization, and exact-once terminal behavior are FeishuSpeech application invariants. Public
+Feishu documentation does not guarantee their runtime acceptance or idempotency; credential-bearing
+Release UAT remains pending.
 
 ### Cursor-writing boundary
 
@@ -62,9 +74,12 @@ Late events are dropped and are never redirected to a newly focused control.
 
 The app does not use per-partial clipboard writes, synthetic Backspace, or Shift+Arrow selection.
 Unsupported editable elements use a clearly reported final-only path: the stream retains only the
-latest opaque response in memory and inserts once through the existing pasteboard path only if the
-same target remains focused. A stale fallback target receives no synthetic input. Secure Event
-Input and secure text fields are rejected rather than downgraded.
+latest opaque response in memory and posts one process-targeted Cmd+V only after the captured PID,
+focused element, and security state are revalidated before delivery; the output sink validates
+again after posting. A stale/uncertain target or action-capable C0/C1 control character receives no
+further synthetic input and uses copy-only manual recovery with fixed two-second feedback. A
+security rejection receives neither paste nor recovery copy. Secure Event Input and secure text
+fields are rejected rather than downgraded.
 
 ### Finalization and privacy
 
@@ -73,7 +88,9 @@ synthesizing Return. Empty final or stream failure preserves a last verified vis
 than risk deleting user content after ownership becomes uncertain. A failure before the first
 write causes no target mutation.
 
-The overlay remains status-only; target applications are the editing surface. Logs may include
+The overlay remains status-only; target applications are the editing surface. Empty-final and
+manual-copy outcomes use fixed, generation-guarded feedback presented for two seconds even though
+the coordinator has already returned to idle. Logs may include
 typed state/failure values, generations, sequence numbers, and byte counts, but never transcript
 text, audio, credentials/tokens, stream IDs, focused-control contents, application/window titles,
 or clipboard payloads.
@@ -152,37 +169,27 @@ Workspace lifecycle delivery is routed through `MainViewModel`. If a sleep or
 wake notification arrives before `setViewModel(_:)`, `AppDelegate` queues the
 event and replays the queued lifecycle events once the view model is injected.
 
-`MainViewModel.handleSystemWillSleep()` and `handleSystemDidWake()` both call the
-same idle reset path used for stale transcription cleanup:
-
-- advance the transcription generation and cancel the current transcription
-  task;
-- hide the overlay;
-- call `audioRecorder.forceCleanup()` rather than `stopRecording()`, so stale
-  audio is discarded instead of transcribed;
-- stop the max-duration timer;
-- clear the consecutive-failure counter;
-- set coordinator status to `.idle`;
-- call `hotKeyService.resetToIdle()`;
-- call `FeishuAPIService.resetStateForWake()`.
+`MainViewModel.handleSystemWillSleep()` and `handleSystemDidWake()` both use the streaming terminal
+path: invalidate the active identity and cursor ownership first; fail the ingress; cancel consumer
+and sealing work; release captured destination/session references; force-clean the recorder; issue
+a bounded stream cancel when applicable; stop the timer and overlay; return coordinator and hot-key
+state to idle; then call `FeishuAPIService.resetStateForWake()`.
 
 The wake handler also calls `HotKeyService.recoverAfterWake()` after the API
 wake reset.
 
 ## HotKeyService — state-machine contract
 
-`HotKeyService` drives the CGEventTap state machine: `idle -> pending (0.3 s) -> recording ->
-transcribing -> idle`. The following contract rules (issues #6, #7, #8, #22, #23, #24; see
-`docs/decisions/D-6-01.md` and `docs/decisions/D-24-01.md`) keep `HotKeyService` and
-`MainViewModel` in sync:
+`HotKeyService` drives `idle -> pending (0.3 s) -> streaming(sessionID) ->
+sealing(sessionID) -> idle`. The following rules keep `HotKeyService` and `MainViewModel` in sync:
 
-- **`handleFnReleased` is a no-op except in `.recording`.** Calling it from `.transcribing`,
-  `.error`, `.cancelled`, or `.idle` performs no transition. Only `.recording → .transcribing`
-  is the normal Fn-release path.
-- **`forceTranscribing()` drives the max-duration stop path.** When the max-duration timer
-  fires, `handleMaxDurationReached` calls `forceTranscribing()`, which transitions
-  `.recording → .transcribing` through the state machine. `stopRecordingAndTranscribe()` is
-  idempotent so a subsequent Fn-release produces no error.
+- **The 0.3-second gate allocates the identity.** Each accepted gate increments a monotonically
+  increasing generation and publishes it with `.streaming`.
+- **Release and duration cap converge on sealing.** Fn release and the 60-second timer both move
+  that same identity from `.streaming` to `.sealing`; repeated transitions are ignored and a new
+  Fn press during sealing cannot open another session.
+- **Reset/error/stop/wake clears identity before cleanup.** Late audio, network, AX, timer, and
+  overlay callbacks compare the captured generation and cannot revive or redirect a retired hold.
 - **`MainViewModel` holds `stateCancellable: AnyCancellable?` for the single `$state`
   subscriber.** `startHotKeyMonitoring` assigns it (replacing any prior subscriber);
   `stopHotKeyMonitoring` nils it before calling `stopMonitoring()`. At most one live
@@ -254,9 +261,19 @@ current microphone authorization status without prompting and recomputes
 
 ## TextInputSimulator — clipboard-restore contract
 
-`TextInputSimulator` writes transcribed text to `NSPasteboard.general`, sends a synthetic
-Cmd+V, then restores the previous clipboard state (issue #13, see
-`docs/decisions/D-13-01.md`):
+The legacy compatibility helper in `TextInputSimulator` writes a final string to
+`NSPasteboard.general`, sends a synthetic Cmd+V, then restores the previous clipboard state
+(issue #13, see `docs/decisions/D-13-01.md`). Production streaming partials never use this path.
+The issue-26 final-only output instead:
+
+- accepts only text without C0, DEL, or C1 control scalars for automatic delivery;
+- targets the captured process with `CGEvent.postToPid` and validates the captured element and
+  security state before and after delivery;
+- copies the exact final value without posting a key event when non-security delivery is stale or
+  uncertain, then shows fixed two-second transcript-free feedback;
+- performs no pasteboard recovery when current security cannot be proven safe.
+
+The older compatibility helper retains these clipboard-restore mechanics:
 
 - **Full snapshot before write.** Before placing the transcribed text on the pasteboard, the
   simulator reads every `type` from `NSPasteboard.general` and stores a
@@ -268,8 +285,7 @@ Cmd+V, then restores the previous clipboard state (issue #13, see
   deferred until that increment is observed, ensuring the target application has read the
   transcribed text before the old data is written back.
 - **Fallback notification on timeout.** If the changeCount does not advance within the
-  timeout, the simulator restores the pasteboard unconditionally and posts an
-  `NSNotification` so the caller can surface a warning to the user.
+  timeout, the simulator restores the pasteboard unconditionally and posts a user notification.
 
 The `maxDurationTimer` in `HotKeyService` is scheduled with `RunLoop.main.add(timer,
 forMode: .common)` so it fires in both `.default` and `NSEventTrackingRunLoopMode` (e.g.
@@ -288,3 +304,20 @@ to prevent hide/show races (issue #17, see `docs/decisions/D-13-01.md`):
 
 This prevents a `hide()` completion from a superseded call from closing a window that a
 newer `show()` has already claimed.
+
+Issue #26 extends the same guard to completion feedback. A requested interval is clamped to one
+through five seconds (the coordinator always requests two); show, hide, or replacement feedback
+cancels the previous delayed hide and advances the generation, so stale feedback cannot hide a new
+recording overlay.
+
+## Verification boundary
+
+The implementation and independent correctness/security reviews are complete. The recorded full
+macOS test run reports 171 passed, 0 failed, and 0 skipped, including ingress drain/reuse,
+post-callback-barrier sealing, strict serial finish/cancel races, cursor ownership, secure
+fail-closed output, generation cleanup, settings, and two-second transcript-free feedback.
+
+Credential-bearing Feishu behavior and cross-application Accessibility compatibility remain live
+UAT. The installed Release must still verify terminal encoding, real response and token-refresh
+behavior, PCM/tail handling, slow networks, native/browser/Electron/terminal/rich-text targets,
+focus/caret interference, Unicode, and undo. No broad application compatibility is claimed yet.

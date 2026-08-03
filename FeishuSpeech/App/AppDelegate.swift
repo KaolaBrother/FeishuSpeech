@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import SwiftUI
+
 import os.log
 
 private let logger = Logger(subsystem: "com.feishuspeech.app", category: "AppDelegate")
@@ -136,7 +137,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         workspaceObserverTokens.count
     }
 
-    var pendingWorkspaceLifecycleEventCountForTesting: Int {
+    var pendingLifecycleEventCountForTesting: Int {
         pendingWorkspaceLifecycleEvents.count
     }
 

@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### Added
+- 按住 Fn 0.3 秒后进入光标绑定的飞书流式识别：每次交互由唯一 generation 共同拥有录音、精确字节上限且可感知消费进度的音频入口、严格串行的 Feishu session，以及绑定原始 `AXUIElement` 的文字会话；松开 Fn 或达到 60 秒进入 sealing 并只完成一次（issue #26）
+- 支持可验证的实时范围替换和 final-only 回退：暂定结果始终整体替换应用拥有的范围；不支持安全范围读写的非安全控件只在原始 PID/元素仍有效时发送一次 Cmd+V，目标失效、交付不确定或结果含控制字符时改为 copy-only，并显示固定 2 秒的无文本恢复提示（issue #26）
+- 新增流式音频、录音封口、飞书 action/sequence/cancel/token、光标范围、安全最终输出、generation 生命周期和完成提示的自动化覆盖；独立评审记录完整 macOS 测试 171 通过、0 失败、0 跳过（issue #26）
 - 热键监控状态现在可被观察：新增 `MonitoringState`（`.stopped` / `.active` / `.failed`），菜单栏可实时反映 Event Tap 是否正常运行（issue #5）
 - 安全输入检测：终端、1Password 等程序启用安全键盘时，菜单栏显示橙色提示"安全输入已启用，热键暂不可用"（issue #10）
 - 新增 `FeishuAPIServiceTests` 单元测试目标，覆盖直连 HTTP 解析、token 过期时间和取消重试路径（issues #11/#12/#21）
@@ -10,6 +13,9 @@
 - 新增 `MainViewModelTests` 覆盖 `MonitoringState` 失败映射、恢复清除和 cleanup 订阅释放路径（issues #22/#23/#24）
 
 ### Fixed
+- 睡眠/唤醒、手动重置、权限变化、录音/网络失败和进程清理现在先使流式 generation 与光标所有权失效，再终止入口、录音、网络任务和计时器；迟到事件不能恢复旧会话或写入新的焦点（issue #26）
+- 音频入口按实际排队和待组包字节精确计数，消费后立即复用容量；停止录音会越过真实音频回调队列屏障后再决定是否保留尾包，溢出显式失败而不丢包或乱序（issue #26）
+
 - 飞书认证和语音识别请求改为直接通过 `open.feishu.cn` 的系统 DNS/URLSession 路径发送，移除会因 CDN IP 轮换耗尽 30 秒预算的硬编码 IP 主路径；30 秒总超时统一由 `FeishuAPIService` 管理并向底层请求传播取消。
 - 飞书 App ID / App Secret 不再写入 UserDefaults 设置载荷：新保存使用 macOS Keychain，旧版 `FeishuSpeechSettings` 或独立 `appId` / `appSecret` 默认值会在可安全读写 Keychain 后迁移并清理；迁移或读写失败时保留旧凭据回退（issue #18）
 - 系统睡眠/唤醒后会取消陈旧转录、清理录音和 overlay 状态、重置热键状态，并刷新飞书 token / 网络错误缓存；唤醒时还会检查并重启丢失或禁用的 Event Tap（issue #19）
@@ -47,6 +53,10 @@
 - URLSession 从 computed property 改为 stored property，避免重复创建
 - Token 缓存时间从 7000s 降至 6000s，增加安全余量
 - 移除测试中引用已删除 `.armed` 状态的用例
+
+### Verification pending
+- 真实飞书凭据下的终止请求空音频编码、响应形态、首次 token 刷新同序列重试、partial/final 语义、PCM/tail 兼容性和慢网行为仍需安装版 Release UAT；这些本地策略不作为飞书保证。
+- TextEdit/原生控件、浏览器、Electron、终端和富文本编辑器的 Accessibility 范围、焦点干扰、Unicode 与 undo 行为仍需跨应用实机 UAT；当前不声明广泛兼容性。
 
 ## [0.3.0] - 2025
 

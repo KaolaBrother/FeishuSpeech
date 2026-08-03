@@ -1,6 +1,7 @@
-import Foundation
 import AppKit
 import Combine
+import Foundation
+
 import os.log
 
 private let logger = Logger(subsystem: "com.feishuspeech.app", category: "HotKey")
@@ -25,6 +26,8 @@ class HotKeyService: ObservableObject {
     private let previousFlagsLock = NSLock()
     private var pendingWorkItem: DispatchWorkItem?
     private var restartRetryCount = 0
+    private var nextSessionGeneration: UInt64 = 0
+    private var activeSessionIdentity: StreamingSessionIdentity?
 
     // Issue #9: the event-tap run-loop source must live on a private, long-lived thread
     // — NOT CFRunLoopGetMain(). AVCaptureSession.startRunning() blocks the main actor, so
@@ -153,6 +156,9 @@ class HotKeyService: ObservableObject {
 
     func stopMonitoring() {
         guard let tap = eventTap else {
+            invalidateActiveSession()
+            cancelPendingTransition()
+            state = .idle
             previousFlagsLock.lock(); previousFlags = []; previousFlagsLock.unlock()
             monitoringState = .stopped
             isMonitoring = false
@@ -166,6 +172,7 @@ class HotKeyService: ObservableObject {
         eventTap = nil
         runLoopSource = nil
         cancelPendingTransition()
+        invalidateActiveSession()
         state = .idle
         previousFlagsLock.lock(); previousFlags = []; previousFlagsLock.unlock()
         monitoringState = .stopped
@@ -222,6 +229,7 @@ class HotKeyService: ObservableObject {
     
     private func handleTapDisabled() {
         stopMonitoring()
+        invalidateActiveSession()
         state = .cancelled(reason: .eventTapDisabled)
         resetToIdleAfterDelay()
         
@@ -265,6 +273,7 @@ class HotKeyService: ObservableObject {
 
     private func cancelStaleWakeInput() {
         cancelPendingTransition()
+        invalidateActiveSession()
         state = .idle
         previousFlagsLock.lock()
         previousFlags = []
@@ -298,7 +307,7 @@ class HotKeyService: ObservableObject {
     private func handleFnPressed(flags: CGEventFlags) {
         logger.info("Fn key pressed, current state: \(String(describing: self.state))")
         
-        if !flags.intersection(unwantedModifiers).isEmpty {
+        if !flags.isDisjoint(with: unwantedModifiers) {
             logger.info("Modifier key detected, ignoring Fn press")
             return
         }
@@ -307,8 +316,11 @@ class HotKeyService: ObservableObject {
         case .idle:
             transitionToPending()
         case .cancelled, .error:
+            invalidateActiveSession()
             state = .idle
             transitionToPending()
+        case .sealing:
+            logger.info("Fn press ignored while sealing the current session")
         default:
             break
         }
@@ -322,10 +334,13 @@ class HotKeyService: ObservableObject {
             let duration = Date().timeIntervalSince(startTime)
             logger.info("Released during pending, duration: \(duration)s")
             transitionToCancelled(reason: .releasedTooSoon(duration: duration))
+        case .streaming(let sessionID):
+            logger.info("Released from streaming - transitioning to sealing")
+            state = .sealing(sessionID: sessionID)
         case .recording:
             logger.info("Released from recording - transitioning to transcribing")
             state = .transcribing
-        case .transcribing, .error, .cancelled, .idle:
+        case .sealing, .transcribing, .error, .cancelled, .idle:
             logger.info("Fn released in non-active state \(String(describing: self.state)) - ignoring")
         }
     }
@@ -353,9 +368,34 @@ class HotKeyService: ObservableObject {
     /// Test-only helper: directly set state without going through the event tap.
     func forceState(_ newState: HotKeyState) {
         logger.info("forceState called: \(String(describing: newState))")
+        switch newState {
+        case .streaming(let identity), .sealing(let identity):
+            activeSessionIdentity = identity
+            nextSessionGeneration = max(nextSessionGeneration, identity.generation)
+        default:
+            invalidateActiveSession()
+        }
         state = newState
     }
+
+    func handleFnPressedForTesting(flags: CGEventFlags) {
+        handleFnPressed(flags: flags)
+    }
+
+    func acceptsCallbacksForTesting(_ identity: StreamingSessionIdentity) -> Bool {
+        acceptsCallbacks(for: identity)
+    }
     #endif
+
+    func forceSealing() {
+        logger.info("Force sealing requested, current state: \(String(describing: self.state))")
+        cancelPendingTransition()
+        guard case .streaming(let sessionID) = state else {
+            logger.info("forceSealing ignored in state \(String(describing: self.state))")
+            return
+        }
+        state = .sealing(sessionID: sessionID)
+    }
 
     /// Called by MainViewModel when the max-duration timer fires.
     /// Transitions .recording or .pending → .transcribing so the $state sink
@@ -394,24 +434,29 @@ class HotKeyService: ObservableObject {
         state = .pending(startTime: Date())
         
         let workItem = DispatchWorkItem { [weak self] in
-            self?.transitionToRecording()
+            self?.transitionToStreaming()
         }
         pendingWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + delayInterval, execute: workItem)
     }
     
-    private func transitionToRecording() {
+    private func transitionToStreaming() {
         guard case .pending = state else {
-            logger.info("Not in pending state, skipping recording transition")
+            logger.info("Not in pending state, skipping streaming transition")
             return
         }
-        logger.info("Transitioning to recording state (Fn held for \(self.delayInterval)s)")
-        state = .recording
+        precondition(nextSessionGeneration < UInt64.max, "Streaming session generation exhausted")
+        nextSessionGeneration += 1
+        let identity = StreamingSessionIdentity(generation: nextSessionGeneration)
+        activeSessionIdentity = identity
+        logger.info("Transitioning to streaming state for generation \(identity.generation)")
+        state = .streaming(sessionID: identity)
     }
     
     private func transitionToCancelled(reason: CancelReason) {
         logger.info("Transitioning to cancelled: \(reason.description)")
         cancelPendingTransition()
+        invalidateActiveSession()
         state = .cancelled(reason: reason)
         resetToIdleAfterDelay()
     }
@@ -432,13 +477,23 @@ class HotKeyService: ObservableObject {
     func resetToIdle() {
         logger.info("Manual reset to idle")
         cancelPendingTransition()
+        invalidateActiveSession()
         state = .idle
     }
 
     func setError(_ message: String) {
         logger.error("Setting error state: \(message)")
         cancelPendingTransition()
+        invalidateActiveSession()
         state = .error(message)
+    }
+
+    func acceptsCallbacks(for identity: StreamingSessionIdentity) -> Bool {
+        activeSessionIdentity == identity
+    }
+
+    private func invalidateActiveSession() {
+        activeSessionIdentity = nil
     }
 
     // MARK: - Test-only simulation helpers (issue #5)

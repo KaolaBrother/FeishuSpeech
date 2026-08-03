@@ -18,6 +18,9 @@ enum MonitoringState: Equatable {
 enum HotKeyState: Equatable {
     case idle
     case pending(startTime: Date)
+    case streaming(sessionID: StreamingSessionIdentity)
+    case sealing(sessionID: StreamingSessionIdentity)
+    // Compatibility-only states for the retired whole-file flow.
     case recording
     case transcribing
     case cancelled(reason: CancelReason)
@@ -25,7 +28,7 @@ enum HotKeyState: Equatable {
     
     var isActive: Bool {
         switch self {
-        case .pending, .recording:
+        case .pending, .streaming, .recording:
             return true
         default:
             return false
@@ -34,7 +37,7 @@ enum HotKeyState: Equatable {
     
     var shouldShowOverlay: Bool {
         switch self {
-        case .recording:
+        case .streaming, .sealing, .recording:
             return true
         default:
             return false

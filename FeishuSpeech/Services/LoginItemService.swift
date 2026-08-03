@@ -1,4 +1,5 @@
 import ServiceManagement
+
 import os.log
 
 private nonisolated(unsafe) let logger = Logger(subsystem: "com.feishuspeech.app", category: "LoginItem")
