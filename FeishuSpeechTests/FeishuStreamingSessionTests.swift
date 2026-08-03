@@ -6,6 +6,175 @@ import os.log
 private let logger = Logger(subsystem: "com.feishuspeech.app", category: "FeishuStreamingSessionTests")
 
 final class FeishuStreamingSessionTests: XCTestCase {
+    func test_firstPacketBackendBusinessFailureEmitsOnlySafeStructuredDiagnostic() async throws {
+        let response = DirectHTTPResponse(
+            statusCode: 200,
+            body: try JSONSerialization.data(withJSONObject: [
+                "code": 123_456,
+                "msg": "PRIVATE_BACKEND_MESSAGE",
+                "data": ["recognition_text": "PRIVATE_TRANSCRIPT"]
+            ])
+        )
+
+        let diagnostic = try await captureFirstPacketFailure(
+            response: response,
+            expectedFailure: .backend
+        )
+
+        XCTAssertEqual(diagnostic.action, 1)
+        XCTAssertEqual(diagnostic.sequenceID, 0)
+        XCTAssertEqual(diagnostic.httpStatus, 200)
+        XCTAssertEqual(diagnostic.responseByteCount, response.body.count)
+        XCTAssertEqual(diagnostic.businessCode, 123_456)
+        XCTAssertNil(diagnostic.dataPresent)
+        XCTAssertNil(diagnostic.streamIDMatches)
+        XCTAssertNil(diagnostic.sequenceIDMatches)
+        XCTAssertEqual(diagnostic.outcome, .backendBusinessCode)
+        assertSafeDiagnosticSurface(
+            diagnostic,
+            forbiddenValues: [
+                "PRIVATE_BACKEND_MESSAGE",
+                "PRIVATE_TRANSCRIPT",
+                "PRIVATE_TOKEN",
+                "fixed_stream_016",
+                "PRIVATE_AUDIO"
+            ]
+        )
+    }
+
+    func test_firstPacketMalformedJSONEmitsOnlySafeStructuredDiagnostic() async throws {
+        let response = DirectHTTPResponse(
+            statusCode: 200,
+            body: Data("PRIVATE_RAW_BODY PRIVATE_TRANSCRIPT PRIVATE_TOKEN".utf8)
+        )
+
+        let diagnostic = try await captureFirstPacketFailure(
+            response: response,
+            expectedFailure: .malformedResponse
+        )
+
+        XCTAssertEqual(diagnostic.action, 1)
+        XCTAssertEqual(diagnostic.sequenceID, 0)
+        XCTAssertEqual(diagnostic.httpStatus, 200)
+        XCTAssertEqual(diagnostic.responseByteCount, response.body.count)
+        XCTAssertNil(diagnostic.businessCode)
+        XCTAssertNil(diagnostic.dataPresent)
+        XCTAssertNil(diagnostic.streamIDMatches)
+        XCTAssertNil(diagnostic.sequenceIDMatches)
+        XCTAssertEqual(diagnostic.outcome, .malformedJSON)
+        assertSafeDiagnosticSurface(
+            diagnostic,
+            forbiddenValues: [
+                "PRIVATE_RAW_BODY",
+                "PRIVATE_TRANSCRIPT",
+                "PRIVATE_TOKEN",
+                "fixed_stream_016",
+                "PRIVATE_AUDIO"
+            ]
+        )
+    }
+
+    func test_firstPacketCodeZeroMissingDataEmitsOnlySafeStructuredDiagnostic() async throws {
+        let response = DirectHTTPResponse(
+            statusCode: 200,
+            body: try JSONSerialization.data(withJSONObject: [
+                "code": 0,
+                "msg": "PRIVATE_BACKEND_MESSAGE"
+            ])
+        )
+
+        let diagnostic = try await captureFirstPacketFailure(
+            response: response,
+            expectedFailure: .malformedResponse
+        )
+
+        XCTAssertEqual(diagnostic.action, 1)
+        XCTAssertEqual(diagnostic.sequenceID, 0)
+        XCTAssertEqual(diagnostic.httpStatus, 200)
+        XCTAssertEqual(diagnostic.responseByteCount, response.body.count)
+        XCTAssertEqual(diagnostic.businessCode, 0)
+        XCTAssertEqual(diagnostic.dataPresent, false)
+        XCTAssertNil(diagnostic.streamIDMatches)
+        XCTAssertNil(diagnostic.sequenceIDMatches)
+        XCTAssertEqual(diagnostic.outcome, .missingData)
+        assertSafeDiagnosticSurface(
+            diagnostic,
+            forbiddenValues: [
+                "PRIVATE_BACKEND_MESSAGE",
+                "PRIVATE_TOKEN",
+                "fixed_stream_016",
+                "PRIVATE_AUDIO"
+            ]
+        )
+    }
+
+    func test_firstPacketStreamIDMismatchEmitsOnlySafeStructuredDiagnostic() async throws {
+        let response = streamResponseWithIdentity(
+            streamID: "PRIVATE_WRONG_ID",
+            sequenceID: 0,
+            text: "PRIVATE_TRANSCRIPT"
+        )
+
+        let diagnostic = try await captureFirstPacketFailure(
+            response: response,
+            expectedFailure: .responseIdentityMismatch,
+            injectsRequestIdentity: false
+        )
+
+        XCTAssertEqual(diagnostic.action, 1)
+        XCTAssertEqual(diagnostic.sequenceID, 0)
+        XCTAssertEqual(diagnostic.httpStatus, 200)
+        XCTAssertEqual(diagnostic.responseByteCount, response.body.count)
+        XCTAssertEqual(diagnostic.businessCode, 0)
+        XCTAssertEqual(diagnostic.dataPresent, true)
+        XCTAssertEqual(diagnostic.streamIDMatches, false)
+        XCTAssertNil(diagnostic.sequenceIDMatches)
+        XCTAssertEqual(diagnostic.outcome, .streamIDMismatch)
+        assertSafeDiagnosticSurface(
+            diagnostic,
+            forbiddenValues: [
+                "PRIVATE_WRONG_ID",
+                "PRIVATE_TRANSCRIPT",
+                "PRIVATE_TOKEN",
+                "fixed_stream_016",
+                "PRIVATE_AUDIO"
+            ]
+        )
+    }
+
+    func test_firstPacketSequenceIDMismatchEmitsOnlySafeStructuredDiagnostic() async throws {
+        let response = streamResponseWithIdentity(
+            streamID: "fixed_stream_016",
+            sequenceID: 99,
+            text: "PRIVATE_TRANSCRIPT"
+        )
+
+        let diagnostic = try await captureFirstPacketFailure(
+            response: response,
+            expectedFailure: .responseIdentityMismatch,
+            injectsRequestIdentity: false
+        )
+
+        XCTAssertEqual(diagnostic.action, 1)
+        XCTAssertEqual(diagnostic.sequenceID, 0)
+        XCTAssertEqual(diagnostic.httpStatus, 200)
+        XCTAssertEqual(diagnostic.responseByteCount, response.body.count)
+        XCTAssertEqual(diagnostic.businessCode, 0)
+        XCTAssertEqual(diagnostic.dataPresent, true)
+        XCTAssertEqual(diagnostic.streamIDMatches, true)
+        XCTAssertEqual(diagnostic.sequenceIDMatches, false)
+        XCTAssertEqual(diagnostic.outcome, .sequenceIDMismatch)
+        assertSafeDiagnosticSurface(
+            diagnostic,
+            forbiddenValues: [
+                "PRIVATE_TRANSCRIPT",
+                "PRIVATE_TOKEN",
+                "fixed_stream_016",
+                "PRIVATE_AUDIO"
+            ]
+        )
+    }
+
     func test_typedEvents_preserveOpaqueReplacementValuesAndTypedFailures() {
         XCTAssertEqual(StreamingRecognitionEvent.partial("revised complete value"), .partial("revised complete value"))
         XCTAssertEqual(StreamingRecognitionEvent.final("authoritative final"), .final("authoritative final"))
@@ -539,6 +708,87 @@ final class FeishuStreamingSessionTests: XCTestCase {
 
         let requestCount = await transport.requestCount
         XCTAssertEqual(requestCount, 1)
+    }
+
+    private func captureFirstPacketFailure(
+        response: DirectHTTPResponse,
+        expectedFailure: StreamFailure,
+        injectsRequestIdentity: Bool = false
+    ) async throws -> StreamingResponseDiagnostic {
+        let diagnostics = LockedDiagnosticRecorder<StreamingResponseDiagnostic>()
+        let transport = StreamingRequestStub(
+            responses: [response],
+            injectsRequestIdentity: injectsRequestIdentity
+        )
+        let session = FeishuStreamingSession(
+            streamID: "fixed_stream_016",
+            initialToken: "PRIVATE_TOKEN",
+            refreshToken: { "unused" },
+            requestSender: { request in try await transport.send(request) },
+            diagnosticSink: { diagnostics.record($0) }
+        )
+
+        do {
+            _ = try await session.sendAudioPacket(Data("PRIVATE_AUDIO".utf8))
+            XCTFail("the first packet response must fail for this diagnostic branch")
+        } catch let failure as StreamFailure {
+            XCTAssertEqual(failure, expectedFailure)
+        } catch {
+            XCTFail("expected sanitized StreamFailure, got \(error)")
+        }
+
+        let requestCount = await transport.requestCount
+        XCTAssertEqual(requestCount, 1)
+        XCTAssertEqual(diagnostics.values.count, 1, "one failed response must emit exactly one diagnostic")
+        return try XCTUnwrap(diagnostics.values.first)
+    }
+
+    private func assertSafeDiagnosticSurface(
+        _ diagnostic: StreamingResponseDiagnostic,
+        forbiddenValues: [String],
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let allowedFields: Set<String> = [
+            "action",
+            "sequenceID",
+            "httpStatus",
+            "responseByteCount",
+            "businessCode",
+            "dataPresent",
+            "streamIDMatches",
+            "sequenceIDMatches",
+            "outcome"
+        ]
+        let reflectedFields = Set(Mirror(reflecting: diagnostic).children.compactMap(\.label))
+        XCTAssertEqual(reflectedFields, allowedFields, file: file, line: line)
+
+        let publicSurface = String(describing: diagnostic) + String(reflecting: diagnostic)
+        for forbiddenValue in forbiddenValues {
+            XCTAssertFalse(
+                publicSurface.contains(forbiddenValue),
+                "diagnostic leaked forbidden value \(forbiddenValue)",
+                file: file,
+                line: line
+            )
+        }
+    }
+}
+
+private final class LockedDiagnosticRecorder<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recordedValues: [Value] = []
+
+    var values: [Value] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedValues
+    }
+
+    func record(_ value: Value) {
+        lock.lock()
+        recordedValues.append(value)
+        lock.unlock()
     }
 }
 

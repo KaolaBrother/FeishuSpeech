@@ -13,6 +13,49 @@ private nonisolated let knownInvalidTokenCodes: Set<Int> = [99_991_663]
 private nonisolated let abortTimeoutNanoseconds: UInt64 = 1_000_000_000
 private nonisolated let maximumErrorBodyByteCount = 64 * 1_024
 
+nonisolated enum StreamingResponseDiagnosticOutcome: String, Equatable, Sendable {
+    case backendBusinessCode
+    case malformedJSON
+    case missingData
+    case streamIDMismatch
+    case sequenceIDMismatch
+}
+
+nonisolated struct StreamingResponseDiagnostic: Equatable, Sendable {
+    let action: Int
+    let sequenceID: Int
+    let httpStatus: Int
+    let responseByteCount: Int
+    let businessCode: Int?
+    let dataPresent: Bool?
+    let streamIDMatches: Bool?
+    let sequenceIDMatches: Bool?
+    let outcome: StreamingResponseDiagnosticOutcome
+}
+
+private nonisolated func logStreamingResponseDiagnostic(
+    _ diagnostic: StreamingResponseDiagnostic
+) {
+    let businessCode = diagnostic.businessCode.map(String.init) ?? "nil"
+    let dataPresent = diagnostic.dataPresent.map(String.init) ?? "nil"
+    let streamIDMatches = diagnostic.streamIDMatches.map(String.init) ?? "nil"
+    let sequenceIDMatches = diagnostic.sequenceIDMatches.map(String.init) ?? "nil"
+
+    logger.error(
+        """
+        Streaming response rejected: action=\(diagnostic.action, privacy: .public) \
+        sequenceID=\(diagnostic.sequenceID, privacy: .public) \
+        httpStatus=\(diagnostic.httpStatus, privacy: .public) \
+        responseByteCount=\(diagnostic.responseByteCount, privacy: .public) \
+        businessCode=\(businessCode, privacy: .public) \
+        dataPresent=\(dataPresent, privacy: .public) \
+        streamIDMatches=\(streamIDMatches, privacy: .public) \
+        sequenceIDMatches=\(sequenceIDMatches, privacy: .public) \
+        outcome=\(diagnostic.outcome.rawValue, privacy: .public)
+        """
+    )
+}
+
 private nonisolated final class DeadlineSignal: @unchecked Sendable {
     private let lock = NSLock()
     private var result: Bool?
@@ -90,6 +133,7 @@ private nonisolated struct StreamingRecognitionData: Decodable, Sendable {
 actor FeishuStreamingSession: SpeechStreamingSession {
     typealias RefreshToken = @Sendable () async throws -> String
     typealias RequestSender = @Sendable (URLRequest) async throws -> DirectHTTPResponse
+    typealias DiagnosticSink = @Sendable (StreamingResponseDiagnostic) -> Void
 
     private enum TerminalState {
         case none
@@ -100,6 +144,7 @@ actor FeishuStreamingSession: SpeechStreamingSession {
     private let streamID: String
     private let refreshToken: RefreshToken
     private let requestSender: RequestSender
+    private let diagnosticSink: DiagnosticSink
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
@@ -120,7 +165,8 @@ actor FeishuStreamingSession: SpeechStreamingSession {
         streamID: String? = nil,
         initialToken: String,
         refreshToken: @escaping RefreshToken,
-        requestSender: @escaping RequestSender
+        requestSender: @escaping RequestSender,
+        diagnosticSink: DiagnosticSink? = nil
     ) {
         let resolvedStreamID = streamID ?? Self.makeStreamID()
         precondition(Self.isValidStreamID(resolvedStreamID), "Invalid streaming session identifier")
@@ -129,6 +175,7 @@ actor FeishuStreamingSession: SpeechStreamingSession {
         token = initialToken
         self.refreshToken = refreshToken
         self.requestSender = requestSender
+        self.diagnosticSink = diagnosticSink ?? logStreamingResponseDiagnostic
     }
 
     func sendAudioPacket(_ audio: Data) async throws -> StreamingRecognitionEvent {
@@ -371,25 +418,90 @@ actor FeishuStreamingSession: SpeechStreamingSession {
         do {
             decoded = try decoder.decode(StreamingSpeechResponse.self, from: response.body)
         } catch {
+            emitResponseDiagnostic(
+                action: action,
+                sequenceID: sequenceID,
+                response: response,
+                outcome: .malformedJSON
+            )
             throw StreamFailure.malformedResponse
         }
 
         guard decoded.code == 0 else {
+            emitResponseDiagnostic(
+                action: action,
+                sequenceID: sequenceID,
+                response: response,
+                businessCode: decoded.code,
+                outcome: .backendBusinessCode
+            )
             if knownInvalidTokenCodes.contains(decoded.code) {
                 throw StreamFailure.authentication
             }
             throw StreamFailure.backend
         }
         guard let data = decoded.data else {
+            emitResponseDiagnostic(
+                action: action,
+                sequenceID: sequenceID,
+                response: response,
+                businessCode: decoded.code,
+                dataPresent: false,
+                outcome: .missingData
+            )
             throw StreamFailure.malformedResponse
         }
         if let responseStreamID = data.streamID, responseStreamID != streamID {
+            emitResponseDiagnostic(
+                action: action,
+                sequenceID: sequenceID,
+                response: response,
+                businessCode: decoded.code,
+                dataPresent: true,
+                streamIDMatches: false,
+                outcome: .streamIDMismatch
+            )
             throw StreamFailure.responseIdentityMismatch
         }
         if let responseSequenceID = data.sequenceID, responseSequenceID != sequenceID {
+            emitResponseDiagnostic(
+                action: action,
+                sequenceID: sequenceID,
+                response: response,
+                businessCode: decoded.code,
+                dataPresent: true,
+                streamIDMatches: data.streamID.map { $0 == streamID },
+                sequenceIDMatches: false,
+                outcome: .sequenceIDMismatch
+            )
             throw StreamFailure.responseIdentityMismatch
         }
         return data.recognitionText ?? ""
+    }
+
+    private func emitResponseDiagnostic(
+        action: Int,
+        sequenceID: Int,
+        response: DirectHTTPResponse,
+        businessCode: Int? = nil,
+        dataPresent: Bool? = nil,
+        streamIDMatches: Bool? = nil,
+        sequenceIDMatches: Bool? = nil,
+        outcome: StreamingResponseDiagnosticOutcome
+    ) {
+        diagnosticSink(
+            StreamingResponseDiagnostic(
+                action: action,
+                sequenceID: sequenceID,
+                httpStatus: response.statusCode,
+                responseByteCount: response.body.count,
+                businessCode: businessCode,
+                dataPresent: dataPresent,
+                streamIDMatches: streamIDMatches,
+                sequenceIDMatches: sequenceIDMatches,
+                outcome: outcome
+            )
+        )
     }
 
     private func makeRequest(
