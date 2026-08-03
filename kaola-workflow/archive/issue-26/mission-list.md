@@ -31,9 +31,11 @@
   result: R1–R4 are closed test-first. Source/down/up are constructed atomically; a final live Secure Input sample occurs immediately before adjacent down/up posts; any construction failure produces zero posts; and unsafe zero-post manual recovery closes eligibility before freshly validating live Secure Input plus the retained token's security, PID, and exact focused AX element. Focused review-closure suites pass 94/94 and the full lifecycle-free suite passes 263/263.
 
 - item: Dock the corrected contract, run lifecycle-free tests/lint/Debug/Release validation without launching the app, and install the sole incremented Release for owner UAT.
-  status: in-flight
+  status: done
   dispatched: doc-updater aligns README, changelog, API/architecture/streaming design, and decision documentation with the verified held-output contract while preserving the owner-UAT boundary. The root agent owns lifecycle-free validation, Release build/signature/metadata checks, sink, and single-copy `/Applications` replacement without launching the app or triggering permissions.
+  result: Documentation is DOCKED. The final direct XCTest suite passes 263/263, strict SwiftLint reports 0 violations across 27 files, Debug build-for-testing and Release build succeed, and Release 1.0 build 5 passes strict code-signature/metadata/hash verification. `/Applications/FeishuSpeech.app` is the sole Applications copy, exactly matches build 5, is not running, and was not launched. The replaced build 4 backup and temporary Debug/Release app bundles were permanently removed after verification.
 
 - item: Finalize and sink issue #26 while keeping it open until owner UAT proves real Fn-held streaming output.
-  status: in-flight
+  status: done
   dispatched: the root agent runs the consumer validation receipt, run-gap sweep, finalization transaction, merge sink with `comment_keep_open`, closure audit, and exact archive-collision preservation. The issue stays open; no app launch, Fn simulation, credential use, or permission interaction occurs.
+  result: Merge sink completed and published main, removed the temporary workflow branch/worktree, preserved the previous build-4 archive as `issue-26-held-output-build4-uat`, and kept GitHub issue #26 open for installed owner UAT. The post-sink closure audit reports `current_project_clean: true` with zero scoped or out-of-scope drift.

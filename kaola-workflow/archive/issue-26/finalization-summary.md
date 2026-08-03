@@ -34,7 +34,17 @@
 
 ## Changed Paths
 
-The finalize transaction will append its measured changed-path report here verbatim.
+The finalize transaction measured these behavior/test paths:
+
+- `FeishuSpeech/Models/RecordingState.swift`
+- `FeishuSpeech/Services/CurrentFocusAppendSession.swift`
+- `FeishuSpeech/Services/TextInputSimulator.swift`
+- `FeishuSpeech/ViewModels/MainViewModel.swift`
+- `FeishuSpeechTests/CurrentFocusAppendSessionTests.swift`
+- `FeishuSpeechTests/FinalTextOutputSecurityTests.swift`
+- `FeishuSpeechTests/StreamingMainViewModelTests.swift`
+
+The implementation commit additionally carries the documentation docking paths listed above and the lossless previous-archive rename.
 
 ## Documentation Docking
 
@@ -48,6 +58,12 @@ The run-gap scanner observed no gap classes; no follow-up issue was fabricated.
 
 - Owner UAT must verify that target applications visibly accept PID-bound Unicode pairs while Fn remains held. `CGEventPostToPid` has no target-control acknowledgement, so local `.posted` proves submission only.
 - GitHub issue #26 remains open and claimed work is released after sink; the installed Release is for this UAT.
+
+## Installation
+
+- `/Applications/FeishuSpeech.app` is Release 1.0 build 5, bundle ID `Siji.FeishuSpeech`, with the verified executable SHA-256 recorded above.
+- It is the only `FeishuSpeech*.app` under `/Applications`, is not running, and was not launched by this run.
+- The replaced build 4 backup and temporary Debug/Release app bundles were permanently removed after the installed copy passed signature, metadata, byte-for-byte, and single-copy checks.
 
 ## Status: ARCHIVED AFTER FINAL GIT GATE
 
