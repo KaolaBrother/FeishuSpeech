@@ -58,3 +58,10 @@ DOCKED. User behavior, API outcomes, architecture/trust boundaries, decision rat
 - Release 1.0 build 1 was installed as the sole Applications copy, verified byte-for-byte against the validated artifact, and was not launched during automation.
 
 ## Status: ARCHIVED AFTER FINAL GIT GATE
+
+## Sink Findings
+
+post_rebase_tests: skipped
+
+archived_paths:
+- kaola-workflow/archive/issue-26/finalization-summary.md
