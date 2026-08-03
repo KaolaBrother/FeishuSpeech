@@ -1,0 +1,3 @@
+verdict: pass
+validation_command: env LLVM_PROFILE_FILE=/tmp/feishuspeech-issue26-full-r3-final/record-%p.profraw xcrun xctest /tmp/feishuspeech-issue26-full-r3-final/Build/Products/Debug/FeishuSpeech.app/Contents/PlugIns/FeishuSpeechTests.xctest > /tmp/issue26-record-xctest.log 2>&1 && swiftlint lint --strict > /tmp/issue26-record-swiftlint.log 2>&1 && git diff --check && /usr/bin/codesign --verify --deep --strict /tmp/feishuspeech-issue26-release-build5/Build/Products/Release/FeishuSpeech.app && /usr/bin/plutil -extract CFBundleVersion raw -o - /tmp/feishuspeech-issue26-release-build5/Build/Products/Release/FeishuSpeech.app/Contents/Info.plist | /usr/bin/grep -qx 5
+validated_candidate_hash: 40a6dc6726f90cbc2ad83d7dfae823c640c59ef6f2fd8067e4a6e69780f7dc9f
