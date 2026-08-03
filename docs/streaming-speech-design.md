@@ -9,12 +9,15 @@ cross-application output UAT remain pending.
 Holding Fn for the existing 0.3-second gate starts a Feishu streaming-recognition interaction.
 When a safe AX range is available, each recognized hypothesis replaces one provisional text range
 at the cursor that was active when the interaction began, and the final replaces the same range.
-If AX cursor/focus capture is unavailable, recording and streaming still proceed. The first
-non-empty hypothesis re-probes AX once; if live range replacement is still unavailable, a
-best-effort current-focus session binds the frontmost PID and emits the first value plus strictly
-extending UTF-16 suffixes while Fn remains held. This path is clipboard-free and non-destructive,
-but cannot observe a caret move within the same process. The FeishuSpeech overlay reports state
-only; it does not host a transcript preview, editable draft, or send button.
+If an affirmatively safe target is captured but lacks live AX range replacement, startup now arms a
+continuous append owner bound to its original PID and exact `AXUIElement`. If AX cursor/focus
+capture is unavailable, recording and streaming still proceed; the first non-empty hypothesis
+re-probes AX once, and a final-only rebound arms the same captured owner while a still-unavailable
+result arms an unbound PID-only owner. The triggering value and every later usable partial received
+before sealing are routed immediately while Fn remains held. These owners emit only the first value
+plus strictly extending UTF-16 suffixes. Release only seals/finalizes; it is not a first-output
+trigger. The FeishuSpeech overlay reports neutral state only; it does not host a transcript preview,
+editable draft, or send button and does not claim that a target accepted synthetic input.
 
 The implementation ports KaolaTerminal's stream transport and bounded-ingress rules, but deliberately
 replaces its preview/review UI with an opportunistic macOS Accessibility writer plus a guarded
@@ -61,10 +64,11 @@ opaque replacement state for the current moment.
 Accessibility behavior is application-dependent. Native AppKit, WebKit, Electron, terminal, and
 document-editor targets require live UAT before broad compatibility claims are made.
 
-Focused green suites verify the transport abort contract (24/24), retry policy/state (6/6),
-coordinator retry/replay/release and continuous-output integration (34/34), and current-focus
-UTF-16 suffix behavior (16/16). Those fakes verify local transport, output, and lifecycle contracts;
-they do not replace final independent review, a fresh full release validation, or installed UAT.
+Focused green evidence covers 94 tests across the final-output security, current-focus append, and
+streaming coordinator suites. It verifies local routing, paired-event construction, validation,
+retry/replay, release, and lifecycle contracts; it does not replace installed UAT. In particular,
+`CGEventPostToPid` exposes no target-control acceptance acknowledgement, so `.posted` cannot prove
+visible text.
 
 The latest installed-Release evidence accepted two HTTP-200 packets, then received HTTP 200 /
 business code `10024` for `action=0, sequence=2`; three later fresh sessions received the same code
@@ -133,12 +137,12 @@ partial / final / cancelled / failed
                                 +--> unbound continuous: first value + exact UTF-16 suffixes
 ```
 
-Live partial/final AX writes belong only to `CursorTextSession`. Captured-target final-only
-delivery belongs to the captured-PID output adapter after coordinator revalidation. When AX
-capture is unavailable, `CurrentFocusAppendSession` binds one process and posts only monotonic
-Unicode suffixes after repeated Secure Input/PID checks. It uses no pasteboard, deletion, selection,
-or cursor navigation, and performs no same-process caret confirmation. The transport does not know
-about focus or UI, and no output boundary knows about audio, credentials, or HTTP.
+Live partial/final AX writes belong only to `CursorTextSession`. Captured final-only destinations
+and AX-unavailable destinations use `CurrentFocusAppendSession`; the captured variant binds the
+original PID plus exact AX element, while the unbound variant binds one frontmost PID. Both post
+only monotonic Unicode suffixes after repeated security/destination checks. They use no deletion,
+selection, cursor navigation, or per-partial pasteboard mutation. The transport does not know about
+focus or UI, and no output boundary knows about audio, credentials, or HTTP.
 
 ## 5. State model
 
@@ -171,7 +175,7 @@ current is a no-op.
 
 ```text
 unavailable
-  | safe AX target lacks range support -> finalOnly(captured destination)
+  | safe AX target lacks range support -> capturedAppend(bound PID + exact AX element)
   | AX destination unavailable        -> rebindOnFirstPartial
   | capability probe passed -> armed(destination, originalSelection)
 
@@ -187,13 +191,19 @@ provisional
 
 rebindOnFirstPartial
   | first non-empty partial + live AX  -> provisional
+  | first non-empty partial + finalOnly -> capturedAppend(bound PID + exact AX element)
   | AX still unavailable              -> currentFocusAppend(boundPID, emittedUTF16)
 
+capturedAppend / currentFocusAppend
+  | each usable pre-seal partial -> apply immediately
+  | exact UTF-16 extension       -> append unseen suffix
+  | duplicate                    -> no-op
+  | revision/shortening/unsafe   -> suppress
+  | release                      -> finalize existing owner once
+  | PID/element/security/delivery change -> suspended
+
 currentFocusAppend
-  | exact UTF-16 extension -> append unseen suffix
-  | duplicate             -> no-op
-  | revision/shortening   -> suppress
-  | PID/security/delivery change -> suspended
+  | same-PID caret movement remains unobservable
 ```
 
 `invalid`, `committed`, and `preserved` are terminal for that hold. No later callback can revive
@@ -339,11 +349,12 @@ At the transition from `pending` to `streaming`, `CursorTextSession.begin()`:
 7. Requires string-for-range support for read-back verification.
 8. Creates an in-memory destination token; it is never persisted or logged with control content.
 
-An affirmatively safe editable target that lacks usable selection/range verification selects
-captured-target final-only mode. Failure to obtain or confirm an AX destination selects the
-first-partial AX/current-focus path described below. An affirmatively detected secure text target
-or Secure Event Input still rejects the interaction before audio/network work; this security
-rejection is not downgraded.
+An affirmatively safe editable target that lacks usable selection/range verification selects a
+captured append owner bound to its PID and exact element. If that owner cannot be created before any
+provisional attempt, the legacy captured final-only route remains as the narrow release-time
+fallback. Failure to obtain or confirm any AX destination selects the first-partial AX/current-focus
+path described below. An affirmatively detected secure text target or Secure Event Input still
+rejects the interaction before audio/network work; this security rejection is not downgraded.
 
 ### First partial
 
@@ -399,43 +410,64 @@ ensure that a stale result cannot be intentionally routed to a newly focused fie
 Preserving visible text is deliberate. Once ownership becomes uncertain, deleting the range could
 delete user edits or unrelated content.
 
-## 9. Captured final-only and unbound continuous output
+## 9. Captured and unbound continuous output
 
 For a captured non-secure editable control that cannot support verified live replacement:
 
-1. Audio and Feishu requests still stream normally.
-2. The coordinator retains only the latest opaque response in memory.
-3. The overlay shows that output will be inserted on release.
-4. On non-empty final, the app revalidates the original PID and focused element.
-5. If valid and free of C0/C1 control scalars, the output adapter writes the pasteboard and posts
-   one Cmd+V to the captured PID, then revalidates the destination.
-6. If the target is stale, delivery becomes uncertain, or the value contains action-capable
-   controls, the app posts no further synthetic input, copies the exact final value for manual
-   recovery, and shows fixed transcript-free feedback for two seconds.
-7. If security is no longer affirmatively safe, the app performs neither synthetic input nor
-   clipboard recovery.
+1. Startup `.finalOnly`, or a first-partial rebind returning `.finalOnly`, creates a continuous
+   owner bound to the captured PID and exact `AXUIElement`; the rebound triggering partial is
+   applied before its callback returns.
+2. Every non-contentless hypothesis received while Fn remains held is routed immediately to this
+   owner. Release rejects later nonterminal callbacks and only finalizes the existing owner once.
+3. Before and after each append mutation, validation requires live Secure Input to be off, the
+   captured token's security to remain affirmatively safe, the original PID to remain frontmost,
+   and the current focused AX element to be exactly `CFEqual` to the captured element.
+4. It posts the first safe value and then only exact unseen UTF-16 suffixes. Duplicates are no-ops;
+   revisions, shortenings, and unsafe values are suppressed.
+5. Any provisional attempt, destination/security failure, or delivery uncertainty permanently
+   closes all full-text resend, one-shot current-focus, Cmd+V, alternate-target, and clipboard
+   fallback paths.
+6. A manual copy is allowed only when a captured owner has proved zero poster attempts, the retained
+   value is unsafe for automatic insertion, and one final exact security/PID/element validation
+   succeeds. Eligibility is closed before validation and the copy can happen at most once.
+7. If no continuous owner can be created before any provisional attempt, the prior captured
+   release-time one-shot fallback remains available under its existing validation contract.
 
 For an interaction where no AX cursor/focused element can be captured or confirmed:
 
 1. Audio and Feishu requests still stream normally; AX failure is not a startup error.
 2. The first non-empty partial triggers exactly one new AX capability probe. A live result becomes
    the fixed verified AX destination for the rest of the hold.
-3. If the probe still does not yield live AX capability, `CurrentFocusAppendSession` captures the then-frontmost PID and
-   begins application-activation monitoring.
+3. A `.finalOnly` probe result creates the captured owner above. If the probe remains unavailable,
+   `CurrentFocusAppendSession` captures the then-frontmost PID and begins activation monitoring.
 4. It posts the first safe non-contentless value as direct Unicode input. A later value posts only
    the unseen suffix when its UTF-16 units strictly start with all units already emitted.
 5. Duplicate, shorter, revised, canonically different, contentless, and C0/C1/DEL-bearing values do
    not post. There is no deletion, selection, navigation, pasteboard write, or uncertain resend.
 6. Secure Input and the bound PID are sampled twice before and once after a post. App activation
    away, PID mismatch, security rejection, or delivery uncertainty permanently suspends output.
-7. A final exact extension may post one suffix; a divergent/shorter/unsafe final preserves the
-   visible output and does not fall through to one-shot insertion or clipboard recovery.
+7. A final exact extension may post one suffix; a divergent/shorter/unsafe final leaves the owner's
+   submitted-output state unchanged and does not fall through to one-shot insertion or clipboard
+   recovery.
+
+The shared low-level Unicode poster first validates the positive bound PID and safe non-empty text,
+creates one `.privateState` source, and fully constructs a key-down and key-up carrying the same
+UTF-16 payload and explicit empty flags. It then performs the final live Secure Input sample. Only
+after that sample passes are the already-constructed down/up events submitted adjacently to the
+same PID. Source or event construction failure and the final security rejection all produce zero
+posts; there is no fallible construction or security gate between down and up.
 
 This unbound path is best effort, not verified replacement. It cannot observe a mouse/keyboard
 caret move between controls owned by the same PID, so a later suffix can reach a different caret in
 that process. Suppressing every non-prefix revision limits damage but does not eliminate that
 residual targeting risk. Secure fields remain fail-closed. With `autoInsert=false`, neither path
 creates a writer or mutates the target/pasteboard.
+
+`CGEventPostToPid` does not report whether the destination control accepted, transformed, ignored,
+or displayed the Unicode payload. A `.posted` pair therefore closes only the local submission
+contract. Installed owner UAT is still required; no visible output after submission is PARTIAL and
+does not authorize retry, global HID posting, destructive repair, or clipboard fallback after
+uncertainty.
 
 ## 10. Coordinator and concurrency ownership
 
@@ -475,13 +507,15 @@ teardown from continuously advancing the overlay generation and leaving its wind
 - Transcript content never appears in the overlay, menu bar, logs, notifications, or accessibility
   labels owned by FeishuSpeech.
 - `playSound` may retain start/final feedback but must not play once per partial.
-- `autoInsert=true` enables verified AX live replacement, captured-target final-only delivery, or
-  best-effort same-PID continuous suffix output when AX remains unavailable.
+- `autoInsert=true` enables verified AX live replacement, captured-target continuous append with a
+  narrow pre-attempt final-only fallback, or best-effort same-PID suffix output when AX is unavailable.
 - `autoInsert=false` keeps streaming recognition active but discards cursor-writing capability and
   performs no target or pasteboard mutation. Secure target probing remains fail-closed.
 - A target capability warning is per interaction; it does not silently change the saved setting.
-- Empty-final preservation and copy-only recovery feedback are fixed strings shown for two seconds;
-  coordinator state may already be idle while the generation-guarded overlay remains visible.
+- Empty-final, uncertain-output, and copy-only recovery feedback are fixed transcript-free strings
+  shown for two seconds; coordinator state may already be idle while the generation-guarded overlay
+  remains visible. Preservation statuses use neutral wording (`未返回可用最终文本` and
+  `自动输入状态不确定，请检查光标处内容`) and never claim that a target accepted or displayed text.
 - Authentication failure uses the fixed private feedback `认证失败，请检查应用凭据`; provider detail,
   credentials, and transcript content never appear in that message.
 - Recoverable in-hold failures have no user-facing error or system notification; only the eventual
@@ -519,9 +553,9 @@ No cursor destination survives the process lifetime or is persisted to UserDefau
      sanitized diagnostics are implemented and covered.
 4. **Cursor text session and continuous fallback — complete locally**
    - Capability probe, captured destination, replace/read-back loop, invalidation, final commit, and
-     captured-target final-only security policy are implemented with fake AX clients. When AX is
-     unavailable, first-partial rebind plus same-PID exact UTF-16 suffix output provides guarded,
-     clipboard-free continuous feedback without destructive replacement.
+     captured/unbound append security policy are implemented with fake AX clients. Initial and
+     rebound final-only destinations now route partials during the hold through exact-token-checked
+     PID-bound output; AX-unavailable output retains same-PID exact UTF-16 suffix behavior.
 5. **Coordinator/state migration — complete**
    - Production hot-key work uses one generation-owned recorder/ingress, ordered journal, fresh
      serial session attempts, hold-wide capped backoff, release-closed retry admission, and
@@ -597,8 +631,11 @@ Test/production custody separation was preserved for the automated implementatio
 - an immediate terminal provider event and a provider-auth exception each hide the overlay and
   clean the active generation exactly once;
 - repeated identical hot-key errors publish once and cannot re-enter coordinator teardown;
-- unbound continuous output writes before Fn release, suppresses historical replay churn, and
-  finalizes without falling through to one-shot or clipboard recovery;
+- initial final-only, rebound final-only, and unbound continuous output route usable partials before
+  Fn release, suppress historical replay churn, and finalize without alternate fallback after an
+  attempt or uncertainty;
+- the PID poster constructs one private-source, empty-flag, same-payload down/up pair before the
+  final Secure Input sample and submits the two events adjacently to the bound PID;
 - `autoInsert=false` produces no target writes;
 - logs and feedback never contain recognized text.
 
@@ -623,8 +660,8 @@ RED-first tests, independent correctness/security review, and documentation dock
 then superseded the strict AX destination startup gate. Later UAT isolated a real HTTP-200 business
 failure after accepted packets, motivating [D-26-01](decisions/D-26-01.md): exact-once abort of
 failed established streams, fresh-session journal replay until release, and guarded current-focus
-suffix output. Focused suites are green; final full validation and installed Release verification
-remain pending.
+suffix output. Focused suites and independent code/security reviews are green; final full
+validation and installed Release verification remain pending.
 
 General-availability closure remains intentionally separate: the owner will self-test the installed
 Release with real Feishu credentials and the live target-application matrix above. The latest UAT
@@ -632,3 +669,5 @@ accepted two packets, then received undefined business code `10024` on a continu
 fresh first packets. Until owner UAT succeeds, action-3 acceptance, retry/replay recovery, release
 races, real text/token semantics, PCM/tail behavior, slow-network handling, same-PID caret risk,
 and broad cross-application compatibility remain unverified.
+Local `CGEventPostToPid` pair submission cannot substitute for the visible target-acceptance
+observation required from owner UAT.

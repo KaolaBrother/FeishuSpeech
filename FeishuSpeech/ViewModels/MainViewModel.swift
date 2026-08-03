@@ -23,14 +23,13 @@ protocol HotKeyWakeRecovering: AnyObject {
 
 extension HotKeyService: HotKeyWakeRecovering {}
 
-private enum FinalOnlyDestinationValidation {
-    case valid
-    case securityRejected
-    case destinationInvalid
-}
-
 @MainActor
 class MainViewModel: ObservableObject {
+    private enum AppendManualRecoveryEligibility {
+        case unavailable
+        case capturedZeroPost
+    }
+
     private enum StreamingAttemptPhase {
         case idle
         case creatingSession
@@ -82,6 +81,7 @@ class MainViewModel: ObservableObject {
     private var deliveredCurrentFocusFinal = false
     private var latestFinalOnlyValue: String?
     private var currentFocusAppendSession: (any CurrentFocusProvisionalOutputSession)?
+    private var appendManualRecoveryEligibility = AppendManualRecoveryEligibility.unavailable
     private var attemptedFirstPartialRebind = false
     private var packetJournal: [Data] = []
     private var retryOrdinal = 0
@@ -301,6 +301,7 @@ class MainViewModel: ObservableObject {
         acceptedPacket = false
         stopSoundPlayed = false
         attemptedFirstPartialRebind = false
+        appendManualRecoveryEligibility = .unavailable
         packetJournal.removeAll(keepingCapacity: true)
         retryOrdinal = 0
         currentAttemptCancellationTask = nil
@@ -388,7 +389,14 @@ class MainViewModel: ObservableObject {
             cursorSession = nil
             if settings.autoInsert {
                 finalOnlyDestination = token
-                status = .finalOnly
+                if armCapturedCurrentFocusAppendSession(
+                    identity: StreamingSessionIdentity(generation: token.generation),
+                    destination: token
+                ) {
+                    status = .streaming
+                } else {
+                    status = .finalOnly
+                }
             } else {
                 status = .streaming
             }
@@ -771,10 +779,14 @@ class MainViewModel: ObservableObject {
                 reportsError: true
             )
         case .noUsableText:
-            await terminateAbnormally(
-                message: streamingFailureErrorMessage,
-                reportsError: true
-            )
+            if recoverUnsafeCapturedTextIfEligible() {
+                await completeNormally(identity: identity)
+            } else {
+                await terminateAbnormally(
+                    message: streamingFailureErrorMessage,
+                    reportsError: true
+                )
+            }
         }
     }
 
@@ -806,6 +818,9 @@ class MainViewModel: ObservableObject {
             )
             return false
         case .noUsableText:
+            if recoverUnsafeCapturedTextIfEligible() {
+                return true
+            }
             guard followsSealedRecoverableFailure else { return true }
             scheduleStreamingTermination(
                 identity: identity,
@@ -910,6 +925,7 @@ class MainViewModel: ObservableObject {
     ) -> Bool {
         guard !isContentless(text) else { return false }
         latestFinalOnlyValue = text
+        guard !sealStarted else { return false }
         guard settings.autoInsert else { return false }
         guard prepareContinuousOutputIfNeeded(identity: identity) else { return true }
         if let cursorSession {
@@ -935,6 +951,7 @@ class MainViewModel: ObservableObject {
         if !contentless {
             latestFinalOnlyValue = text
         }
+        guard isTerminal || !sealStarted else { return false }
         var mayCompleteNormally = true
         if settings.autoInsert {
             mayCompleteNormally = deliverFinal(
@@ -1034,9 +1051,15 @@ class MainViewModel: ObservableObject {
             reboundSession.invalidate()
             finalOnlyDestination = token
             usesCurrentFocusFinalOutput = false
-            status = .finalOnly
-            overlayPresenter.update(status: .finalOnly)
-            logger.info("Captured a final-only AX destination on the first streaming hypothesis")
+            if armCapturedCurrentFocusAppendSession(identity: identity, destination: token) {
+                status = .streaming
+                overlayPresenter.update(status: .streaming)
+                logger.info("Armed captured continuous output on the first streaming hypothesis")
+            } else {
+                status = .finalOnly
+                overlayPresenter.update(status: .finalOnly)
+                logger.info("Captured a final-only AX destination on the first streaming hypothesis")
+            }
         case .rejected(.secureTarget):
             reboundSession.invalidate()
             usesCurrentFocusFinalOutput = false
@@ -1060,14 +1083,44 @@ class MainViewModel: ObservableObject {
             return
         }
         currentFocusAppendSession = appendSession
+        appendManualRecoveryEligibility = .unavailable
         usesCurrentFocusFinalOutput = false
         logger.info("Armed continuous current-focus append output")
+    }
+
+    private func armCapturedCurrentFocusAppendSession(
+        identity: StreamingSessionIdentity,
+        destination: CursorDestinationToken
+    ) -> Bool {
+        guard let appendSession = currentFocusAppendSessionFactory?.makeSession(
+            generation: identity.generation,
+            boundProcessIdentifier: destination.processIdentifier,
+            validateBoundDestination: { [weak self] in
+                guard let self else { return .destinationChanged }
+                return self.validateFinalOnlyDestination(destination)
+            }
+        ) else {
+            logger.info("Captured continuous output is unavailable; retaining final-only fallback")
+            return false
+        }
+        currentFocusAppendSession = appendSession
+        appendManualRecoveryEligibility = .capturedZeroPost
+        usesCurrentFocusFinalOutput = false
+        logger.info("Armed captured continuous append output")
+        return true
     }
 
     private func interpretAppendApplyOutcome(
         _ outcome: CurrentFocusAppendOutcome,
         identity: StreamingSessionIdentity
     ) -> Bool {
+        switch outcome {
+        case .contentless, .unsafeTextSuppressed:
+            break
+        case .insertedFirst, .appendedSuffix, .duplicate, .revisionSuppressed,
+             .destinationChanged, .securityRejected, .deliveryUncertain, .staleGeneration:
+            appendManualRecoveryEligibility = .unavailable
+        }
         switch outcome {
         case .securityRejected:
             scheduleStreamingTermination(
@@ -1080,6 +1133,22 @@ class MainViewModel: ObservableObject {
              .deliveryUncertain, .staleGeneration:
             return false
         }
+    }
+
+    private func recoverUnsafeCapturedTextIfEligible() -> Bool {
+        guard appendManualRecoveryEligibility == .capturedZeroPost,
+              let retainedText = latestFinalOnlyValue,
+              !isContentless(retainedText),
+              !TextInputSimulator.isSafeForAutomaticPaste(retainedText) else {
+            return false
+        }
+        appendManualRecoveryEligibility = .unavailable
+        guard let destination = finalOnlyDestination,
+              validateFinalOnlyDestination(destination) == .valid else {
+            return false
+        }
+        copyForManualRecovery(retainedText)
+        return true
     }
 
     private func scheduleStreamingTermination(
@@ -1140,7 +1209,7 @@ class MainViewModel: ObservableObject {
         }
 
         var validationCount = 0
-        var outputPreflight: FinalOnlyDestinationValidation?
+        var outputPreflight: CurrentFocusBoundDestinationValidation?
         let result = finalTextOutput.insertOnce(
             text,
             destination: destination
@@ -1169,25 +1238,29 @@ class MainViewModel: ObservableObject {
 
     private func validateFinalOnlyDestination(
         _ destination: CursorDestinationToken
-    ) -> FinalOnlyDestinationValidation {
+    ) -> CurrentFocusBoundDestinationValidation {
+        if let currentFocusAppendSessionFactory,
+           currentFocusAppendSessionFactory.validateCapturedDestinationSecurity() != .valid {
+            return .securityRejected
+        }
         guard currentSecurityIsSafe(for: destination) else {
             return .securityRejected
         }
         guard accessibilityClient.frontmostProcessIdentifier() == destination.processIdentifier else {
-            return .destinationInvalid
+            return .destinationChanged
         }
         do {
             let focusedElement = try accessibilityClient.focusedElement()
-            return CFEqual(focusedElement, destination.element) ? .valid : .destinationInvalid
+            return CFEqual(focusedElement, destination.element) ? .valid : .destinationChanged
         } catch {
-            return .destinationInvalid
+            return .destinationChanged
         }
     }
 
     private func handleFinalTextInsertionResult(
         _ result: FinalTextInsertionResult,
         text: String,
-        outputPreflight: FinalOnlyDestinationValidation?
+        outputPreflight: CurrentFocusBoundDestinationValidation?
     ) {
         guard result != .inserted, outputPreflight != .securityRejected else {
             return
@@ -1280,6 +1353,7 @@ class MainViewModel: ObservableObject {
         deliveredCurrentFocusFinal = false
         latestFinalOnlyValue = nil
         attemptedFirstPartialRebind = false
+        appendManualRecoveryEligibility = .unavailable
         packetJournal.removeAll(keepingCapacity: true)
         retryOrdinal = 0
         currentAttemptCancellationTask = nil
@@ -1359,6 +1433,7 @@ class MainViewModel: ObservableObject {
         deliveredCurrentFocusFinal = false
         latestFinalOnlyValue = nil
         attemptedFirstPartialRebind = false
+        appendManualRecoveryEligibility = .unavailable
         packetJournal.removeAll(keepingCapacity: true)
         retryOrdinal = 0
         retryAdmissionOpen = false

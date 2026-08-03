@@ -29,8 +29,8 @@ enum RecordingState: Equatable {
         case .finalOnly: return "mic.badge.ellipsis"
         case .sealing: return "ellipsis.circle.fill"
         case .manualRecoveryCopied: return "doc.on.clipboard.fill"
-        case .emptyFinalPreservedPartial: return "text.badge.checkmark"
-        case .provisionalOutputPreserved: return "text.badge.checkmark"
+        case .emptyFinalPreservedPartial: return "exclamationmark.circle"
+        case .provisionalOutputPreserved: return "exclamationmark.circle"
         case .recording: return "waveform.circle.fill"
         case .transcribing: return "ellipsis.circle"
         case .error: return "exclamationmark.circle"
@@ -44,8 +44,8 @@ enum RecordingState: Equatable {
         case .finalOnly: return .orange
         case .sealing: return .orange
         case .manualRecoveryCopied: return .orange
-        case .emptyFinalPreservedPartial: return .secondary
-        case .provisionalOutputPreserved: return .secondary
+        case .emptyFinalPreservedPartial: return .orange
+        case .provisionalOutputPreserved: return .orange
         case .recording: return .red
         case .transcribing: return .orange
         case .error: return .red
@@ -59,8 +59,8 @@ enum RecordingState: Equatable {
         case .finalOnly: return "正在聆听，松开后输入…"
         case .sealing: return "正在完成识别…"
         case .manualRecoveryCopied: return "识别结果已复制，请手动粘贴"
-        case .emptyFinalPreservedPartial: return "未返回最终文本，已保留已显示内容"
-        case .provisionalOutputPreserved: return "已保留已输入内容"
+        case .emptyFinalPreservedPartial: return "未返回可用最终文本"
+        case .provisionalOutputPreserved: return "自动输入状态不确定，请检查光标处内容"
         case .recording: return "录音中..."
         case .transcribing: return "识别中..."
         case .error(let msg): return msg

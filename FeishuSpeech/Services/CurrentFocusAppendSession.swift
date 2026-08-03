@@ -34,6 +34,12 @@ nonisolated enum CurrentFocusAppendFinalOutcome: Equatable, Sendable {
     case staleGeneration
 }
 
+nonisolated enum CurrentFocusBoundDestinationValidation: Equatable, Sendable {
+    case valid
+    case destinationChanged
+    case securityRejected
+}
+
 @MainActor
 protocol CurrentFocusProvisionalOutputSession: AnyObject {
     func applyOpaqueHypothesis(
@@ -54,7 +60,31 @@ protocol CurrentFocusProvisionalOutputSession: AnyObject {
 @MainActor
 // swiftlint:disable:next type_name
 protocol CurrentFocusProvisionalOutputSessionFactory: AnyObject {
+    func validateCapturedDestinationSecurity() -> CurrentFocusBoundDestinationValidation
     func makeSession(generation: UInt64) -> (any CurrentFocusProvisionalOutputSession)?
+    func makeSession(
+        generation: UInt64,
+        boundProcessIdentifier: pid_t,
+        validateBoundDestination: @escaping @MainActor () -> CurrentFocusBoundDestinationValidation
+    ) -> (any CurrentFocusProvisionalOutputSession)?
+}
+
+extension CurrentFocusProvisionalOutputSessionFactory {
+    func validateCapturedDestinationSecurity() -> CurrentFocusBoundDestinationValidation {
+        .valid
+    }
+
+    func makeSession(
+        generation: UInt64,
+        boundProcessIdentifier _: pid_t,
+        validateBoundDestination: @escaping @MainActor () -> CurrentFocusBoundDestinationValidation
+    ) -> (any CurrentFocusProvisionalOutputSession)? {
+        guard let session = makeSession(generation: generation) else { return nil }
+        return BoundDestinationValidatingSession(
+            session: session,
+            validateBoundDestination: validateBoundDestination
+        )
+    }
 }
 
 @MainActor
@@ -77,6 +107,7 @@ final class CurrentFocusAppendSession: CurrentFocusProvisionalOutputSession {
     private let secureInputStateProvider: SecureInputStateProviding
     private let frontmostProcessProvider: FrontmostProcessProviding
     private let activationMonitor: CurrentFocusActivationMonitoring
+    private let validateBoundDestination: (@MainActor () -> CurrentFocusBoundDestinationValidation)?
 
     private var emittedUTF16: [UInt16] = []
     private var suspension: Suspension?
@@ -89,7 +120,8 @@ final class CurrentFocusAppendSession: CurrentFocusProvisionalOutputSession {
         eventPoster: FinalTextCurrentFocusEventPosting,
         secureInputStateProvider: SecureInputStateProviding,
         frontmostProcessProvider: FrontmostProcessProviding,
-        activationMonitor: CurrentFocusActivationMonitoring
+        activationMonitor: CurrentFocusActivationMonitoring,
+        validateBoundDestination: (@MainActor () -> CurrentFocusBoundDestinationValidation)? = nil
     ) {
         self.generation = generation
         self.boundProcessIdentifier = boundProcessIdentifier
@@ -97,6 +129,7 @@ final class CurrentFocusAppendSession: CurrentFocusProvisionalOutputSession {
         self.secureInputStateProvider = secureInputStateProvider
         self.frontmostProcessProvider = frontmostProcessProvider
         self.activationMonitor = activationMonitor
+        self.validateBoundDestination = validateBoundDestination
 
         isMonitoring = true
         activationMonitor.startMonitoring { [weak self] processIdentifier in
@@ -130,7 +163,7 @@ final class CurrentFocusAppendSession: CurrentFocusProvisionalOutputSession {
             return applyOutcome(for: suspension ?? .deliveryUncertain)
         }
 
-        switch eventPoster.postUnicodeText(suffix) {
+        switch eventPoster.postUnicodeText(suffix, to: boundProcessIdentifier) {
         case .posted:
             break
         case .securityRejected:
@@ -218,7 +251,7 @@ final class CurrentFocusAppendSession: CurrentFocusProvisionalOutputSession {
     private func postFinalSuffix(_ suffix: String) -> Bool {
         guard sampleDestinationAndSecurity(), sampleDestinationAndSecurity() else { return false }
 
-        switch eventPoster.postUnicodeText(suffix) {
+        switch eventPoster.postUnicodeText(suffix, to: boundProcessIdentifier) {
         case .posted:
             break
         case .securityRejected:
@@ -239,6 +272,18 @@ final class CurrentFocusAppendSession: CurrentFocusProvisionalOutputSession {
         guard frontmostProcessProvider.frontmostProcessIdentifier() == boundProcessIdentifier else {
             suspend(.destinationChanged)
             return false
+        }
+        if let validateBoundDestination {
+            switch validateBoundDestination() {
+            case .valid:
+                break
+            case .destinationChanged:
+                suspend(.destinationChanged)
+                return false
+            case .securityRejected:
+                suspend(.securityRejected)
+                return false
+            }
         }
         return true
     }
@@ -300,6 +345,109 @@ final class CurrentFocusAppendSession: CurrentFocusProvisionalOutputSession {
 }
 
 @MainActor
+private final class BoundDestinationValidatingSession: CurrentFocusProvisionalOutputSession {
+    private enum Suspension {
+        case destinationChanged
+        case securityRejected
+    }
+
+    private let session: any CurrentFocusProvisionalOutputSession
+    private let validateBoundDestination: @MainActor () -> CurrentFocusBoundDestinationValidation
+    private var suspension: Suspension?
+    private var isClosed = false
+
+    init(
+        session: any CurrentFocusProvisionalOutputSession,
+        validateBoundDestination: @escaping @MainActor () -> CurrentFocusBoundDestinationValidation
+    ) {
+        self.session = session
+        self.validateBoundDestination = validateBoundDestination
+    }
+
+    func applyOpaqueHypothesis(
+        _ text: String,
+        generation: UInt64,
+        source: CurrentFocusHypothesisSource
+    ) -> CurrentFocusAppendOutcome {
+        guard !isClosed else { return .staleGeneration }
+        guard validate() else { return applyOutcome }
+        let outcome = session.applyOpaqueHypothesis(text, generation: generation, source: source)
+        let postValidationSucceeded = validate()
+        if outcome == .deliveryUncertain || outcome == .securityRejected {
+            return outcome
+        }
+        guard postValidationSucceeded else { return applyOutcome }
+        return outcome
+    }
+
+    func finalize(
+        finalText: String?,
+        lastAcceptedText: String?,
+        generation: UInt64
+    ) -> CurrentFocusAppendFinalOutcome {
+        guard !isClosed else { return .staleGeneration }
+        isClosed = true
+        guard validate() else {
+            session.invalidate()
+            return finalOutcome
+        }
+        let outcome = session.finalize(
+            finalText: finalText,
+            lastAcceptedText: lastAcceptedText,
+            generation: generation
+        )
+        let postValidationSucceeded = validate()
+        if outcome == .deliveryUncertain || outcome == .preservedSecurityRejection {
+            return outcome
+        }
+        guard postValidationSucceeded else { return finalOutcome }
+        return outcome
+    }
+
+    func invalidate() {
+        guard !isClosed else { return }
+        isClosed = true
+        session.invalidate()
+    }
+
+    private func validate() -> Bool {
+        guard suspension == nil else { return false }
+        switch validateBoundDestination() {
+        case .valid:
+            return true
+        case .destinationChanged:
+            suspension = .destinationChanged
+        case .securityRejected:
+            suspension = .securityRejected
+        }
+        session.invalidate()
+        return false
+    }
+
+    private var applyOutcome: CurrentFocusAppendOutcome {
+        switch suspension {
+        case .destinationChanged:
+            return .destinationChanged
+        case .securityRejected:
+            return .securityRejected
+        case nil:
+            return .deliveryUncertain
+        }
+    }
+
+    private var finalOutcome: CurrentFocusAppendFinalOutcome {
+        switch suspension {
+        case .destinationChanged:
+            return .preservedDestinationLoss
+        case .securityRejected:
+            return .preservedSecurityRejection
+        case nil:
+            return .deliveryUncertain
+        }
+    }
+}
+
+@MainActor
 // swiftlint:disable:next type_name
 final class SystemCurrentFocusProvisionalOutputSessionFactory: CurrentFocusProvisionalOutputSessionFactory {
     private let eventPoster: FinalTextCurrentFocusEventPosting
@@ -328,6 +476,10 @@ final class SystemCurrentFocusProvisionalOutputSessionFactory: CurrentFocusProvi
         self.activationMonitorFactory = activationMonitorFactory
     }
 
+    func validateCapturedDestinationSecurity() -> CurrentFocusBoundDestinationValidation {
+        secureInputStateProvider.isSecureInputEnabled() ? .securityRejected : .valid
+    }
+
     func makeSession(generation: UInt64) -> (any CurrentFocusProvisionalOutputSession)? {
         guard let processIdentifier = frontmostProcessProvider.frontmostProcessIdentifier() else {
             logger.info("Current-focus append session was not created because no frontmost process was available")
@@ -340,6 +492,23 @@ final class SystemCurrentFocusProvisionalOutputSessionFactory: CurrentFocusProvi
             secureInputStateProvider: secureInputStateProvider,
             frontmostProcessProvider: frontmostProcessProvider,
             activationMonitor: activationMonitorFactory()
+        )
+    }
+
+    func makeSession(
+        generation: UInt64,
+        boundProcessIdentifier: pid_t,
+        validateBoundDestination: @escaping @MainActor () -> CurrentFocusBoundDestinationValidation
+    ) -> (any CurrentFocusProvisionalOutputSession)? {
+        guard boundProcessIdentifier > 0 else { return nil }
+        return CurrentFocusAppendSession(
+            generation: generation,
+            boundProcessIdentifier: boundProcessIdentifier,
+            eventPoster: eventPoster,
+            secureInputStateProvider: secureInputStateProvider,
+            frontmostProcessProvider: frontmostProcessProvider,
+            activationMonitor: activationMonitorFactory(),
+            validateBoundDestination: validateBoundDestination
         )
     }
 }

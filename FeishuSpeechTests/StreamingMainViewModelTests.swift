@@ -1,9 +1,9 @@
-import Foundation
 import ApplicationServices
 import Combine
-import XCTest
-import os.log
 @testable import FeishuSpeech
+import Foundation
+import os.log
+import XCTest
 
 private let logger = Logger(
     subsystem: "com.feishuspeech.app",
@@ -279,42 +279,68 @@ final class StreamingMainViewModelTests: XCTestCase {
         )
     }
 
-    func test_finalOnlyCurrentDestinationInsertsFinalExactlyOnce() async {
-        let context = makeContext(
+    func test_initialFinalOnlyArmsAppendAndAppliesPartialBeforeReleaseThenOnlyFinalizes() async {
+        let context = makeAppendContext(
             capability: .finalOnly,
+            autoInsert: true,
+            rebindCapability: nil,
             packetEvents: [.partial("PRIVATE_PARTIAL")],
-            finishEvent: .final("PRIVATE_FINAL")
+            finishEvent: .final("PRIVATE_PARTIAL"),
+            appendFinalOutcomes: [.exactCommitted]
         )
         let identity = StreamingSessionIdentity(generation: 103)
 
-        await runOnePacketInteraction(context, identity: identity)
-        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
-        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
-        await waitUntil { await context.session.finishCallCount == 1 }
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await context.provider.makeSessionCallCount == 1 }
+        XCTAssertEqual(context.appendFactory.makeSessionCallCount, 1)
 
-        XCTAssertEqual(context.output.insertedTexts, ["PRIVATE_FINAL"])
+        context.recorder.emit(Data(repeating: 0x11, count: 6_400))
+        await waitUntil { await context.transport.sendCallCount == 1 }
+
+        XCTAssertEqual(context.appendSession.appliedTexts, ["PRIVATE_PARTIAL"])
+        XCTAssertEqual(context.appendSession.appliedSources, ["live"])
+        XCTAssertEqual(context.appendSession.finalizeCallCount, 0)
+        XCTAssertEqual(context.recorder.stopStreamingCallCount, 0, "release must not be the first insertion")
+        XCTAssertEqual(context.output.syntheticInputCallCount, 0)
+        XCTAssertEqual(context.output.copiedTexts, [])
+
+        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        await waitUntil { await context.transport.finishCallCount == 1 }
+
+        XCTAssertEqual(context.appendSession.finalizeCallCount, 1)
+        XCTAssertEqual(context.appendSession.finalTexts, ["PRIVATE_PARTIAL"])
+        XCTAssertEqual(context.output.insertedTexts, [])
         XCTAssertEqual(context.output.copiedTexts, [])
         XCTAssertEqual(context.accessibility.setSelectedTextCalls, [])
         XCTAssertEqual(context.recorder.stopStreamingCallCount, 1)
+        XCTAssertEqual(context.output.syntheticInputCallCount, 0, "release must not duplicate provisional output")
     }
 
-    func test_finalOnlyStaleDestinationCopiesForRecoveryWithoutSyntheticInsertion() async {
-        let context = makeContext(
+    func test_initialFinalOnlyFocusedElementDriftFailsClosedWithoutAppendOrRecoveryOutput() async {
+        let context = makeAppendContext(
             capability: .finalOnly,
+            autoInsert: true,
+            rebindCapability: nil,
             packetEvents: [.partial("PRIVATE_PARTIAL")],
             finishEvent: .final("PRIVATE_FINAL")
         )
         let identity = StreamingSessionIdentity(generation: 104)
 
-        await runOnePacketInteraction(context, identity: identity)
-        context.accessibility.currentProcessIdentifier = 99
-        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
-        await waitUntil { await context.session.finishCallCount == 1 }
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await context.provider.makeSessionCallCount == 1 }
+        XCTAssertEqual(context.appendFactory.makeSessionCallCount, 1)
 
+        context.accessibility.currentFocusedElement = AXUIElementCreateApplication(99)
+        context.recorder.emit(Data(repeating: 0x12, count: 6_400))
+        await waitUntil { await context.transport.sendCallCount == 1 }
+
+        XCTAssertEqual(context.appendSession.appliedTexts, [])
         XCTAssertEqual(context.output.insertedTexts, [])
-        XCTAssertEqual(context.output.copiedTexts, ["PRIVATE_FINAL"])
+        XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
+        XCTAssertEqual(context.output.copiedTexts, [])
         XCTAssertEqual(context.output.syntheticInputCallCount, 0)
-        XCTAssertFalse(containsTranscript(context.viewModel, transcript: "PRIVATE_FINAL"))
+        await context.viewModel.resetService()
     }
 
     func test_finalOnlyActionCapableControlCharactersDowngradeToCopyOnly() async {
@@ -1160,6 +1186,44 @@ final class StreamingMainViewModelTests: XCTestCase {
         XCTAssertEqual(context.output.copiedTexts, [])
     }
 
+    func test_initialFinalOnlyRetryKeepsCapturedAppendOwnershipAtReplayFrontier() async {
+        let first = RetryCoordinatorStreamingSession(
+            packetEvents: [.partial("captured prefix"), .failed(.network)]
+        )
+        let replacement = RetryCoordinatorStreamingSession(
+            packetEvents: [.partial("historical"), .partial("captured prefix extension")]
+        )
+        let sleeper = ControlledCoordinatorRetrySleeper()
+        let context = makeAppendRetryContext(
+            capability: .finalOnly,
+            rebindCapability: nil,
+            sessions: [first, replacement],
+            sleeper: sleeper
+        )
+        let identity = StreamingSessionIdentity(generation: 308)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await context.provider.makeSessionCallCount == 1 }
+        context.recorder.emit(Data(repeating: 0xAA, count: 12_800))
+        await waitUntil { await sleeper.callCount == 1 }
+
+        XCTAssertEqual(context.appendSession.appliedTexts, ["captured prefix"])
+        XCTAssertEqual(context.appendSession.appliedSources, ["live"])
+
+        await sleeper.releaseNext()
+        await waitUntil { await replacement.sendCallCount == 2 }
+
+        XCTAssertEqual(context.appendFactory.makeSessionCallCount, 1)
+        XCTAssertEqual(
+            context.appendSession.appliedTexts,
+            ["captured prefix", "captured prefix extension"]
+        )
+        XCTAssertEqual(context.appendSession.appliedSources, ["live", "replay"])
+        XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
+        XCTAssertEqual(context.output.insertedTexts, [])
+        XCTAssertEqual(context.output.copiedTexts, [])
+    }
+
     func test_unboundDivergentAndEmptyFinalNeverFallThroughToOneShotOrClipboard() async {
         for (offset, finalText) in ["revised", ""].enumerated() {
             let context = makeAppendContext(
@@ -1870,12 +1934,13 @@ final class StreamingMainViewModelTests: XCTestCase {
         await context.viewModel.resetService()
     }
 
-    func test_firstPartialFinalOnlyRebindKeepsCapturedDestinationAndNeverArmsAppend() async {
+    func test_firstPartialFinalOnlyRebindArmsAppendAndAppliesTriggerBeforeRelease() async {
         let context = makeAppendContext(
             autoInsert: true,
             rebindCapability: .finalOnly,
             packetEvents: [.partial("provisional")],
-            finishEvent: .final("captured final")
+            finishEvent: .final("provisional suffix"),
+            appendFinalOutcomes: [.suffixCommitted]
         )
         let identity = StreamingSessionIdentity(generation: 296)
 
@@ -1885,14 +1950,282 @@ final class StreamingMainViewModelTests: XCTestCase {
         await waitUntil { await context.transport.sendCallCount == 1 }
 
         XCTAssertEqual(context.accessibility.captureCount, 2)
-        XCTAssertEqual(context.appendFactory.makeSessionCallCount, 0)
-        XCTAssertEqual(context.appendSession.appliedTexts, [])
+        XCTAssertEqual(context.appendFactory.makeSessionCallCount, 1)
+        XCTAssertEqual(context.appendSession.appliedTexts, ["provisional"])
+        XCTAssertEqual(context.appendSession.appliedSources, ["live"])
+        XCTAssertEqual(context.appendSession.finalizeCallCount, 0)
+        XCTAssertEqual(context.recorder.stopStreamingCallCount, 0, "triggering partial must be visible while Fn is held")
         XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
+        XCTAssertEqual(context.output.insertedTexts, [])
+        XCTAssertEqual(context.output.copiedTexts, [])
+        XCTAssertEqual(context.output.syntheticInputCallCount, 0)
 
         context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
         await waitUntil { context.viewModel.status == .idle }
 
-        XCTAssertEqual(context.output.insertedTexts, ["captured final"])
+        XCTAssertEqual(context.appendSession.finalizeCallCount, 1)
+        XCTAssertEqual(context.appendSession.finalTexts, ["provisional suffix"])
+        XCTAssertEqual(context.output.insertedTexts, [])
+        XCTAssertEqual(context.output.copiedTexts, [])
+        XCTAssertEqual(context.output.syntheticInputCallCount, 0, "release must only seal/append the suffix")
+    }
+
+    func test_initialAndReboundFinalOnlyUnsafeZeroPostCopiesOnceWithFixedFeedback() async {
+        let unsafeText = "PRIVATE_UNSAFE\u{001B}"
+        let routes: [CoordinatorFinalOnlyRoute] = [
+            CoordinatorFinalOnlyRoute(capability: .finalOnly, rebindCapability: nil, generation: 302),
+            CoordinatorFinalOnlyRoute(
+                capability: .accessibilityUnavailable,
+                rebindCapability: .finalOnly,
+                generation: 303
+            )
+        ]
+
+        for route in routes {
+            let context = makeAppendContext(
+                capability: route.capability,
+                autoInsert: true,
+                rebindCapability: route.rebindCapability,
+                packetEvents: [.partial(unsafeText)],
+                finishEvent: .final(unsafeText),
+                appendApplyOutcomes: [.unsafeTextSuppressed],
+                appendFinalOutcomes: [.noUsableText]
+            )
+            let identity = StreamingSessionIdentity(generation: route.generation)
+
+            context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+            await waitUntil { await context.provider.makeSessionCallCount == 1 }
+            context.recorder.emit(Data(repeating: 0xA7, count: 6_400))
+            await waitUntil { await context.transport.sendCallCount == 1 }
+
+            XCTAssertEqual(context.appendSession.appliedTexts, [unsafeText])
+            XCTAssertEqual(context.appendSession.postAttemptCount, 0)
+            XCTAssertEqual(context.output.syntheticInputCallCount, 0)
+            XCTAssertEqual(context.output.copiedTexts, [])
+
+            context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+            await waitUntil { context.viewModel.status == .idle }
+
+            XCTAssertEqual(context.appendSession.finalizeCallCount, 1)
+            XCTAssertEqual(context.output.copiedTexts, [unsafeText])
+            XCTAssertEqual(context.output.syntheticInputCallCount, 0)
+            XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
+            XCTAssertEqual(context.overlayPresenter.completionFeedbacks, [.manualRecoveryCopied])
+            XCTAssertFalse(
+                context.overlayPresenter.completionFeedbacks.first?.text.contains(unsafeText) == true
+            )
+        }
+    }
+
+    func test_productionInitialAndReboundUnsafeZeroPostStableCapturedTargetCopiesExactlyOnce() async {
+        let unsafeText = "PRIVATE_PRODUCTION_UNSAFE\u{001B}"
+        let routes = productionCapturedRoutes(startingGeneration: 311)
+
+        for route in routes {
+            let context = makeProductionCapturedAppendContext(
+                route: route,
+                packetEvents: [.partial(unsafeText)],
+                finishEvent: .final(unsafeText)
+            )
+            let identity = StreamingSessionIdentity(generation: route.generation)
+
+            context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+            await waitUntil { await context.provider.makeSessionCallCount == 1 }
+            context.recorder.emit(Data(repeating: 0xAD, count: 6_400))
+            await waitUntil { await context.transport.sendCallCount == 1 }
+
+            XCTAssertEqual(context.unicodePoster.requestedTexts, [])
+            XCTAssertEqual(context.output.copiedTexts, [])
+
+            context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+            await waitUntil { context.viewModel.status == .idle }
+
+            XCTAssertEqual(context.unicodePoster.requestedTexts, [])
+            XCTAssertEqual(context.output.copiedTexts, [unsafeText])
+            XCTAssertEqual(context.output.syntheticInputCallCount, 0)
+            XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
+            XCTAssertEqual(context.overlayPresenter.completionFeedbacks, [.manualRecoveryCopied])
+        }
+    }
+
+    func test_productionInitialAndReboundUnsafeZeroPostDriftNeverCopiesOrUsesAlternateOutput() async {
+        let unsafeText = "PRIVATE_PRODUCTION_DRIFT\u{007F}"
+        let scenarios = ProductionCapturedDriftScenario.allCases
+        var generation: UInt64 = 320
+
+        for scenario in scenarios {
+            for route in productionCapturedRoutes(startingGeneration: generation) {
+                let context = makeProductionCapturedAppendContext(
+                    route: route,
+                    packetEvents: [.partial(unsafeText)],
+                    finishEvent: .final(unsafeText)
+                )
+                let identity = StreamingSessionIdentity(generation: route.generation)
+
+                context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+                await waitUntil { await context.provider.makeSessionCallCount == 1 }
+                context.recorder.emit(Data(repeating: 0xAE, count: 6_400))
+                await waitUntil { await context.transport.sendCallCount == 1 }
+                XCTAssertEqual(context.unicodePoster.requestedTexts, [], "scenario: \(scenario)")
+
+                applyProductionCapturedDrift(scenario, to: context)
+                context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+                await waitUntil { context.viewModel.activeSessionIdentityForTesting == nil }
+
+                XCTAssertEqual(context.unicodePoster.requestedTexts, [], "scenario: \(scenario)")
+                XCTAssertEqual(context.output.copiedTexts, [], "scenario: \(scenario)")
+                XCTAssertEqual(context.output.insertedTexts, [], "scenario: \(scenario)")
+                XCTAssertEqual(context.output.currentFocusAttemptedTexts, [], "scenario: \(scenario)")
+                XCTAssertEqual(context.output.syntheticInputCallCount, 0, "scenario: \(scenario)")
+                XCTAssertFalse(
+                    context.overlayPresenter.completionFeedbacks.contains(.manualRecoveryCopied),
+                    "scenario: \(scenario)"
+                )
+            }
+            generation += 2
+        }
+    }
+
+    func test_initialAndReboundFinalOnlyAttemptOrUncertaintyNeverCopiesOrResendsFullText() async {
+        let unsafeFinal = "PRIVATE_UNSAFE_AFTER_ATTEMPT\u{007F}"
+        let routes: [CoordinatorFinalOnlyRoute] = [
+            CoordinatorFinalOnlyRoute(capability: .finalOnly, rebindCapability: nil, generation: 304),
+            CoordinatorFinalOnlyRoute(
+                capability: .accessibilityUnavailable,
+                rebindCapability: .finalOnly,
+                generation: 305
+            )
+        ]
+
+        let outcomes: [(CurrentFocusAppendOutcome, CurrentFocusAppendFinalOutcome)] = [
+            (.insertedFirst, .preservedDivergence),
+            (.deliveryUncertain, .deliveryUncertain)
+        ]
+
+        for (scenarioOffset, outcome) in outcomes.enumerated() {
+            for route in routes {
+                let context = makeAppendContext(
+                    capability: route.capability,
+                    autoInsert: true,
+                    rebindCapability: route.rebindCapability,
+                    packetEvents: [.partial("attempted provisional")],
+                    finishEvent: .final(unsafeFinal),
+                    appendApplyOutcomes: [outcome.0],
+                    appendFinalOutcomes: [outcome.1]
+                )
+                let identity = StreamingSessionIdentity(
+                    generation: route.generation + UInt64(scenarioOffset * 10)
+                )
+
+                context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+                await waitUntil { await context.provider.makeSessionCallCount == 1 }
+                context.recorder.emit(Data(repeating: 0xA8, count: 6_400))
+                await waitUntil { await context.transport.sendCallCount == 1 }
+                context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+                await waitUntil { context.viewModel.status == .idle }
+
+                XCTAssertEqual(context.appendSession.postAttemptCount, 1)
+                XCTAssertEqual(context.output.copiedTexts, [])
+                XCTAssertEqual(context.output.insertedTexts, [])
+                XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
+                XCTAssertEqual(context.output.syntheticInputCallCount, 0)
+                XCTAssertEqual(context.overlayPresenter.completionFeedbacks, [.provisionalOutputPreserved])
+            }
+        }
+    }
+
+    func test_initialAndReboundFinalOnlyFactoryMissKeepsOneShotFallbackUntilRelease() async {
+        let routes: [CoordinatorFinalOnlyRoute] = [
+            CoordinatorFinalOnlyRoute(capability: .finalOnly, rebindCapability: nil, generation: 306),
+            CoordinatorFinalOnlyRoute(
+                capability: .accessibilityUnavailable,
+                rebindCapability: .finalOnly,
+                generation: 307
+            )
+        ]
+
+        for route in routes {
+            let context = makeAppendContext(
+                capability: route.capability,
+                autoInsert: true,
+                rebindCapability: route.rebindCapability,
+                packetEvents: [.partial("retained")],
+                finishEvent: .final("retained final"),
+                returnsAppendSession: false
+            )
+            let identity = StreamingSessionIdentity(generation: route.generation)
+
+            context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+            await waitUntil { await context.provider.makeSessionCallCount == 1 }
+            context.recorder.emit(Data(repeating: 0xA9, count: 6_400))
+            await waitUntil { await context.transport.sendCallCount == 1 }
+
+            XCTAssertEqual(context.appendSession.appliedTexts, [])
+            XCTAssertEqual(context.output.syntheticInputCallCount, 0)
+
+            context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+            await waitUntil { context.viewModel.status == .idle }
+
+            XCTAssertEqual(context.output.insertedTexts, ["retained final"])
+            XCTAssertEqual(context.output.syntheticInputCallCount, 1)
+            XCTAssertEqual(context.output.copiedTexts, [])
+        }
+    }
+
+    func test_initialFinalOnlyPostSealCallbacksCannotApplyBeforeSingleTerminalFinalize() async {
+        let context = makeAppendContext(
+            capability: .finalOnly,
+            autoInsert: true,
+            rebindCapability: nil,
+            packetEvents: [.partial("visible")],
+            finishEvent: .final("visible final"),
+            appendFinalOutcomes: [.suffixCommitted]
+        )
+        let identity = StreamingSessionIdentity(generation: 309)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await context.provider.makeSessionCallCount == 1 }
+        context.recorder.emit(Data(repeating: 0xAB, count: 6_400))
+        await waitUntil { await context.transport.sendCallCount == 1 }
+        XCTAssertEqual(context.appendSession.appliedTexts, ["visible"])
+
+        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        context.viewModel.handleStreamingEventForTesting(.partial("late partial"), identity: identity)
+        context.viewModel.handleStreamingEventForTesting(.final("late final"), identity: identity)
+        await waitUntil { context.viewModel.status == .idle }
+
+        XCTAssertEqual(context.appendSession.appliedTexts, ["visible"])
+        XCTAssertEqual(context.appendSession.finalizeCallCount, 1)
+        XCTAssertEqual(context.appendSession.finalTexts, ["visible final"])
+        XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
+        XCTAssertEqual(context.output.insertedTexts, [])
+        XCTAssertEqual(context.output.copiedTexts, [])
+    }
+
+    func test_initialFinalOnlyResetInvalidatesOwnerBeforeLateCallbacks() async {
+        let context = makeAppendContext(
+            capability: .finalOnly,
+            autoInsert: true,
+            rebindCapability: nil,
+            packetEvents: [.partial("visible")],
+            finishEvent: .cancelled
+        )
+        let identity = StreamingSessionIdentity(generation: 310)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await context.provider.makeSessionCallCount == 1 }
+        context.recorder.emit(Data(repeating: 0xAC, count: 6_400))
+        await waitUntil { await context.transport.sendCallCount == 1 }
+        await context.viewModel.resetService()
+
+        context.viewModel.handleStreamingEventForTesting(.partial("late partial"), identity: identity)
+        context.viewModel.handleStreamingEventForTesting(.final("late final"), identity: identity)
+
+        XCTAssertEqual(context.appendSession.invalidateCallCount, 1)
+        XCTAssertEqual(context.appendSession.appliedTexts, ["visible"])
+        XCTAssertEqual(context.appendSession.finalizeCallCount, 0)
+        XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
+        XCTAssertEqual(context.output.insertedTexts, [])
         XCTAssertEqual(context.output.copiedTexts, [])
     }
 
@@ -2081,12 +2414,14 @@ final class StreamingMainViewModelTests: XCTestCase {
     }
 
     private func makeAppendContext(
+        capability: CoordinatorAccessibilityClient.Capability = .accessibilityUnavailable,
         autoInsert: Bool,
         rebindCapability: CoordinatorAccessibilityClient.Capability? = .accessibilityUnavailable,
         packetEvents: [StreamingRecognitionEvent],
         finishEvent: StreamingRecognitionEvent,
         appendApplyOutcomes: [CurrentFocusAppendOutcome] = [],
-        appendFinalOutcomes: [CurrentFocusAppendFinalOutcome] = []
+        appendFinalOutcomes: [CurrentFocusAppendFinalOutcome] = [],
+        returnsAppendSession: Bool = true
     ) -> AppendStreamingCoordinatorContext {
         let recorder = CoordinatorAudioRecorder()
         let transport = CoordinatorStreamingSession(
@@ -2095,7 +2430,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         )
         let provider = CoordinatorStreamingProvider(session: transport)
         let accessibility = CoordinatorAccessibilityClient(
-            capability: .accessibilityUnavailable,
+            capability: capability,
             rebindCapability: rebindCapability
         )
         let output = CoordinatorFinalTextOutput()
@@ -2104,7 +2439,10 @@ final class StreamingMainViewModelTests: XCTestCase {
             applyOutcomes: appendApplyOutcomes,
             finalOutcomes: appendFinalOutcomes
         )
-        let appendFactory = CoordinatorCurrentFocusAppendSessionFactory(session: appendSession)
+        let appendFactory = CoordinatorCurrentFocusAppendSessionFactory(
+            session: appendSession,
+            returnsSession: returnsAppendSession
+        )
         let viewModel = MainViewModel(
             audioRecorder: recorder,
             settings: AppSettings(
@@ -2132,6 +2470,100 @@ final class StreamingMainViewModelTests: XCTestCase {
             appendSession: appendSession,
             appendFactory: appendFactory
         )
+    }
+
+    private func makeProductionCapturedAppendContext(
+        route: CoordinatorFinalOnlyRoute,
+        packetEvents: [StreamingRecognitionEvent],
+        finishEvent: StreamingRecognitionEvent
+    ) -> ProductionCapturedAppendContext {
+        let recorder = CoordinatorAudioRecorder()
+        let transport = CoordinatorStreamingSession(
+            packetEvents: packetEvents,
+            finishEvent: finishEvent
+        )
+        let provider = CoordinatorStreamingProvider(session: transport)
+        let accessibility = CoordinatorAccessibilityClient(
+            capability: route.capability,
+            rebindCapability: route.rebindCapability
+        )
+        let output = CoordinatorFinalTextOutput()
+        let overlayPresenter = CoordinatorOverlayPresenter()
+        let unicodePoster = CoordinatorProductionUnicodePoster()
+        let secureInput = CoordinatorMutableSecureInputProvider()
+        let frontmostProcess = CoordinatorMutableProcessProvider(processIdentifier: 42)
+        let appendFactory = SystemCurrentFocusProvisionalOutputSessionFactory(
+            eventPoster: unicodePoster,
+            secureInputStateProvider: secureInput,
+            frontmostProcessProvider: frontmostProcess,
+            activationMonitorFactory: { CoordinatorProductionActivationMonitor() }
+        )
+        let viewModel = MainViewModel(
+            audioRecorder: recorder,
+            settings: AppSettings(
+                appId: "configured-app",
+                appSecret: "configured-secret",
+                autoInsert: true,
+                playSound: false
+            ),
+            hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
+            streamingProvider: provider,
+            accessibilityClient: accessibility,
+            finalTextOutput: output,
+            overlayPresenter: overlayPresenter,
+            currentFocusAppendSessionFactory: appendFactory
+        )
+        recorder.resetTracking()
+        return ProductionCapturedAppendContext(
+            viewModel: viewModel,
+            recorder: recorder,
+            transport: transport,
+            provider: provider,
+            accessibility: accessibility,
+            output: output,
+            overlayPresenter: overlayPresenter,
+            unicodePoster: unicodePoster,
+            secureInput: secureInput,
+            frontmostProcess: frontmostProcess
+        )
+    }
+
+    private func productionCapturedRoutes(
+        startingGeneration: UInt64
+    ) -> [CoordinatorFinalOnlyRoute] {
+        [
+            CoordinatorFinalOnlyRoute(
+                capability: .finalOnly,
+                rebindCapability: nil,
+                generation: startingGeneration
+            ),
+            CoordinatorFinalOnlyRoute(
+                capability: .accessibilityUnavailable,
+                rebindCapability: .finalOnly,
+                generation: startingGeneration + 1
+            )
+        ]
+    }
+
+    private func applyProductionCapturedDrift(
+        _ scenario: ProductionCapturedDriftScenario,
+        to context: ProductionCapturedAppendContext
+    ) {
+        switch scenario {
+        case .focusedElement:
+            context.accessibility.currentFocusedElement = AXUIElementCreateApplication(99)
+        case .secureInput:
+            context.secureInput.isEnabled = true
+        case .secureToken:
+            context.accessibility.currentSecurityState = .secure
+        case .unverifiableToken:
+            context.accessibility.currentSecurityState = .unverifiable
+        case .frontmostPIDLoss:
+            context.frontmostProcess.processIdentifier = nil
+            context.accessibility.currentProcessIdentifier = nil
+        case .accessibilityQueryFailure:
+            context.accessibility.focusedElementError = .cannotComplete
+        }
     }
 
     private func makeReviewContext(
@@ -2178,14 +2610,16 @@ final class StreamingMainViewModelTests: XCTestCase {
     }
 
     private func makeAppendRetryContext(
+        capability: CoordinatorAccessibilityClient.Capability = .accessibilityUnavailable,
+        rebindCapability: CoordinatorAccessibilityClient.Capability? = .accessibilityUnavailable,
         sessions: [RetryCoordinatorStreamingSession],
         sleeper: ControlledCoordinatorRetrySleeper
     ) -> AppendRetryStreamingCoordinatorContext {
         let recorder = CoordinatorAudioRecorder()
         let provider = RetryCoordinatorStreamingProvider(factoryErrors: [], sessions: sessions)
         let accessibility = CoordinatorAccessibilityClient(
-            capability: .accessibilityUnavailable,
-            rebindCapability: .accessibilityUnavailable
+            capability: capability,
+            rebindCapability: rebindCapability
         )
         let output = CoordinatorFinalTextOutput()
         let overlayPresenter = CoordinatorOverlayPresenter()
@@ -2340,6 +2774,21 @@ final class StreamingMainViewModelTests: XCTestCase {
     }
 }
 
+private struct CoordinatorFinalOnlyRoute {
+    let capability: CoordinatorAccessibilityClient.Capability
+    let rebindCapability: CoordinatorAccessibilityClient.Capability?
+    let generation: UInt64
+}
+
+private enum ProductionCapturedDriftScenario: String, CaseIterable {
+    case focusedElement
+    case secureInput
+    case secureToken
+    case unverifiableToken
+    case frontmostPIDLoss
+    case accessibilityQueryFailure
+}
+
 @MainActor
 private struct StreamingCoordinatorContext {
     let viewModel: MainViewModel
@@ -2372,6 +2821,20 @@ private struct AppendStreamingCoordinatorContext {
     let overlayPresenter: CoordinatorOverlayPresenter
     let appendSession: CoordinatorCurrentFocusAppendSession
     let appendFactory: CoordinatorCurrentFocusAppendSessionFactory
+}
+
+@MainActor
+private struct ProductionCapturedAppendContext {
+    let viewModel: MainViewModel
+    let recorder: CoordinatorAudioRecorder
+    let transport: CoordinatorStreamingSession
+    let provider: CoordinatorStreamingProvider
+    let accessibility: CoordinatorAccessibilityClient
+    let output: CoordinatorFinalTextOutput
+    let overlayPresenter: CoordinatorOverlayPresenter
+    let unicodePoster: CoordinatorProductionUnicodePoster
+    let secureInput: CoordinatorMutableSecureInputProvider
+    let frontmostProcess: CoordinatorMutableProcessProvider
 }
 
 @MainActor
@@ -2471,6 +2934,7 @@ private final class CoordinatorCurrentFocusAppendSession: CurrentFocusProvisiona
     private(set) var appliedSources: [String] = []
     private(set) var finalTexts: [String?] = []
     private(set) var lastAcceptedTexts: [String?] = []
+    private(set) var postAttemptCount = 0
     private(set) var finalizeCallCount = 0
     private(set) var invalidateCallCount = 0
 
@@ -2494,10 +2958,20 @@ private final class CoordinatorCurrentFocusAppendSession: CurrentFocusProvisiona
         case .replayCatchUp:
             appliedSources.append("replay")
         }
+        let outcome: CurrentFocusAppendOutcome
         if !applyOutcomes.isEmpty {
-            return applyOutcomes.removeFirst()
+            outcome = applyOutcomes.removeFirst()
+        } else {
+            outcome = appliedTexts.count == 1 ? .insertedFirst : .appendedSuffix
         }
-        return appliedTexts.count == 1 ? .insertedFirst : .appendedSuffix
+        switch outcome {
+        case .insertedFirst, .appendedSuffix, .deliveryUncertain, .securityRejected:
+            postAttemptCount += 1
+        case .duplicate, .revisionSuppressed, .contentless, .unsafeTextSuppressed,
+             .destinationChanged, .staleGeneration:
+            break
+        }
+        return outcome
     }
 
     func finalize(
@@ -3025,13 +3499,14 @@ private final class CoordinatorAccessibilityClient: AccessibilityClient {
     private(set) var captureCount = 0
     private(set) var frontmostProcessQueryCount = 0
     private(set) var focusedElementQueryCount = 0
-    var currentProcessIdentifier: pid_t = 42
+    var currentProcessIdentifier: pid_t? = 42
     var currentFocusedElement: AXUIElement
     var selectedRange = CursorTextRange(location: 2, length: 0)
     var rangeText = ""
     var returnedWriteLengths: [Int] = []
     var currentSecurityState: DestinationSecurityState = .safe
     var securityStateError: AccessibilityClientError?
+    var focusedElementError: AccessibilityClientError?
     private(set) var setSelectedTextCalls: [String] = []
 
     init(capability: Capability, rebindCapability: Capability? = nil) {
@@ -3077,6 +3552,9 @@ private final class CoordinatorAccessibilityClient: AccessibilityClient {
 
     func focusedElement() throws -> AXUIElement {
         focusedElementQueryCount += 1
+        if let focusedElementError {
+            throw focusedElementError
+        }
         return currentFocusedElement
     }
 
@@ -3158,5 +3636,59 @@ private final class CoordinatorFinalTextOutput: FinalTextOutput {
             syntheticInputCallCount += 1
         }
         return currentFocusInsertionResult
+    }
+}
+
+@MainActor
+private final class CoordinatorProductionUnicodePoster: FinalTextCurrentFocusEventPosting {
+    private(set) var requestedTexts: [String] = []
+    private(set) var destinationProcessIdentifiers: [pid_t] = []
+
+    func postUnicodeText(
+        _ text: String,
+        to processIdentifier: pid_t
+    ) -> FinalTextCurrentFocusPostResult {
+        requestedTexts.append(text)
+        destinationProcessIdentifiers.append(processIdentifier)
+        return .posted
+    }
+}
+
+@MainActor
+private final class CoordinatorMutableSecureInputProvider: SecureInputStateProviding {
+    var isEnabled = false
+    private(set) var queryCount = 0
+
+    func isSecureInputEnabled() -> Bool {
+        queryCount += 1
+        return isEnabled
+    }
+}
+
+@MainActor
+private final class CoordinatorMutableProcessProvider: FrontmostProcessProviding {
+    var processIdentifier: pid_t?
+    private(set) var queryCount = 0
+
+    init(processIdentifier: pid_t?) {
+        self.processIdentifier = processIdentifier
+    }
+
+    func frontmostProcessIdentifier() -> pid_t? {
+        queryCount += 1
+        return processIdentifier
+    }
+}
+
+@MainActor
+private final class CoordinatorProductionActivationMonitor: CurrentFocusActivationMonitoring {
+    private var handler: (@MainActor (pid_t) -> Void)?
+
+    func startMonitoring(_ handler: @escaping @MainActor (pid_t) -> Void) {
+        self.handler = handler
+    }
+
+    func stopMonitoring() {
+        handler = nil
     }
 }

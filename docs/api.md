@@ -180,32 +180,58 @@ owned range, and exact prior text. Accessibility-returned ranges define ownershi
 `String.count` does not. Any mismatch invalidates the writer permanently for that hold, and late
 events write nothing.
 
-When a non-secure destination was captured but cannot support live range replacement, final-only
-mode may post one process-targeted Cmd+V only after the captured PID, focused element, and security
-state are validated; the sink validates again after posting. A stale/uncertain captured
-destination uses copy-only manual recovery.
+When a non-secure destination was captured but cannot support live range replacement, the initial
+`.finalOnly` result arms a continuous append owner bound to the captured PID and exact
+`AXUIElement`. A first-partial rebind that returns `.finalOnly` does the same and offers that
+triggering partial immediately. Thus every non-contentless hypothesis received before sealing is
+routed to the selected owner while Fn remains held; release is only the seal/finalize boundary.
+Only if the append factory cannot create this owner before any provisional attempt does the older
+release-time, process-targeted Cmd+V final-only route remain available.
 
 When AX destination capture or confirmation is unavailable, the first non-contentless hypothesis
 causes one more `CursorTextSession.begin()` attempt. If that yields live AX capability, normal
-verified range replacement takes ownership. If it does not yield live capability,
-`CurrentFocusAppendSession` binds the then
-frontmost PID and provides best-effort continuous output for the hold: it posts the first safe value
-as direct Unicode input, then posts only the unseen UTF-16 suffix when every later hypothesis
-starts exactly with the already emitted UTF-16 units. Duplicates are no-ops; revisions,
-shortenings, unsafe control characters, and contentless values are suppressed.
+verified range replacement takes ownership. If it remains unavailable,
+`CurrentFocusAppendSession` binds the then-frontmost PID and provides best-effort continuous output
+for the hold: it posts the first safe value as direct Unicode input, then posts only the unseen
+UTF-16 suffix when every later hypothesis starts exactly with the already emitted UTF-16 units.
+Duplicates are no-ops; revisions, shortenings, unsafe control characters, and contentless values
+are suppressed by that same owner rather than deferred to release.
 
-The append session samples Secure Input and the bound frontmost PID twice before each post and once
-after it, and permanently suspends after application activation changes, PID mismatch, security
-rejection, or uncertain delivery. It never resends an uncertain payload. It uses no pasteboard,
-Backspace, selection, deletion, or cursor navigation. Because it has no AX range, it cannot observe
-a caret move within the same process; text may therefore reach a different caret in that process.
-This residual risk is explicit and is why divergent hypotheses are preserved rather than rewritten.
-At release, an exact or strictly extending final may append one last suffix; a divergent/shorter
-final preserves visible text and does not fall through to the old one-shot or clipboard paths.
+Every append mutation samples live Secure Input and the bound frontmost PID twice before and once
+after posting. A captured append additionally validates the token's current security, original PID,
+and `CFEqual` identity of the current focused element before and after the synchronous mutation.
+Application activation change, PID/element drift, security rejection, generation invalidation, or
+uncertain delivery permanently suspends the owner.
+
+The Unicode poster accepts a positive bound PID and safe non-empty text, creates one
+`.privateState` source, and fully constructs key-down and key-up with the same UTF-16 payload and
+explicit empty flags before either can be posted. It samples live Secure Input only after the pair
+exists; on success, the two `CGEventPostToPid` submissions are adjacent. Source/down/up construction
+failure or the final security sample causes zero posts. `.posted` means only that both events were
+submitted: CoreGraphics provides no target-control acceptance acknowledgement.
+
+After any provisional delivery attempt, destination/security loss, or uncertainty, no full-text
+resend, one-shot current-focus insertion, Cmd+V, alternate target, or clipboard recovery is allowed.
+The only manual-copy path retained for a captured append owner requires proof of zero poster
+attempts, an unsafe control-bearing retained value, and one final successful live validation of
+Secure Input, the captured token, original PID, and exact AX element. It closes eligibility before
+validation and can copy at most once.
+
+The unbound append path uses no pasteboard, Backspace, selection, deletion, or cursor navigation.
+Because it has no AX range, it cannot observe a caret move within the same process; text may
+therefore reach a different caret in that process. This residual risk is explicit and is why
+divergent hypotheses are preserved rather than rewritten. At release, an exact or strictly
+extending final may append one last suffix; a divergent/shorter final preserves output state but
+the UI uses neutral wording because target acceptance is not acknowledged.
 
 `autoInsert=false` keeps recognition active but discards cursor-writing capability and produces no
 target or pasteboard mutation. Secure targets and Secure Event Input still fail closed before
 audio/network work when affirmatively detected.
+
+These are verified local routing and event-construction contracts, not an end-to-end acceptance
+claim. Installed owner UAT must still observe visible held output on the real target. A submitted
+pair with no visible text remains a PARTIAL result and does not authorize global HID posting,
+retries, destructive editing, or fallback after uncertainty.
 
 See [D-25-01](decisions/D-25-01.md), [D-26-01](decisions/D-26-01.md), and the
 [full design](streaming-speech-design.md) for state, lifecycle, failure, fallback, privacy, and test

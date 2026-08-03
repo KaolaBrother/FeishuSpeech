@@ -13,7 +13,7 @@ HotKeyService
       -> streaming AudioRecorder -> byte-bounded PCM ingress
           -> ordered packet journal -> one fresh FeishuStreamingSession actor per attempt
       -> optional CursorTextSession (@MainActor) -> original AX editable element
-      -> CurrentFocusAppendSession -> same-PID suffix output when AX capture is unavailable
+      -> CurrentFocusAppendSession -> PID-bound suffix output for captured final-only or unbound targets
 ```
 
 The production hot-key state is `idle -> pending -> streaming -> sealing -> idle | error`.
@@ -105,10 +105,13 @@ selection, caret, text, element, or generation mismatch permanently invalidates 
 Late events are dropped and are never redirected to a newly focused control.
 
 The app does not use per-partial clipboard writes, synthetic Backspace, or Shift+Arrow selection.
-If a safe editable element was captured but lacks verified range
-replacement, the stream retains only the latest opaque response and posts one process-targeted
-Cmd+V only after the captured PID, focused element, and security state are revalidated; the sink
-validates again after posting. A stale/uncertain captured target uses copy-only manual recovery.
+If a safe editable element was captured but lacks verified range replacement, startup immediately
+arms a `CurrentFocusAppendSession` bound to the captured PID and exact element. If the first-partial
+rebind returns final-only, it arms the same kind of owner and applies that triggering partial before
+returning. Every later usable partial received before sealing is offered to that owner during the
+Fn hold. Release cannot open a writer or become the first provisional-output trigger; it only seals
+capture and finalizes an already selected owner. A release-time captured Cmd+V remains only when
+the continuous factory failed before any provisional attempt.
 
 If no AX destination can be captured or confirmed at startup, the first non-empty partial triggers
 one final AX binding attempt. A live result takes the normal captured-range path. If that probe does
@@ -117,29 +120,48 @@ not yield live capability,
 safe hypothesis through direct Unicode input, then posts only an exact unseen UTF-16 suffix when a
 later hypothesis begins with every already emitted code unit. Duplicates are no-ops; revised or
 shorter hypotheses are suppressed. Replay offers only the catch-up-frontier hypothesis, so
-historical responses do not duplicate visible output.
+historical responses do not duplicate local output attempts.
 
-The append path samples Secure Input and bound PID before and after posting and observes application
-activation changes. Any PID/security/delivery uncertainty permanently suspends it for the hold. It
-never deletes, selects, navigates, writes the pasteboard, or resends an uncertain payload. Without
-an AX range it cannot observe a caret move inside the same PID; that residual targeting risk is
-explicit. A divergent final preserves the emitted text rather than attempting destructive repair.
+The append path samples Secure Input and bound PID twice before and once after each post and
+observes application activation changes. Captured append sessions also validate the captured
+token's current security, original PID, and exact focused `AXUIElement` identity through `CFEqual`
+before and after each mutation. Any PID/element/security/delivery uncertainty permanently suspends
+the owner for the hold.
 
-Both paths reject automatic paste for action-capable C0/C1 control characters and use copy-only
-manual recovery instead. An affirmatively detected secure target or Secure Event Input is
-fail-closed and receives neither paste nor recovery copy. `autoInsert=false` produces no target or
-pasteboard mutation.
+The low-level poster creates one `.privateState` source and fully constructs a modifier-neutral
+key-down/key-up pair before posting: both events carry the same UTF-16 payload, explicit empty
+flags, and the same positive bound PID. It takes the final live Secure Input sample after pair
+construction, then submits down and up adjacently with `CGEventPostToPid`. Any construction failure
+or that final security rejection produces zero posts. There is no target acceptance acknowledgement,
+so a local `.posted` result cannot prove visible insertion.
+
+After any provisional attempt, destination/security loss, or delivery uncertainty, the owner never
+deletes, selects, navigates, resends a full value, switches target, uses Cmd+V, or falls through to
+clipboard recovery. A narrow captured-only manual recovery remains when unsafe text caused zero
+poster attempts and a final exact PID/AX-element/Secure Input validation succeeds; eligibility is
+closed before that one copy. Without an AX range, the unbound owner cannot observe a caret move
+inside the same PID; that residual targeting risk is explicit. A divergent final leaves output
+unchanged rather than attempting destructive repair.
+
+Both paths reject automatic insertion for action-capable C0/C1/DEL control characters. Only a
+captured owner with verified zero-post eligibility may use the one-shot manual copy described
+above. An affirmatively detected secure target or Secure Event Input is fail-closed and receives
+neither synthetic input nor recovery copy. `autoInsert=false` produces no target or pasteboard
+mutation.
 
 ### Finalization and privacy
 
 A non-empty final response replaces the verified AX provisional range, or appends a final exact
 suffix through the current-focus session, and releases ownership without synthesizing Return.
-Empty final or recoverable failure preserves the last verified/accepted visible value rather than
-risk deleting user content. A failure before the first write causes no target mutation.
+Empty/divergent final or recoverable failure closes the owner without a destructive alternate
+output. Because PID posting has no target-acceptance acknowledgement, this is described as retained
+output state rather than proof that text is visible. A failure before the first write causes no
+target mutation.
 
-The overlay remains status-only; target applications are the editing surface. Empty-final and
-manual-copy outcomes use fixed, generation-guarded feedback presented for two seconds even though
-the coordinator has already returned to idle. Logs may include
+The overlay remains status-only; target applications are the editing surface. Empty-final,
+uncertain-output, and manual-copy outcomes use fixed, neutral, generation-guarded feedback presented
+for two seconds even though the coordinator has already returned to idle. The neutral strings do
+not claim that a target accepted an event or that visible text was preserved. Logs may include
 typed state/failure values, generations, sequence numbers, and byte counts, but never transcript
 text, audio, credentials/tokens, stream IDs, focused-control contents, application/window titles,
 or clipboard payloads.
@@ -334,11 +356,13 @@ The issue-26 final-only output instead:
   validates the captured element and security state before and after delivery;
 - when AX capture/confirmation is unavailable, re-probes AX once on the first non-empty partial;
   if still unavailable, binds the frontmost PID and posts the first value plus exact UTF-16 suffixes
-  through direct Unicode events while Secure Input stays clear and the PID stays stable;
-- copies the exact final value without posting a key event when a captured non-security delivery
-  is stale/uncertain or when the captured final-only value contains control characters, then shows
-  fixed two-second transcript-free feedback; current-focus provisional output never falls through
-  to clipboard recovery after revision, PID/security loss, or uncertain delivery;
+  through PID-targeted private-source Unicode down/up pairs while Secure Input stays clear and the
+  PID stays stable;
+- gives captured final-only targets the same continuous owner, additionally checking the original
+  PID and exact AX element before/after each mutation; after any post attempt or uncertainty it
+  never falls through to a full resend, Cmd+V, another target, or clipboard recovery;
+- copies only an unsafe captured value with verified zero-post eligibility after a final exact
+  security/PID/element validation, then shows fixed two-second transcript-free feedback;
 - performs no pasteboard recovery for an affirmatively detected secure target or Secure Event
   Input.
 
@@ -381,11 +405,12 @@ recording overlay.
 
 ## Verification boundary
 
-The implementation and independent correctness/security reviews are complete. The recorded full
-macOS test run reports 184 passed, 0 failed, and 0 skipped, including ingress drain/reuse,
-post-callback-barrier sealing, strict serial finish/cancel races, cursor ownership, secure
-fail-closed output, generation cleanup, settings, two-second transcript-free feedback, terminal
-provider teardown, overlay dismissal, identical-error suppression, and private auth feedback.
+The current seven-file held-output candidate passed independent correctness and security review.
+The supplied post-repair record reports 94 focused final-output security, current-focus append, and
+streaming coordinator tests passing with zero failures, owned-file SwiftLint with zero violations,
+and `git diff --check` passing. These checks cover complete pair construction, exact captured
+destination validation, held-versus-release routing, fail-closed uncertainty, and neutral
+transcript-free feedback. They do not prove target-control acceptance.
 
 Credential-bearing Feishu behavior and cross-application Accessibility compatibility remain live
 UAT. The latest installed-Release evidence reached `action=1` and received HTTP 200, then the old
@@ -394,3 +419,7 @@ recognition success. The relaxed KaolaTerminal-compatible parser, subsequent act
 encoding, real text/token-refresh behavior, PCM/tail handling, slow networks,
 native/browser/Electron/terminal/rich-text targets, focus/caret interference, Unicode, and undo
 remain owner-UAT gates. No broad application compatibility is claimed yet.
+
+In particular, `CGEventPostToPid` has no target acceptance acknowledgement. A locally submitted
+private-source down/up pair with no visible target text remains PARTIAL and must not trigger global
+HID posting, retries, destructive editing, or an alternate clipboard path after uncertainty.

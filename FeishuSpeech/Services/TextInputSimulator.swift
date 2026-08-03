@@ -99,7 +99,7 @@ final class SystemFinalTextOutput: FinalTextOutput {
               firstProcessIdentifier == secondProcessIdentifier else {
             return .destinationInvalid
         }
-        switch currentFocusEventPoster.postUnicodeText(text) {
+        switch currentFocusEventPoster.postUnicodeText(text, to: firstProcessIdentifier) {
         case .posted:
             return .inserted
         case .securityRejected:
@@ -126,13 +126,44 @@ protocol FinalTextKeyEventPosting: AnyObject {
 
 @MainActor
 protocol FinalTextCurrentFocusEventPosting: AnyObject {
-    func postUnicodeText(_ text: String) -> FinalTextCurrentFocusPostResult
+    func postUnicodeText(
+        _ text: String,
+        to processIdentifier: pid_t
+    ) -> FinalTextCurrentFocusPostResult
 }
 
 nonisolated enum FinalTextCurrentFocusPostResult: Equatable, Sendable {
     case posted
     case securityRejected
     case deliveryFailed
+}
+
+nonisolated enum FinalTextUnicodeEventPhase: Equatable, Sendable {
+    case keyDown
+    case keyUp
+}
+
+@MainActor
+protocol FinalTextUnicodeEventSourceHandle: AnyObject {}
+
+@MainActor
+protocol FinalTextUnicodeEventHandle: AnyObject {}
+
+@MainActor
+protocol FinalTextUnicodeEventBackend: AnyObject {
+    func makeEventSource(
+        stateID: CGEventSourceStateID
+    ) -> (any FinalTextUnicodeEventSourceHandle)?
+    func makeUnicodeEvent(
+        source: any FinalTextUnicodeEventSourceHandle,
+        phase: FinalTextUnicodeEventPhase,
+        utf16: [UInt16],
+        flags: CGEventFlags
+    ) -> (any FinalTextUnicodeEventHandle)?
+    func postUnicodeEvent(
+        _ event: any FinalTextUnicodeEventHandle,
+        to processIdentifier: pid_t
+    )
 }
 
 @MainActor
@@ -172,17 +203,110 @@ private final class SystemFinalTextKeyEventPoster: FinalTextKeyEventPosting {
 
 @MainActor
 final class SystemFinalTextCurrentFocusEventPoster: FinalTextCurrentFocusEventPosting {
-    func postUnicodeText(_ text: String) -> FinalTextCurrentFocusPostResult {
-        let utf16 = Array(text.utf16)
-        guard !utf16.isEmpty,
-              let source = CGEventSource(stateID: .hidSystemState),
-              let event = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true) else {
+    private let backend: FinalTextUnicodeEventBackend
+    private let secureInputStateProvider: SecureInputStateProviding
+
+    convenience init() {
+        self.init(
+            backend: SystemFinalTextUnicodeEventBackend(),
+            secureInputStateProvider: SystemSecureInputStateProvider()
+        )
+    }
+
+    init(
+        backend: FinalTextUnicodeEventBackend,
+        secureInputStateProvider: SecureInputStateProviding
+    ) {
+        self.backend = backend
+        self.secureInputStateProvider = secureInputStateProvider
+    }
+
+    func postUnicodeText(
+        _ text: String,
+        to processIdentifier: pid_t
+    ) -> FinalTextCurrentFocusPostResult {
+        guard processIdentifier > 0,
+              !text.utf16.isEmpty,
+              TextInputSimulator.isSafeForAutomaticPaste(text) else {
             return .deliveryFailed
         }
-        event.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: utf16)
-        guard !IsSecureEventInputEnabled() else { return .securityRejected }
-        event.post(tap: .cghidEventTap)
+        let utf16 = Array(text.utf16)
+        guard let source = backend.makeEventSource(stateID: .privateState),
+              let keyDown = backend.makeUnicodeEvent(
+                source: source,
+                phase: .keyDown,
+                utf16: utf16,
+                flags: []
+              ),
+              let keyUp = backend.makeUnicodeEvent(
+                source: source,
+                phase: .keyUp,
+                utf16: utf16,
+                flags: []
+              ) else {
+            return .deliveryFailed
+        }
+        guard !secureInputStateProvider.isSecureInputEnabled() else {
+            return .securityRejected
+        }
+        backend.postUnicodeEvent(keyDown, to: processIdentifier)
+        backend.postUnicodeEvent(keyUp, to: processIdentifier)
         return .posted
+    }
+}
+
+@MainActor
+private final class SystemFinalTextUnicodeEventBackend: FinalTextUnicodeEventBackend {
+    func makeEventSource(
+        stateID: CGEventSourceStateID
+    ) -> (any FinalTextUnicodeEventSourceHandle)? {
+        guard let source = CGEventSource(stateID: stateID) else { return nil }
+        return SystemFinalTextUnicodeEventSourceHandle(source: source)
+    }
+
+    func makeUnicodeEvent(
+        source: any FinalTextUnicodeEventSourceHandle,
+        phase: FinalTextUnicodeEventPhase,
+        utf16: [UInt16],
+        flags: CGEventFlags
+    ) -> (any FinalTextUnicodeEventHandle)? {
+        guard let source = source as? SystemFinalTextUnicodeEventSourceHandle,
+              let event = CGEvent(
+                keyboardEventSource: source.source,
+                virtualKey: 0,
+                keyDown: phase == .keyDown
+              ) else {
+            return nil
+        }
+        event.flags = flags
+        event.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: utf16)
+        return SystemFinalTextUnicodeEventHandle(event: event)
+    }
+
+    func postUnicodeEvent(
+        _ event: any FinalTextUnicodeEventHandle,
+        to processIdentifier: pid_t
+    ) {
+        guard let event = event as? SystemFinalTextUnicodeEventHandle else { return }
+        event.event.postToPid(processIdentifier)
+    }
+}
+
+@MainActor
+private final class SystemFinalTextUnicodeEventSourceHandle: FinalTextUnicodeEventSourceHandle {
+    let source: CGEventSource
+
+    init(source: CGEventSource) {
+        self.source = source
+    }
+}
+
+@MainActor
+private final class SystemFinalTextUnicodeEventHandle: FinalTextUnicodeEventHandle {
+    let event: CGEvent
+
+    init(event: CGEvent) {
+        self.event = event
     }
 }
 

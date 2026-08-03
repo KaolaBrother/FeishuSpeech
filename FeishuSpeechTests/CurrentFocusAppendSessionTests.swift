@@ -30,6 +30,7 @@ final class CurrentFocusAppendSessionTests: XCTestCase {
         XCTAssertEqual(first, .insertedFirst)
         XCTAssertEqual(duplicate, .duplicate)
         assertPosted(["first visible value"], by: context.poster)
+        XCTAssertEqual(context.poster.destinationProcessIdentifiers, [boundProcessIdentifier])
         XCTAssertEqual(context.poster.callCount, 1)
     }
 
@@ -198,6 +199,142 @@ final class CurrentFocusAppendSessionTests: XCTestCase {
         XCTAssertEqual(context.poster.callCount, 1)
         XCTAssertEqual(context.processProvider.queryCount, 3)
         XCTAssertEqual(context.secureInputProvider.queryCount, 3)
+    }
+
+    func test_systemFactoryCapturedSessionUsesSuppliedPIDAndValidatesTwiceBeforeOnceAfterPost() {
+        let poster = FakeUnicodeEventPoster(results: [])
+        let secureInput = FakeAppendSecureInputStateProvider(states: [false, false, false])
+        let processProvider = FakeAppendFrontmostProcessProvider(
+            processIdentifiers: [boundProcessIdentifier, boundProcessIdentifier, boundProcessIdentifier]
+        )
+        let activationMonitor = FakeActivationMonitor()
+        let factory = SystemCurrentFocusProvisionalOutputSessionFactory(
+            eventPoster: poster,
+            secureInputStateProvider: secureInput,
+            frontmostProcessProvider: processProvider,
+            activationMonitorFactory: { activationMonitor }
+        )
+        var validationCallCount = 0
+
+        let session = factory.makeSession(
+            generation: generation,
+            boundProcessIdentifier: boundProcessIdentifier,
+            validateBoundDestination: {
+                validationCallCount += 1
+                return .valid
+            }
+        )
+        let outcome = session?.applyOpaqueHypothesis(
+            "captured target",
+            generation: generation,
+            source: .livePacket
+        )
+
+        XCTAssertEqual(outcome, .insertedFirst)
+        XCTAssertEqual(validationCallCount, 3, "captured validation must run twice before and once after posting")
+        XCTAssertEqual(poster.requestedTexts, ["captured target"])
+        XCTAssertEqual(poster.destinationProcessIdentifiers, [boundProcessIdentifier])
+        XCTAssertEqual(processProvider.queryCount, 3)
+        XCTAssertEqual(secureInput.queryCount, 3)
+    }
+
+    func test_capturedPostflightElementDriftPermanentlySuspendsWithoutLaterFinalPost() {
+        let poster = FakeUnicodeEventPoster(results: [])
+        let secureInput = FakeAppendSecureInputStateProvider(
+            states: Array(repeating: false, count: 10)
+        )
+        let processProvider = FakeAppendFrontmostProcessProvider(
+            processIdentifiers: Array(repeating: boundProcessIdentifier, count: 10)
+        )
+        let activationMonitor = FakeActivationMonitor()
+        let factory = SystemCurrentFocusProvisionalOutputSessionFactory(
+            eventPoster: poster,
+            secureInputStateProvider: secureInput,
+            frontmostProcessProvider: processProvider,
+            activationMonitorFactory: { activationMonitor }
+        )
+        var validations: [CurrentFocusBoundDestinationValidation] = [
+            .valid,
+            .valid,
+            .destinationChanged
+        ]
+        let session = factory.makeSession(
+            generation: generation,
+            boundProcessIdentifier: boundProcessIdentifier,
+            validateBoundDestination: {
+                guard !validations.isEmpty else { return .valid }
+                return validations.removeFirst()
+            }
+        )
+
+        let first = session?.applyOpaqueHypothesis(
+            "visible",
+            generation: generation,
+            source: .livePacket
+        )
+        let late = session?.applyOpaqueHypothesis(
+            "visible extension",
+            generation: generation,
+            source: .livePacket
+        )
+        let final = session?.finalize(
+            finalText: "visible final",
+            lastAcceptedText: "visible extension",
+            generation: generation
+        )
+
+        XCTAssertEqual(first, .destinationChanged)
+        XCTAssertEqual(late, .destinationChanged)
+        XCTAssertEqual(final, .preservedDestinationLoss)
+        XCTAssertEqual(poster.requestedTexts, ["visible"])
+        XCTAssertEqual(poster.destinationProcessIdentifiers, [boundProcessIdentifier])
+    }
+
+    func test_capturedPostflightSecureInputPermanentlySuspendsWithoutLaterFinalPost() {
+        let poster = FakeUnicodeEventPoster(results: [])
+        let secureInput = FakeAppendSecureInputStateProvider(states: [false, false, true])
+        let processProvider = FakeAppendFrontmostProcessProvider(
+            processIdentifiers: Array(repeating: boundProcessIdentifier, count: 10)
+        )
+        let activationMonitor = FakeActivationMonitor()
+        let factory = SystemCurrentFocusProvisionalOutputSessionFactory(
+            eventPoster: poster,
+            secureInputStateProvider: secureInput,
+            frontmostProcessProvider: processProvider,
+            activationMonitorFactory: { activationMonitor }
+        )
+        var validationCallCount = 0
+        let session = factory.makeSession(
+            generation: generation,
+            boundProcessIdentifier: boundProcessIdentifier,
+            validateBoundDestination: {
+                validationCallCount += 1
+                return .valid
+            }
+        )
+
+        let first = session?.applyOpaqueHypothesis(
+            "visible",
+            generation: generation,
+            source: .livePacket
+        )
+        let late = session?.applyOpaqueHypothesis(
+            "visible extension",
+            generation: generation,
+            source: .livePacket
+        )
+        let final = session?.finalize(
+            finalText: "visible final",
+            lastAcceptedText: "visible extension",
+            generation: generation
+        )
+
+        XCTAssertEqual(first, .securityRejected)
+        XCTAssertEqual(late, .securityRejected)
+        XCTAssertEqual(final, .preservedSecurityRejection)
+        XCTAssertEqual(validationCallCount, 2)
+        XCTAssertEqual(poster.requestedTexts, ["visible"])
+        XCTAssertEqual(poster.destinationProcessIdentifiers, [boundProcessIdentifier])
     }
 
     func test_posterFailureOrSecurityUncertaintyNeverResendsPayload() {
@@ -476,6 +613,7 @@ private struct TestContext {
 private final class FakeUnicodeEventPoster: FinalTextCurrentFocusEventPosting {
     private var results: [FinalTextCurrentFocusPostResult]
     private(set) var requestedTexts: [String] = []
+    private(set) var destinationProcessIdentifiers: [pid_t] = []
 
     var callCount: Int { requestedTexts.count }
 
@@ -483,8 +621,12 @@ private final class FakeUnicodeEventPoster: FinalTextCurrentFocusEventPosting {
         self.results = results
     }
 
-    func postUnicodeText(_ text: String) -> FinalTextCurrentFocusPostResult {
+    func postUnicodeText(
+        _ text: String,
+        to processIdentifier: pid_t
+    ) -> FinalTextCurrentFocusPostResult {
         requestedTexts.append(text)
+        destinationProcessIdentifiers.append(processIdentifier)
         guard !results.isEmpty else { return .posted }
         return results.removeFirst()
     }
