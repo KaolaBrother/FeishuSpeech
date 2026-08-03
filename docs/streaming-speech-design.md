@@ -1,19 +1,23 @@
 # Cursor-bound streaming speech design
 
-Status: implemented in issue #26 with automated review/test evidence; credential-bearing Feishu
-and cross-application AX UAT pending.
+Status: implemented in issue #26 with automated review/test evidence; the strict AX destination
+startup gate was superseded after initial UAT; installed Release credential-bearing Feishu and
+cross-application AX UAT remain pending.
 
 ## 1. Outcome
 
 Holding Fn for the existing 0.3-second gate starts a Feishu streaming-recognition interaction.
-While Fn remains held, each recognized hypothesis replaces one provisional text range at the
-cursor that was active when the interaction began. Releasing Fn seals the stream and replaces the
-same range with the final response. The FeishuSpeech overlay reports state only; it does not host a
+When a safe AX range is available, each recognized hypothesis replaces one provisional text range
+at the cursor that was active when the interaction began, and the final replaces the same range.
+If AX cursor/focus capture is unavailable, recording and streaming still proceed; releasing Fn
+delivers a non-empty final at most once to the current focus as a direct Unicode CGEvent after two
+Secure Input and frontmost-PID samples. Successful unbound delivery is clipboard-free and has no
+cursor-position confirmation. The FeishuSpeech overlay reports state only; it does not host a
 transcript preview, editable draft, or send button.
 
 The implementation ports KaolaTerminal's stream transport and bounded-ingress rules, but deliberately
-replaces its preview/review UI with a macOS Accessibility writer bound to the original editable
-control.
+replaces its preview/review UI with an opportunistic macOS Accessibility writer plus a final-only
+current-focus fallback when no AX destination can be established.
 
 ## 2. Evidence and verified boundaries
 
@@ -60,14 +64,17 @@ Release UAT against a real Feishu tenant or real third-party applications.
 
 ### Goals
 
-- Show recognized text in the original target application while the user speaks.
+- Show recognized text in the original target application while the user speaks when verified AX
+  range replacement is supported.
 - Preserve the 0.3-second Fn gate, 60-second maximum hold, multi-display status overlay, sleep/wake
   cleanup, microphone/accessibility permissions, and Keychain credential storage.
 - Never append an opaque partial blindly.
-- Never redirect a late result to a new focus or cursor.
+- Never redirect a partial or captured-destination live write to a new focus or cursor; an unbound
+  interaction may deliver its final once to the current frontmost focus.
 - Keep audio memory and network backpressure bounded.
 - Keep cancellation, reset, and error paths idempotent and generation-safe.
-- Provide a deterministic final-only mode where verified live replacement is unavailable.
+- Provide final-only modes where verified live replacement or AX destination capture is
+  unavailable.
 
 ### Non-goals
 
@@ -106,11 +113,16 @@ FeishuStreamingSession (actor)
 partial / final / cancelled / failed
         |
         +--------------> MainViewModel generation gate
+                                |
+                                +--> unbound final: one direct Unicode event to current focus
 ```
 
-Live partial/final AX writes belong only to `CursorTextSession`. Final-only delivery belongs to the
-captured-PID output adapter after coordinator revalidation. The transport does not know about focus
-or UI, and neither output boundary knows about audio, credentials, or HTTP.
+Live partial/final AX writes belong only to `CursorTextSession`. Captured-target final-only
+delivery belongs to the captured-PID output adapter after coordinator revalidation. When AX
+capture is unavailable, a separate unbound adapter delivers a non-empty final at most once to the
+current focus after double-sampling Secure Input and the frontmost PID. It uses no pasteboard for
+successful delivery and performs no cursor confirmation. The transport does not know about focus
+or UI, and no output boundary knows about audio, credentials, or HTTP.
 
 ## 5. State model
 
@@ -122,7 +134,7 @@ idle
       -> idle/cancelled               Fn released or another modifier/key before 0.3 s
       -> streaming(sessionID)         gate elapsed, target and capture start accepted
           -> sealing(sessionID)       Fn release or 60 s cap
-          -> error                    capture/stream/destination startup failure
+          -> error                    capture/stream/security startup failure
       -> idle                         final applied or fallback completed
 ```
 
@@ -142,7 +154,8 @@ current is a no-op.
 
 ```text
 unavailable
-  | capability probe failed -> finalOnly
+  | safe AX target lacks range support -> finalOnly(captured destination)
+  | AX destination unavailable        -> unboundFinalOnly
   | capability probe passed -> armed(destination, originalSelection)
 
 armed
@@ -236,6 +249,11 @@ failed(StreamFailure)
 
 ### Capability probe
 
+The post-UAT correction supersedes the original rule that a confirmed AX destination was required
+before capture/network startup. AX probing now selects an output capability; failure to capture or
+confirm a cursor/focused element selects unbound final-only output and does not reject recording or
+streaming.
+
 At the transition from `pending` to `streaming`, `CursorTextSession.begin()`:
 
 1. Confirms Accessibility trust and rejects Secure Event Input.
@@ -249,8 +267,9 @@ At the transition from `pending` to `streaming`, `CursorTextSession.begin()`:
 8. Creates an in-memory destination token; it is never persisted or logged with control content.
 
 An affirmatively safe editable target that lacks usable selection/range verification selects
-final-only mode. Security, trust, role/subrole, or editability uncertainty rejects the interaction
-entirely rather than being downgraded.
+captured-target final-only mode. Failure to obtain or confirm an AX destination selects unbound
+final-only mode. An affirmatively detected secure text target or Secure Event Input still rejects
+the interaction before audio/network work; this security rejection is not downgraded.
 
 ### First partial
 
@@ -308,7 +327,9 @@ delete user edits or unrelated content.
 
 ## 9. Final-only fallback
 
-Unsupported editable controls do not receive experimental key-event replacement. Instead:
+Final-only output has two distinct modes.
+
+For a captured non-secure editable control that cannot support verified live replacement:
 
 1. Audio and Feishu requests still stream normally.
 2. The coordinator retains only the latest opaque response in memory.
@@ -322,8 +343,24 @@ Unsupported editable controls do not receive experimental key-event replacement.
 7. If security is no longer affirmatively safe, the app performs neither synthetic input nor
    clipboard recovery.
 
-This mode preserves compatibility without pretending to provide safe live replacement. Secure
-fields are rejected rather than downgraded.
+For an interaction where no AX cursor/focused element can be captured or confirmed:
+
+1. Audio and Feishu requests still stream normally; AX failure is not a startup error.
+2. The coordinator retains opaque partial/final responses without writing partials.
+3. On a non-empty final, it samples Secure Input and the frontmost PID twice.
+4. If both security samples are clear and both PID samples match, it posts the UTF-16 text once as
+   a direct Unicode CGEvent to current focus, without touching the pasteboard.
+5. It does not confirm the current cursor position and does not require the focus to match an
+   original destination, because no such token exists.
+6. Ordinary PID instability or Unicode-event delivery failure copies the exact final for manual
+   recovery. A C0/C1-bearing final follows the same copy-only path.
+7. Secure Event Input prevents delivery without input or clipboard recovery. An affirmatively
+   detected secure target is rejected
+   before this mode is selected.
+
+These modes preserve compatibility without pretending that unbound final delivery has the
+captured-target guarantees of live AX replacement. Secure fields remain fail-closed rather than
+being downgraded. With `autoInsert=false`, neither mode mutates the target or pasteboard.
 
 ## 10. Coordinator and concurrency ownership
 
@@ -354,7 +391,8 @@ and stream events in generation-bound tasks. Cleanup order is:
 - Transcript content never appears in the overlay, menu bar, logs, notifications, or accessibility
   labels owned by FeishuSpeech.
 - `playSound` may retain start/final feedback but must not play once per partial.
-- `autoInsert=true` enables live cursor writing and final-only target fallback.
+- `autoInsert=true` enables opportunistic live cursor writing plus captured-target or unbound
+  final-only fallback.
 - `autoInsert=false` keeps streaming recognition active but discards cursor-writing capability and
   performs no target or pasteboard mutation. Secure target probing remains fail-closed.
 - A target capability warning is per interaction; it does not silently change the saved setting.
@@ -390,9 +428,12 @@ No cursor destination survives the process lifetime or is persisted to UserDefau
 3. **Feishu streaming actor — complete locally**
    - Request models, stream ID generation, explicit serial gate, first-packet token refresh,
      exact-once finish, bounded abort, and sanitized errors are implemented and covered.
-4. **Cursor text session — complete locally**
+4. **Cursor text session and post-UAT fallback — complete locally**
    - Capability probe, captured destination, replace/read-back loop, invalidation, final commit, and
-     final-only security policy are implemented and covered with fake AX clients.
+     captured-target final-only security policy are implemented with fake AX clients. The post-UAT
+     correction also keeps capture/stream startup alive when AX destination capture fails and
+     delivers a non-empty final to current focus at most once through a clipboard-free Unicode
+     event after security/PID stability sampling.
 5. **Coordinator/state migration — complete**
    - Production hot-key work uses streaming/sealing tasks and identity-owned cleanup. Whole-file
      recognition remains compatibility-only and is not a production fallback.
@@ -435,6 +476,7 @@ Test/production custody separation was preserved for the automated implementatio
 - element invalidation and `kAXErrorCannotComplete` before/after mutation;
 - empty final and stream failure preserve last verified partial;
 - secure field rejection and unsupported target final-only selection;
+- AX destination capture/confirmation failure selects unbound fallback instead of blocking startup;
 - late partial/final after commit, invalidation, reset, or new generation writes nothing.
 
 ### Coordinator
@@ -444,6 +486,11 @@ Test/production custody separation was preserved for the automated implementatio
 - new Fn press during sealing is ignored;
 - sleep/wake and manual reset invalidate before cleanup;
 - capture or stream failure cannot leave mic, overlay, writer, or hot-key state active;
+- unbound fallback starts capture/streaming, double-samples Secure Input/frontmost PID, and sends
+  one non-empty final to current focus through direct Unicode input without a captured destination
+  or pasteboard mutation on success;
+- ordinary unbound PID/delivery failure copies once for recovery, while security rejection copies
+  nothing;
 - `autoInsert=false` produces no target writes;
 - logs and feedback never contain recognized text.
 
@@ -464,9 +511,12 @@ Test/production custody separation was preserved for the automated implementatio
 ## 15. Completion boundary
 
 Issue #25 supplied the accepted contract. Issue #26 supplies the production implementation,
-RED-first tests, independent correctness/security review, and documentation docking. The full
-macOS suite records 171 passing tests with no failures or skips; candidate lint diagnostics are a
-strict subset of the recorded baseline diagnostics rather than new issue-26 lint debt.
+RED-first tests, independent correctness/security review, and documentation docking. Initial UAT
+then superseded the strict AX destination startup gate with unbound final-only delivery. The prior
+full macOS suite recorded 171 passing tests with no failures or skips; the correction adds focused
+coordinator regressions, while installed Release verification remains pending. Candidate lint
+diagnostics are a strict subset of the recorded baseline diagnostics rather than new issue-26 lint
+debt.
 
 General-availability closure remains intentionally separate: the owner will self-test the installed
 Release with real Feishu credentials and the live target-application matrix above. Until that UAT

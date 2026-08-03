@@ -13,6 +13,7 @@
 - 新增 `MainViewModelTests` 覆盖 `MonitoringState` 失败映射、恢复清除和 cleanup 订阅释放路径（issues #22/#23/#24）
 
 ### Fixed
+- 根据首轮 UAT 修正过严的 Accessibility 目标门控：无法捕获或确认 AX 光标/焦点元素不再阻塞录音和流式识别；此时仅保留不透明响应，对 Secure Input 与最前台 PID 各采样两次后，通过不接触粘贴板的直接 Unicode CGEvent 把非空 final 向届时焦点最多发送一次，不声称确认光标位置。普通发送/PID 失败和 C0/C1 控制字符改为 copy-only；安全拒绝仍不输入、不复制，`autoInsert=false` 仍为零输出。已捕获目标的机会式实时替换及其 pasteboard/Cmd+V final-only 路径不变（issue #26，取代先前严格目标门控）
 - 睡眠/唤醒、手动重置、权限变化、录音/网络失败和进程清理现在先使流式 generation 与光标所有权失效，再终止入口、录音、网络任务和计时器；迟到事件不能恢复旧会话或写入新的焦点（issue #26）
 - 音频入口按实际排队和待组包字节精确计数，消费后立即复用容量；停止录音会越过真实音频回调队列屏障后再决定是否保留尾包，溢出显式失败而不丢包或乱序（issue #26）
 

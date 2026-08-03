@@ -104,6 +104,14 @@ These are the workflow's tie-breaking axioms, applied in priority order whenever
 - `docs/decisions/` — architecture decision records.
 - `kaola-workflow/ROADMAP.md` — active implementation roadmap.
 
+## Documentation Update Checklist
+
+- Update `README.md` and `CHANGELOG.md` for user-visible behavior changes.
+- Update `docs/api.md` when integration contracts or error outcomes change.
+- Update `docs/architecture.md` and the relevant decision record when data flow or trust boundaries change.
+- Update `docs/README.md` when documentation navigation changes.
+- Record an explicit no-impact reason when none of these surfaces is affected.
+
 ## Maintenance
 
 - Keep this file under 200 lines; move detail to docs or skills.

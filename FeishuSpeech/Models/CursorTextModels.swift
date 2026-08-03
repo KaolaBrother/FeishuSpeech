@@ -88,6 +88,7 @@ nonisolated enum FinalOnlyFallbackDecision: Equatable, Sendable {
 
 nonisolated enum FinalTextInsertionResult: Equatable, Sendable {
     case inserted
+    case securityRejected
     case destinationInvalid
     case deliveryFailed
 }

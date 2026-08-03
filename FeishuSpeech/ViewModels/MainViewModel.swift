@@ -53,6 +53,8 @@ class MainViewModel: ObservableObject {
     private var activeStreamingSession: (any SpeechStreamingSession)?
     private var cursorSession: CursorTextSession?
     private var finalOnlyDestination: CursorDestinationToken?
+    private var usesCurrentFocusFinalOutput = false
+    private var deliveredCurrentFocusFinal = false
     private var latestFinalOnlyValue: String?
     private var consumerTask: Task<Void, Never>?
     private var sealingTask: Task<Void, Never>?
@@ -230,6 +232,10 @@ class MainViewModel: ObservableObject {
         acceptedPacket = false
         stopSoundPlayed = false
 
+        guard !permissionManager.secureInputEnabled else {
+            failStartup(identity: identity, message: "安全输入框不支持语音输入")
+            return
+        }
         guard prepareCursorTarget(identity: identity) else { return }
         guard settings.isConfigured else {
             failStartup(identity: identity, message: "请先配置 App ID 和 Secret")
@@ -266,8 +272,8 @@ class MainViewModel: ObservableObject {
         do {
             capability = try newCursorSession.begin()
         } catch {
-            failStartup(identity: identity, message: "无法确认输入位置")
-            return false
+            configureUnboundCursorFallback(cursorSession: newCursorSession)
+            return true
         }
 
         if let rejectionMessage = configureCursorCapability(
@@ -287,8 +293,8 @@ class MainViewModel: ObservableObject {
         switch capability {
         case .rejected(.secureTarget):
             return "安全输入框不支持语音输入"
-        case .rejected:
-            return "无法确认输入位置"
+        case .rejected(.accessibilityUnavailable):
+            configureUnboundCursorFallback(cursorSession: newCursorSession)
         case .live:
             if settings.autoInsert {
                 status = .streaming
@@ -308,6 +314,15 @@ class MainViewModel: ObservableObject {
             }
         }
         return nil
+    }
+
+    private func configureUnboundCursorFallback(cursorSession newCursorSession: CursorTextSession) {
+        newCursorSession.invalidate()
+        cursorSession = nil
+        usesCurrentFocusFinalOutput = settings.autoInsert
+        deliveredCurrentFocusFinal = false
+        status = .streaming
+        logger.info("Accessibility destination unavailable; using current-focus final output")
     }
 
     private func startStreamingCapture(
@@ -493,6 +508,30 @@ class MainViewModel: ObservableObject {
             )
         } else if let destination = finalOnlyDestination, !contentless {
             routeFinalOnly(text, destination: destination)
+        } else if usesCurrentFocusFinalOutput, !contentless {
+            routeCurrentFocusFinal(text)
+        }
+    }
+
+    private func routeCurrentFocusFinal(_ text: String) {
+        guard settings.autoInsert,
+              !deliveredCurrentFocusFinal,
+              !permissionManager.secureInputEnabled,
+              !isContentless(text) else {
+            return
+        }
+        guard TextInputSimulator.isSafeForAutomaticPaste(text) else {
+            deliveredCurrentFocusFinal = true
+            copyForManualRecovery(text)
+            return
+        }
+
+        deliveredCurrentFocusFinal = true
+        switch finalTextOutput.insertAtCurrentFocusOnce(text) {
+        case .inserted, .securityRejected:
+            break
+        case .deliveryFailed, .destinationInvalid:
+            copyForManualRecovery(text)
         }
     }
 
@@ -609,6 +648,8 @@ class MainViewModel: ObservableObject {
         activeIngress = nil
         activeStreamingSession = nil
         finalOnlyDestination = nil
+        usesCurrentFocusFinalOutput = false
+        deliveredCurrentFocusFinal = false
         latestFinalOnlyValue = nil
         sealStarted = false
         acceptedPacket = false
@@ -659,6 +700,8 @@ class MainViewModel: ObservableObject {
         activeIngress = nil
         activeStreamingSession = nil
         finalOnlyDestination = nil
+        usesCurrentFocusFinalOutput = false
+        deliveredCurrentFocusFinal = false
         latestFinalOnlyValue = nil
         sealStarted = false
         acceptedPacket = false

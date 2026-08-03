@@ -1,4 +1,5 @@
 import AppKit
+import Carbon
 import Foundation
 import UserNotifications
 
@@ -13,6 +14,7 @@ protocol FinalTextOutput: AnyObject {
         destination: CursorDestinationToken,
         validateDestination: () throws -> Bool
     ) -> FinalTextInsertionResult
+    func insertAtCurrentFocusOnce(_ text: String) -> FinalTextInsertionResult
     func copyForManualRecovery(_ text: String)
 }
 
@@ -20,6 +22,9 @@ protocol FinalTextOutput: AnyObject {
 final class SystemFinalTextOutput: FinalTextOutput {
     private let pasteboardWriter: FinalTextPasteboardWriting
     private let keyEventPoster: FinalTextKeyEventPosting
+    private let currentFocusEventPoster: FinalTextCurrentFocusEventPosting
+    private let secureInputStateProvider: SecureInputStateProviding
+    private let frontmostProcessProvider: FrontmostProcessProviding
 
     init(
         pasteboardWriter: FinalTextPasteboardWriting,
@@ -27,6 +32,23 @@ final class SystemFinalTextOutput: FinalTextOutput {
     ) {
         self.pasteboardWriter = pasteboardWriter
         self.keyEventPoster = keyEventPoster
+        currentFocusEventPoster = SystemFinalTextCurrentFocusEventPoster()
+        secureInputStateProvider = SystemSecureInputStateProvider()
+        frontmostProcessProvider = SystemFrontmostProcessProvider()
+    }
+
+    init(
+        pasteboardWriter: FinalTextPasteboardWriting,
+        keyEventPoster: FinalTextKeyEventPosting,
+        currentFocusEventPoster: FinalTextCurrentFocusEventPosting,
+        secureInputStateProvider: SecureInputStateProviding,
+        frontmostProcessProvider: FrontmostProcessProviding
+    ) {
+        self.pasteboardWriter = pasteboardWriter
+        self.keyEventPoster = keyEventPoster
+        self.currentFocusEventPoster = currentFocusEventPoster
+        self.secureInputStateProvider = secureInputStateProvider
+        self.frontmostProcessProvider = frontmostProcessProvider
     }
 
     convenience init() {
@@ -60,6 +82,33 @@ final class SystemFinalTextOutput: FinalTextOutput {
         }
     }
 
+    func insertAtCurrentFocusOnce(_ text: String) -> FinalTextInsertionResult {
+        guard TextInputSimulator.isSafeForAutomaticPaste(text) else {
+            return .deliveryFailed
+        }
+
+        let firstSecureInputSample = secureInputStateProvider.isSecureInputEnabled()
+        let firstProcessIdentifier = frontmostProcessProvider.frontmostProcessIdentifier()
+        let secondSecureInputSample = secureInputStateProvider.isSecureInputEnabled()
+        let secondProcessIdentifier = frontmostProcessProvider.frontmostProcessIdentifier()
+
+        guard !firstSecureInputSample, !secondSecureInputSample else {
+            return .securityRejected
+        }
+        guard let firstProcessIdentifier,
+              firstProcessIdentifier == secondProcessIdentifier else {
+            return .destinationInvalid
+        }
+        switch currentFocusEventPoster.postUnicodeText(text) {
+        case .posted:
+            return .inserted
+        case .securityRejected:
+            return .securityRejected
+        case .deliveryFailed:
+            return .deliveryFailed
+        }
+    }
+
     func copyForManualRecovery(_ text: String) {
         TextInputSimulator.copyForManualRecovery(text)
     }
@@ -73,6 +122,27 @@ protocol FinalTextPasteboardWriting: AnyObject {
 @MainActor
 protocol FinalTextKeyEventPosting: AnyObject {
     func postCommandV(to processIdentifier: pid_t) -> Bool
+}
+
+@MainActor
+protocol FinalTextCurrentFocusEventPosting: AnyObject {
+    func postUnicodeText(_ text: String) -> FinalTextCurrentFocusPostResult
+}
+
+nonisolated enum FinalTextCurrentFocusPostResult: Equatable, Sendable {
+    case posted
+    case securityRejected
+    case deliveryFailed
+}
+
+@MainActor
+protocol SecureInputStateProviding: AnyObject {
+    func isSecureInputEnabled() -> Bool
+}
+
+@MainActor
+protocol FrontmostProcessProviding: AnyObject {
+    func frontmostProcessIdentifier() -> pid_t?
 }
 
 @MainActor
@@ -97,6 +167,36 @@ private final class SystemFinalTextKeyEventPoster: FinalTextKeyEventPosting {
         keyDown.postToPid(processIdentifier)
         keyUp.postToPid(processIdentifier)
         return true
+    }
+}
+
+@MainActor
+private final class SystemFinalTextCurrentFocusEventPoster: FinalTextCurrentFocusEventPosting {
+    func postUnicodeText(_ text: String) -> FinalTextCurrentFocusPostResult {
+        let utf16 = Array(text.utf16)
+        guard !utf16.isEmpty,
+              let source = CGEventSource(stateID: .hidSystemState),
+              let event = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true) else {
+            return .deliveryFailed
+        }
+        event.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: utf16)
+        guard !IsSecureEventInputEnabled() else { return .securityRejected }
+        event.post(tap: .cghidEventTap)
+        return .posted
+    }
+}
+
+@MainActor
+private final class SystemSecureInputStateProvider: SecureInputStateProviding {
+    func isSecureInputEnabled() -> Bool {
+        IsSecureEventInputEnabled()
+    }
+}
+
+@MainActor
+private final class SystemFrontmostProcessProvider: FrontmostProcessProviding {
+    func frontmostProcessIdentifier() -> pid_t? {
+        NSWorkspace.shared.frontmostApplication?.processIdentifier
     }
 }
 

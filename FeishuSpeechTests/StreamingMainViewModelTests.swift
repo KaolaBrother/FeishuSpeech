@@ -30,8 +30,131 @@ final class StreamingMainViewModelTests: XCTestCase {
         let makeSessionCallCount = await context.provider.makeSessionCallCount
         XCTAssertEqual(makeSessionCallCount, 0)
         XCTAssertEqual(context.output.insertedTexts, [])
+        XCTAssertEqual(context.output.currentFocusInsertedTexts, [])
         XCTAssertEqual(context.output.copiedTexts, [])
         XCTAssertFalse(containsTranscript(context.viewModel, transcript: "PRIVATE_TRANSCRIPT"))
+    }
+
+    func test_axCaptureFailureFallsBackWithoutBlockingCaptureOrStreamingStartup() async {
+        for (offset, error) in [
+            AccessibilityClientError.noFocusedElement,
+            .cannotComplete
+        ].enumerated() {
+            let context = makeContext(capability: .captureThrows(error))
+            let identity = StreamingSessionIdentity(generation: UInt64(180 + offset))
+
+            context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+            await settle(iterations: 50)
+
+            XCTAssertEqual(
+                context.recorder.startStreamingCallCount,
+                1,
+                "\(error) must not block audio capture startup"
+            )
+            let makeSessionCallCount = await context.provider.makeSessionCallCount
+            XCTAssertEqual(
+                makeSessionCallCount,
+                1,
+                "\(error) must not block streaming provider startup"
+            )
+            XCTAssertFalse(
+                visibleFeedback(context.viewModel).contains("无法确认输入位置"),
+                "an unavailable AX destination is an unbound fallback, not a startup error"
+            )
+        }
+    }
+
+    func test_accessibilityUnavailableResultFallsBackWithoutBlockingStartup() async {
+        let context = makeContext(capability: .accessibilityUnavailable)
+        let identity = StreamingSessionIdentity(generation: 182)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await settle(iterations: 50)
+
+        XCTAssertEqual(context.recorder.startStreamingCallCount, 1)
+        let makeSessionCallCount = await context.provider.makeSessionCallCount
+        XCTAssertEqual(makeSessionCallCount, 1)
+        XCTAssertFalse(visibleFeedback(context.viewModel).contains("无法确认输入位置"))
+    }
+
+    func test_unboundFallbackDeliversNonEmptyFinalToCurrentFocusExactlyOnce() async {
+        let context = makeContext(
+            capability: .accessibilityUnavailable,
+            packetEvents: [.partial("PRIVATE_PARTIAL")],
+            finishEvent: .final("PRIVATE_FINAL")
+        )
+        let identity = StreamingSessionIdentity(generation: 183)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await settle(iterations: 50)
+        XCTAssertEqual(
+            context.recorder.startStreamingCallCount,
+            1,
+            "unbound fallback must reach capture startup before final delivery can be exercised"
+        )
+        guard context.recorder.startStreamingCallCount == 1 else { return }
+
+        context.recorder.emit(Data(repeating: 0x56, count: 6_400))
+        await waitUntil { await context.session.sendCallCount == 1 }
+        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        await waitUntil { await context.session.finishCallCount == 1 }
+
+        XCTAssertEqual(context.output.currentFocusInsertedTexts, ["PRIVATE_FINAL"])
+        XCTAssertEqual(context.output.insertedTexts, [])
+        XCTAssertEqual(context.output.copiedTexts, [])
+        XCTAssertEqual(context.recorder.stopStreamingCallCount, 1)
+    }
+
+    func test_unboundCurrentFocusDeliveryFailureAttemptsOnceThenCopiesOnceWithFixedFeedback() async {
+        let transcript = "PRIVATE_UNBOUND_FINAL"
+        let context = makeContext(
+            capability: .accessibilityUnavailable,
+            packetEvents: [.partial("PRIVATE_PARTIAL")],
+            finishEvent: .final(transcript)
+        )
+        context.output.currentFocusInsertionResult = .deliveryFailed
+        let identity = StreamingSessionIdentity(generation: 184)
+
+        await runOnePacketInteraction(context, identity: identity)
+        context.viewModel.handleStreamingEventForTesting(
+            .final(transcript),
+            identity: identity
+        )
+        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        await waitUntil { context.viewModel.status == .idle }
+
+        XCTAssertEqual(context.output.currentFocusAttemptedTexts, [transcript])
+        XCTAssertEqual(context.output.currentFocusInsertedTexts, [])
+        XCTAssertEqual(context.output.copiedTexts, [transcript])
+        XCTAssertEqual(context.output.syntheticInputCallCount, 0)
+        XCTAssertEqual(context.overlayPresenter.lastCompletionFeedback, .manualRecoveryCopied)
+        XCTAssertFalse(
+            context.overlayPresenter.visibleStatus?.text.contains(transcript) == true,
+            "recovery feedback must remain fixed and transcript-free"
+        )
+    }
+
+    func test_unboundCurrentFocusSecurityRejectionDoesNotCopyOrPostSyntheticInput() async {
+        let transcript = "PRIVATE_SECURE_FINAL"
+        let context = makeContext(
+            capability: .accessibilityUnavailable,
+            packetEvents: [.partial("PRIVATE_PARTIAL")],
+            finishEvent: .final(transcript)
+        )
+        context.output.currentFocusInsertionResult = .securityRejected
+        let identity = StreamingSessionIdentity(generation: 185)
+
+        await runOnePacketInteraction(context, identity: identity)
+        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        await waitUntil { context.viewModel.status == .idle }
+
+        XCTAssertEqual(context.output.currentFocusAttemptedTexts, [transcript])
+        XCTAssertEqual(context.output.currentFocusInsertedTexts, [])
+        XCTAssertEqual(context.output.copiedTexts, [])
+        XCTAssertEqual(context.output.syntheticInputCallCount, 0)
+        XCTAssertNotEqual(context.overlayPresenter.lastCompletionFeedback, .manualRecoveryCopied)
     }
 
     func test_liveModeReplacesPartialAndFinalOnCapturedElementOnly() async throws {
@@ -535,8 +658,11 @@ final class StreamingMainViewModelTests: XCTestCase {
     }
 
     private func containsTranscript(_ viewModel: MainViewModel, transcript: String) -> Bool {
-        let surface = String(describing: viewModel.status) + (viewModel.overlayMessage ?? "")
-        return surface.contains(transcript)
+        visibleFeedback(viewModel).contains(transcript)
+    }
+
+    private func visibleFeedback(_ viewModel: MainViewModel) -> String {
+        String(describing: viewModel.status) + viewModel.status.text + (viewModel.overlayMessage ?? "")
     }
 
     private func assertContainsFixedFeedback(
@@ -812,6 +938,8 @@ private final class CoordinatorAccessibilityClient: AccessibilityClient {
         case live
         case finalOnly
         case secureRejected
+        case accessibilityUnavailable
+        case captureThrows(AccessibilityClientError)
     }
 
     private let capability: Capability
@@ -855,6 +983,10 @@ private final class CoordinatorAccessibilityClient: AccessibilityClient {
             return .finalOnly(captured)
         case .secureRejected:
             return .rejected(.secureTarget)
+        case .accessibilityUnavailable:
+            return .rejected(.accessibilityUnavailable)
+        case .captureThrows(let error):
+            throw error
         }
     }
 
@@ -899,10 +1031,13 @@ private final class CoordinatorAccessibilityClient: AccessibilityClient {
 @MainActor
 private final class CoordinatorFinalTextOutput: FinalTextOutput {
     private(set) var insertedTexts: [String] = []
+    private(set) var currentFocusAttemptedTexts: [String] = []
+    private(set) var currentFocusInsertedTexts: [String] = []
     private(set) var copiedTexts: [String] = []
     private(set) var syntheticInputCallCount = 0
     private(set) var destinationProcessIdentifiers: [pid_t] = []
     var onInsertOnce: (() -> Void)?
+    var currentFocusInsertionResult: FinalTextInsertionResult = .inserted
 
     func insertOnce(
         _ text: String,
@@ -934,5 +1069,14 @@ private final class CoordinatorFinalTextOutput: FinalTextOutput {
 
     func copyForManualRecovery(_ text: String) {
         copiedTexts.append(text)
+    }
+
+    func insertAtCurrentFocusOnce(_ text: String) -> FinalTextInsertionResult {
+        currentFocusAttemptedTexts.append(text)
+        if currentFocusInsertionResult == .inserted {
+            currentFocusInsertedTexts.append(text)
+            syntheticInputCallCount += 1
+        }
+        return currentFocusInsertionResult
     }
 }

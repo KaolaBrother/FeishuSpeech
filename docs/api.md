@@ -79,6 +79,10 @@ behind credential-bearing UAT.
 
 ### Internal cursor-writer interface
 
+Post-UAT refinement: the earlier strict destination gate is superseded. Recognition startup does
+not require a successfully captured Accessibility cursor or focused element. AX range replacement
+is used opportunistically where the target exposes the required safe, verifiable operations.
+
 `CursorTextSession` opens one destination token containing the interaction generation,
 original PID, original focused `AXUIElement`, and original selected-text range. Live mode requires
 settable selected-text and selected-range attributes plus string-for-range verification.
@@ -89,15 +93,24 @@ owned range, and exact prior text. Accessibility-returned ranges define ownershi
 `String.count` does not. Any mismatch invalidates the writer permanently for that hold, and late
 events write nothing.
 
-Unsupported editable targets use final-only mode and may post one process-targeted Cmd+V only after
-the captured PID, focused element, and security state are validated; the sink validates again after
-posting. A stale/uncertain destination or final value containing C0/C1 control characters uses
-copy-only manual recovery with fixed two-second transcript-free feedback. A security rejection
-performs no synthetic input and no clipboard recovery. Per-partial pasteboard writes and synthetic
-deletion/navigation keys are outside the contract.
+When a non-secure destination was captured but cannot support live range replacement, final-only
+mode may post one process-targeted Cmd+V only after the captured PID, focused element, and security
+state are validated; the sink validates again after posting. A stale/uncertain captured
+destination uses copy-only manual recovery.
+
+When AX destination capture or confirmation is unavailable, the coordinator instead retains
+opaque responses and, for a non-empty final, samples Secure Input and the frontmost PID twice
+before posting one direct Unicode CGEvent to current focus. Successful unbound delivery never
+touches the pasteboard. This fallback does not confirm a cursor position and does not require the
+current focus to match an originally captured destination. It never writes partials. Ordinary
+Unicode-event or PID-stability failure and C0/C1 control characters use copy-only recovery. An
+affirmatively detected secure target or Secure Event Input performs no synthetic input and no
+clipboard recovery. Per-partial pasteboard writes and synthetic deletion/navigation keys are
+outside the contract.
 
 `autoInsert=false` keeps recognition active but discards cursor-writing capability and produces no
-target or pasteboard mutation. Secure target probing still fails closed before audio/network work.
+target or pasteboard mutation. Secure targets and Secure Event Input still fail closed before
+audio/network work when affirmatively detected.
 
 See [D-25-01](decisions/D-25-01.md) and the
 [full design](streaming-speech-design.md) for state, lifecycle, failure, fallback, privacy, and test
@@ -188,8 +201,10 @@ cancelled work into additional network attempts.
 
 `FeishuSpeechTests` is wired into the Xcode project. Issue #26 adds automated coverage for exact
 audio ingress accounting, recorder sealing barriers, streaming action/sequence/token/cancel races,
-cursor replacement, secure final-only output, lifecycle generation, settings, and fixed completion
-feedback. The independent full macOS run reports 171 passed, 0 failed, and 0 skipped.
+cursor replacement, captured and unbound final-only output, lifecycle generation, settings, and
+fixed completion feedback. The independent pre-correction full macOS run reports 171 passed, 0
+failed, and 0 skipped; focused post-UAT regressions were added for AX-unavailable startup and
+exact-once current-focus final delivery.
 
 `AudioRecorderRecoveryTests.swift` remains excluded from the test target because it is a recorded
 pre-existing AudioRecorder-owned blocker outside the #11/#12/#21 API recovery bundle.

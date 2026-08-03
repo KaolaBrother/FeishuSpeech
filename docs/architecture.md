@@ -12,7 +12,8 @@ HotKeyService
   -> MainViewModel (@MainActor generation owner)
       -> streaming AudioRecorder -> byte-bounded PCM ingress
           -> FeishuStreamingSession actor -> partial/final events
-      -> CursorTextSession (@MainActor) -> original AX editable element
+      -> optional CursorTextSession (@MainActor) -> original AX editable element
+      -> unbound final output -> current frontmost focus when AX capture is unavailable
 ```
 
 The production hot-key state is `idle -> pending -> streaming -> sealing -> idle | error`.
@@ -57,6 +58,11 @@ Release UAT remains pending.
 
 ### Cursor-writing boundary
 
+The post-UAT correction supersedes the original strict destination startup gate. Failure to
+capture or confirm an Accessibility cursor/focused element no longer blocks audio capture or the
+Feishu stream. AX-backed live replacement is an opportunistic enhancement, not a prerequisite for
+recognition.
+
 `CursorTextSession` captures the original frontmost PID, focused `AXUIElement`, selected-text
 range, and session generation once. A live session requires settable selected-text/range
 attributes plus range read-back support. Each non-empty partial replaces one app-owned provisional
@@ -73,13 +79,21 @@ selection, caret, text, element, or generation mismatch permanently invalidates 
 Late events are dropped and are never redirected to a newly focused control.
 
 The app does not use per-partial clipboard writes, synthetic Backspace, or Shift+Arrow selection.
-Unsupported editable elements use a clearly reported final-only path: the stream retains only the
-latest opaque response in memory and posts one process-targeted Cmd+V only after the captured PID,
-focused element, and security state are revalidated before delivery; the output sink validates
-again after posting. A stale/uncertain target or action-capable C0/C1 control character receives no
-further synthetic input and uses copy-only manual recovery with fixed two-second feedback. A
-security rejection receives neither paste nor recovery copy. Secure Event Input and secure text
-fields are rejected rather than downgraded.
+There are two final-only paths. If a safe editable element was captured but lacks verified range
+replacement, the stream retains only the latest opaque response and posts one process-targeted
+Cmd+V only after the captured PID, focused element, and security state are revalidated; the sink
+validates again after posting. A stale/uncertain captured target uses copy-only manual recovery.
+If no AX destination can be captured or confirmed, the stream still starts, retains opaque
+responses, samples Secure Input and the frontmost PID twice, and posts a non-empty final at most
+once to the current focus as a direct Unicode CGEvent. Successful unbound delivery is clipboard-free
+and performs no cursor-position or original-destination confirmation. Ordinary event-posting or
+PID-stability failure uses copy-only manual recovery; a security rejection performs no input and
+no clipboard mutation.
+
+Both paths reject automatic paste for action-capable C0/C1 control characters and use copy-only
+manual recovery instead. An affirmatively detected secure target or Secure Event Input is
+fail-closed and receives neither paste nor recovery copy. `autoInsert=false` produces no target or
+pasteboard mutation.
 
 ### Finalization and privacy
 
@@ -267,11 +281,16 @@ The legacy compatibility helper in `TextInputSimulator` writes a final string to
 The issue-26 final-only output instead:
 
 - accepts only text without C0, DEL, or C1 control scalars for automatic delivery;
-- targets the captured process with `CGEvent.postToPid` and validates the captured element and
-  security state before and after delivery;
-- copies the exact final value without posting a key event when non-security delivery is stale or
-  uncertain, then shows fixed two-second transcript-free feedback;
-- performs no pasteboard recovery when current security cannot be proven safe.
+- when a destination token exists, targets that captured process with `CGEvent.postToPid` and
+  validates the captured element and security state before and after delivery;
+- when AX capture/confirmation is unavailable, samples Secure Input and the frontmost PID twice,
+  then posts the final once to current focus as a direct Unicode CGEvent without using the
+  pasteboard or confirming cursor position;
+- copies the exact final value without posting a key event when a captured non-security delivery
+  is stale/uncertain, when unbound PID/delivery fails ordinarily, or when the value contains
+  control characters, then shows fixed two-second transcript-free feedback;
+- performs no pasteboard recovery for an affirmatively detected secure target or Secure Event
+  Input.
 
 The older compatibility helper retains these clipboard-restore mechanics:
 
