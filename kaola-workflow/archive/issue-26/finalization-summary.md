@@ -50,3 +50,10 @@ The run-gap scanner observed no gap classes; no follow-up issue was fabricated.
 - GitHub issue #26 remains open and claimed work is released after sink; the installed Release is for this UAT.
 
 ## Status: ARCHIVED AFTER FINAL GIT GATE
+
+## Sink Findings
+
+post_rebase_tests: skipped
+
+archived_paths:
+- kaola-workflow/archive/issue-26/finalization-summary.md
