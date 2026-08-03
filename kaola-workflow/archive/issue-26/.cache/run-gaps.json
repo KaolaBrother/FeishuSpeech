@@ -1,0 +1,20 @@
+{
+  "project": "issue-26",
+  "sweptClasses": [
+    {
+      "reasonClass": "manual:pre-existing-security",
+      "sample": "P1 legacy pasteboard restore can overwrite newer pasteboard ownership",
+      "count": 1
+    },
+    {
+      "reasonClass": "manual:pre-existing-security",
+      "sample": "P2 cached tenant tokens are not keyed to configured credentials",
+      "count": 1
+    },
+    {
+      "reasonClass": "manual:acceptance",
+      "sample": "credential-bearing Feishu and broad cross-application AX UAT awaits owner self-test of the installed Release",
+      "count": 1
+    }
+  ]
+}
