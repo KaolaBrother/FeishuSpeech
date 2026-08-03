@@ -62,3 +62,10 @@ DOCKED. See `.cache/doc-updater.md` and `.cache/doc-docking.md`.
 - Do not claim live end-to-end success before owner UAT.
 
 ## Status: ARCHIVED AFTER FINAL GIT GATE
+
+## Sink Findings
+
+post_rebase_tests: skipped
+
+archived_paths:
+- kaola-workflow/archive/issue-26/finalization-summary.md
