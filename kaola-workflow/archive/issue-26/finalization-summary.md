@@ -50,3 +50,10 @@ No run-discovered defect requires a new follow-up issue. Real-tenant recognition
 - Do not claim end-to-end live recognition success until that owner UAT is recorded.
 
 ## Status: ARCHIVED AFTER FINAL GIT GATE
+
+## Sink Findings
+
+post_rebase_tests: skipped
+
+archived_paths:
+- kaola-workflow/archive/issue-26/finalization-summary.md
