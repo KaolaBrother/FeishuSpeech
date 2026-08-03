@@ -15,6 +15,73 @@ This page documents the Feishu integration contract implemented by
 Speech requests use `Authorization: Bearer <tenant_access_token>`,
 `format: "pcm"`, and `engine_type: "16k_auto"`.
 
+## Planned streaming recognition contract (issue #25)
+
+Issue #25 defines the future production contract; the current Swift implementation still uses
+`file_recognize`. The accepted design moves production recognition to:
+
+`POST /open-apis/speech_to_text/v1/speech/stream_recognize`
+
+The official API describes chunked real-time recognition and recommends 100–200 ms audio
+fragments. Requests retain bearer authentication and Base64 PCM JSON with `format: "pcm"` and
+`engine_type: "16k_auto"`.
+
+### Internal stream interface
+
+The planned `SpeechStreamingSession` exposes serial async operations equivalent to:
+
+```swift
+func sendAudioPacket(_ pcm16: Data) async throws -> SpeechStreamEvent
+func finish() async throws -> SpeechStreamEvent
+func cancel() async
+```
+
+Its typed events are `partial(String)`, `final(String)`, `cancelled`, and
+`failed(StreamFailure)`. No raw Feishu response body or backend message crosses this boundary.
+
+Each interaction owns a 16-character lowercase-letter/digit/underscore `stream_id`. Accepted
+requests use monotonically increasing `sequence_id` values beginning at zero:
+
+| Action | Meaning | Audio |
+|---:|---|---|
+| 1 | open with first packet | non-empty PCM |
+| 0 | continue | non-empty PCM |
+| 2 | finish normally, exactly once | empty |
+| 3 | best-effort active cancellation, at most once | empty |
+
+Requests are strictly serial. A known invalid token may refresh and retry the same action-1 packet
+and sequence once before any packet is accepted. An established stream is never replayed and does
+not fall back to `file_recognize` or the legacy three-attempt whole-file retry path.
+
+Audio ingress emits ordered 6,400-byte elements (about 200 ms at 16 kHz mono Int16) and is bounded
+at 1,920,000 bytes / 300 elements for the 60-second maximum. An established stream's non-empty
+seal tail may pad to the 3,200-byte 100 ms minimum. Overflow is a typed terminal failure; audio is
+not dropped or reordered.
+
+Feishu does not define the semantic shape of intermediate `recognition_text`. Every partial is
+therefore the complete opaque replacement state, never an appendable delta. A non-empty action-2
+response is the final authority.
+
+### Internal cursor-writer interface
+
+The planned cursor writer opens one destination token containing the interaction generation,
+original PID, original focused `AXUIElement`, and original selected-text range. Live mode requires
+settable selected-text and selected-range attributes plus string-for-range verification.
+
+Every update replaces the complete app-owned provisional range on that captured element. Before
+and after a mutation, the writer validates generation, frontmost PID, focused element, caret,
+owned range, and exact prior text. Accessibility-returned ranges define ownership; Swift
+`String.count` does not. Any mismatch invalidates the writer permanently for that hold, and late
+events write nothing.
+
+Unsupported editable targets use final-only mode and may call `TextInputSimulator` once only after
+the same PID and focused element are revalidated. Secure fields and Secure Event Input are rejected.
+Per-partial pasteboard writes and synthetic deletion/navigation keys are outside the contract.
+
+See [D-25-01](decisions/D-25-01.md) and the
+[full design](streaming-speech-design.md) for state, lifecycle, failure, fallback, privacy, and test
+requirements.
+
 ## Credential storage
 
 The Feishu App ID and App Secret are runtime `AppSettings` values, but they are

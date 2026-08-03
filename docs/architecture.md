@@ -2,6 +2,82 @@
 
 Document system boundaries, major components, data flow, and deployment shape.
 
+## Planned cursor-bound streaming speech architecture (issue #25)
+
+Issue #25 accepts the design in `docs/decisions/D-25-01.md` and
+`docs/streaming-speech-design.md`; it does not implement it. The production architecture will move
+from whole-file capture followed by one paste to a generation-bound streaming pipeline:
+
+```text
+HotKeyService
+  -> MainViewModel (@MainActor generation owner)
+      -> streaming AudioRecorder -> byte-bounded PCM ingress
+          -> FeishuStreamingSession actor -> partial/final events
+      -> CursorTextSession (@MainActor) -> original AX editable element
+```
+
+The hot-key state becomes `idle -> pending -> streaming -> sealing -> idle | error`.
+`pending` retains the 0.3-second gate. `streaming` owns one recorder, Feishu stream, and optional
+cursor writer. Fn release or the 60-second cap enters `sealing`, closes capture, flushes at most one
+audio tail, emits one normal finish, and waits for the final response. A new hold cannot start while
+sealing. Reset, sleep/wake, cancellation, or failure advances the session generation before cleanup
+so late callbacks are inert.
+
+### Streaming audio boundary
+
+Converted 16 kHz mono signed Int16 PCM is coalesced in capture order into 6,400-byte elements
+(about 200 ms) before entering a non-blocking async stream. The retained 60-second cap is
+1,920,000 bytes / 300 elements. This is a byte/duration bound, not a raw callback-count bound.
+An established stream may pad its final non-empty tail to the 3,200-byte (100 ms) minimum.
+Overflow fails the current stream explicitly; the pipeline never drops, reorders, replays, or sends
+PCM packets in parallel.
+
+### Streaming transport boundary
+
+`FeishuStreamingSession` is an actor that owns stream ID, cached token snapshot, sequence number,
+first-packet acknowledgement, terminal intent, active request, and completion state. It serializes
+`action=1` open, `action=0` continuation, `action=2` finish, and bounded best-effort `action=3`
+abort requests. A known invalid token may refresh only before the first packet is accepted.
+An established stream has no whole-file fallback or whole-audio retry.
+
+Intermediate `recognition_text` is treated as opaque replacement state because Feishu does not
+document whether it is delta, cumulative, stabilized, or revisable.
+
+### Cursor-writing boundary
+
+`CursorTextSession` captures the original frontmost PID, focused `AXUIElement`, selected-text
+range, and session generation once. A live session requires settable selected-text/range
+attributes plus range read-back support. Each non-empty partial replaces one app-owned provisional
+range on the captured element:
+
+1. verify generation, process, focused element, caret, and previous range text;
+2. select the owned range;
+3. set the complete new partial as selected text;
+4. read back the resulting caret and text before updating ownership.
+
+The owned range comes from Accessibility's returned ranges, not Swift character counts. Duplicate
+partials do nothing; shorter or revised partials replace the complete prior range. Any focus,
+selection, caret, text, element, or generation mismatch permanently invalidates that writer.
+Late events are dropped and are never redirected to a newly focused control.
+
+The app does not use per-partial clipboard writes, synthetic Backspace, or Shift+Arrow selection.
+Unsupported editable elements use a clearly reported final-only path: the stream retains only the
+latest opaque response in memory and inserts once through the existing pasteboard path only if the
+same target remains focused. A stale fallback target receives no synthetic input. Secure Event
+Input and secure text fields are rejected rather than downgraded.
+
+### Finalization and privacy
+
+A non-empty final response replaces the verified provisional range and releases ownership without
+synthesizing Return. Empty final or stream failure preserves a last verified visible partial rather
+than risk deleting user content after ownership becomes uncertain. A failure before the first
+write causes no target mutation.
+
+The overlay remains status-only; target applications are the editing surface. Logs may include
+typed state/failure values, generations, sequence numbers, and byte counts, but never transcript
+text, audio, credentials/tokens, stream IDs, focused-control contents, application/window titles,
+or clipboard payloads.
+
 ## AudioRecorder — session lifecycle and recovery
 
 `AudioRecorder` wraps `AVCaptureSession` with a `forceCleanup()` recovery contract (issue #1,
