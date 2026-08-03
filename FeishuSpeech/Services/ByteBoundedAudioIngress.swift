@@ -15,8 +15,14 @@ nonisolated final class ByteBoundedAudioIngress: @unchecked Sendable {
         storage.hasEmittedFullPacket
     }
 
-    init(configuration: AudioIngressConfiguration) {
-        let storage = Storage(configuration: configuration)
+    init(
+        configuration: AudioIngressConfiguration,
+        retainsDeliveredPacketsForReplay: Bool = false
+    ) {
+        let storage = Storage(
+            configuration: configuration,
+            retainsDeliveredPacketsForReplay: retainsDeliveredPacketsForReplay
+        )
         self.storage = storage
         stream = AsyncThrowingStream(
             unfolding: {
@@ -52,17 +58,29 @@ private extension ByteBoundedAudioIngress {
             let continuation: CheckedContinuation<Data?, Error>
         }
 
+        private struct BufferedPacket {
+            let data: Data
+            let capturedByteCount: Int
+            let chargedByteCount: Int
+        }
+
         private let configuration: AudioIngressConfiguration
+        private let retainsDeliveredPacketsForReplay: Bool
         private let lock = NSLock()
-        private var queuedPackets: [Data] = []
+        private var queuedPackets: [BufferedPacket] = []
         private var waiters: [Waiter] = []
         private var pendingAudio = Data()
         private var bufferedByteCount = 0
+        private var retainedDeliveredByteCount = 0
         private var hasEmittedFullPacketStorage = false
         private var terminalState = TerminalState.open
 
-        init(configuration: AudioIngressConfiguration) {
+        init(
+            configuration: AudioIngressConfiguration,
+            retainsDeliveredPacketsForReplay: Bool
+        ) {
             self.configuration = configuration
+            self.retainsDeliveredPacketsForReplay = retainsDeliveredPacketsForReplay
         }
 
         var hasEmittedFullPacket: Bool {
@@ -97,7 +115,11 @@ private extension ByteBoundedAudioIngress {
                 if pendingAudio.count == configuration.packetByteCount {
                     let packet = pendingAudio
                     pendingAudio.removeAll(keepingCapacity: true)
-                    if let error = enqueueLocked(packet, isFullPacket: true) {
+                    if let error = enqueueLocked(
+                        packet,
+                        capturedByteCount: packet.count,
+                        isFullPacket: true
+                    ) {
                         return error
                     }
                 }
@@ -111,6 +133,7 @@ private extension ByteBoundedAudioIngress {
             guard case .open = terminalState else { return }
 
             if streamEstablished, !pendingAudio.isEmpty {
+                let capturedByteCount = pendingAudio.count
                 var tail = pendingAudio
                 pendingAudio.removeAll(keepingCapacity: false)
                 if tail.count < configuration.minimumTailByteCount {
@@ -121,7 +144,11 @@ private extension ByteBoundedAudioIngress {
                         )
                     )
                 }
-                guard enqueueLocked(tail, isFullPacket: false) == nil else { return }
+                guard enqueueLocked(
+                    tail,
+                    capturedByteCount: capturedByteCount,
+                    isFullPacket: false
+                ) == nil else { return }
             }
 
             pendingAudio.removeAll(keepingCapacity: false)
@@ -150,14 +177,18 @@ private extension ByteBoundedAudioIngress {
         }
 
         private var currentBufferedByteCount: Int {
-            bufferedByteCount + pendingAudio.count
+            retainedDeliveredByteCount + bufferedByteCount + pendingAudio.count
         }
 
         private func enqueueLocked(
             _ packet: Data,
+            capturedByteCount: Int,
             isFullPacket: Bool
         ) -> AudioIngressError? {
-            guard currentBufferedByteCount + packet.count
+            let chargedByteCount = retainsDeliveredPacketsForReplay
+                ? capturedByteCount
+                : packet.count
+            guard currentBufferedByteCount + chargedByteCount
                     <= configuration.maximumBufferedByteCount else {
                 terminateLocked(with: .ingressOverflow)
                 return .ingressOverflow
@@ -168,10 +199,19 @@ private extension ByteBoundedAudioIngress {
             }
 
             if waiters.isEmpty {
-                queuedPackets.append(packet)
-                bufferedByteCount += packet.count
+                queuedPackets.append(
+                    BufferedPacket(
+                        data: packet,
+                        capturedByteCount: capturedByteCount,
+                        chargedByteCount: chargedByteCount
+                    )
+                )
+                bufferedByteCount += chargedByteCount
             } else {
                 let waiter = waiters.removeFirst()
+                if retainsDeliveredPacketsForReplay {
+                    retainedDeliveredByteCount += capturedByteCount
+                }
                 waiter.continuation.resume(returning: packet)
             }
             return nil
@@ -191,9 +231,12 @@ private extension ByteBoundedAudioIngress {
 
             if !queuedPackets.isEmpty {
                 let packet = queuedPackets.removeFirst()
-                bufferedByteCount -= packet.count
+                bufferedByteCount -= packet.chargedByteCount
+                if retainsDeliveredPacketsForReplay {
+                    retainedDeliveredByteCount += packet.capturedByteCount
+                }
                 lock.unlock()
-                continuation.resume(returning: packet)
+                continuation.resume(returning: packet.data)
                 return
             }
 

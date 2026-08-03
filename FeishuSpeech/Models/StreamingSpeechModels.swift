@@ -10,6 +10,26 @@ nonisolated struct StreamingSessionIdentity: Equatable, Hashable, Sendable {
     let generation: UInt64
 }
 
+nonisolated struct StreamingRetryPolicy: Sendable {
+    private let jitterFactor: @Sendable () -> Double
+
+    init(jitterFactor: @escaping @Sendable () -> Double = {
+        Double.random(in: 0.8...1.2)
+    }) {
+        self.jitterFactor = jitterFactor
+    }
+
+    func delayNanoseconds(forRetryOrdinal ordinal: Int) -> UInt64 {
+        let boundedOrdinal = min(max(ordinal, 1), 5)
+        let baseDelay = min(
+            UInt64(250_000_000) << UInt64(boundedOrdinal - 1),
+            4_000_000_000
+        )
+        let boundedJitter = min(max(jitterFactor(), 0.8), 1.2)
+        return min(UInt64(Double(baseDelay) * boundedJitter), 4_000_000_000)
+    }
+}
+
 nonisolated struct AudioIngressConfiguration: Equatable, Sendable {
     let packetByteCount: Int
     let minimumTailByteCount: Int
@@ -46,8 +66,8 @@ nonisolated enum StreamFailure: LocalizedError, Equatable, Sendable {
     case authentication
     case network
     case timeout
-    case httpStatus
-    case backend
+    case httpStatus(Int)
+    case backend(code: Int)
     case malformedResponse
     case responseIdentityMismatch
     case cancelled

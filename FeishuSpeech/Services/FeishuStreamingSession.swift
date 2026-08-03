@@ -143,13 +143,15 @@ actor FeishuStreamingSession: SpeechStreamingSession {
     private var didAcceptFirstPacket = false
     private var didRefreshFirstPacket = false
     private var terminalState = TerminalState.none
+    private var isAbortEligible = false
+    private var didAttemptAbort = false
+    private var didReceiveCancel = false
 
     private var requestInFlight = false
     private var requestWaiters: [CheckedContinuation<Bool, Never>] = []
     private var activeRequestTask: Task<DirectHTTPResponse, Error>?
     private var activeRequestAction: Int?
     private var requestGateReleaseSignal: DeadlineSignal?
-    private var didEmitFinishRequest = false
 
     init(
         streamID: String? = nil,
@@ -190,6 +192,7 @@ actor FeishuStreamingSession: SpeechStreamingSession {
             )
             try ensureActive()
             didAcceptFirstPacket = true
+            isAbortEligible = true
             nextSequenceID += 1
             return .partial(text)
         } catch let failure as StreamFailure {
@@ -237,6 +240,7 @@ actor FeishuStreamingSession: SpeechStreamingSession {
                 sequenceID: nextSequenceID,
                 bearerToken: token
             )
+            isAbortEligible = false
             try ensureActive()
             nextSequenceID += 1
             let event = StreamingRecognitionEvent.final(text)
@@ -251,15 +255,20 @@ actor FeishuStreamingSession: SpeechStreamingSession {
     }
 
     func cancel() async {
-        guard case .none = terminalState else { return }
+        guard !didReceiveCancel else { return }
+        didReceiveCancel = true
 
         let deadline = DispatchTime.now().uptimeNanoseconds &+ abortTimeoutNanoseconds
         let inFlightAction = activeRequestAction
-        terminalState = .completed(.cancelled)
+        if case .none = terminalState {
+            terminalState = .completed(.cancelled)
+        }
         rejectRequestWaiters()
 
         let gateReleaseSignal: DeadlineSignal?
-        if didAcceptFirstPacket, requestInFlight, inFlightAction == 0, !didEmitFinishRequest {
+        if isAbortEligible,
+           requestInFlight,
+           inFlightAction == 0 || inFlightAction == 2 {
             let signal = DeadlineSignal()
             requestGateReleaseSignal = signal
             gateReleaseSignal = signal
@@ -268,7 +277,7 @@ actor FeishuStreamingSession: SpeechStreamingSession {
         }
         activeRequestTask?.cancel()
 
-        guard didAcceptFirstPacket, !didEmitFinishRequest else { return }
+        guard isAbortEligible, !didAttemptAbort else { return }
 
         if let gateReleaseSignal {
             guard await wait(for: gateReleaseSignal, until: deadline) else {
@@ -281,12 +290,14 @@ actor FeishuStreamingSession: SpeechStreamingSession {
             return
         }
 
-        guard !requestInFlight else { return }
+        guard isAbortEligible, !requestInFlight else { return }
         await attemptBestEffortAbort(until: deadline)
     }
 
     private func attemptBestEffortAbort(until deadline: UInt64) async {
-        guard !didEmitFinishRequest else { return }
+        guard isAbortEligible, !didAttemptAbort else { return }
+        didAttemptAbort = true
+        isAbortEligible = false
 
         requestInFlight = true
         defer { releaseRequestGate() }
@@ -374,9 +385,6 @@ actor FeishuStreamingSession: SpeechStreamingSession {
         let requestTask = Task<DirectHTTPResponse, Error> {
             try await requestSender(request)
         }
-        if action == 2 {
-            didEmitFinishRequest = true
-        }
         activeRequestTask = requestTask
         activeRequestAction = action
         defer {
@@ -401,7 +409,7 @@ actor FeishuStreamingSession: SpeechStreamingSession {
                knownInvalidTokenCodes.contains(errorResponse.code) {
                 throw StreamFailure.authentication
             }
-            throw StreamFailure.httpStatus
+            throw StreamFailure.httpStatus(response.statusCode)
         }
 
         let decoded: StreamingSpeechResponse
@@ -428,7 +436,7 @@ actor FeishuStreamingSession: SpeechStreamingSession {
             if knownInvalidTokenCodes.contains(decoded.code) {
                 throw StreamFailure.authentication
             }
-            throw StreamFailure.backend
+            throw StreamFailure.backend(code: decoded.code)
         }
         return decoded.data?.transcription ?? ""
     }

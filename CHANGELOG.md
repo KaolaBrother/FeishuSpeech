@@ -3,9 +3,11 @@
 ## [Unreleased]
 
 ### Added
+- 新增按键内韧性流式会话：可恢复的网络/超时/部分 HTTP 和业务码 `10024` 失败会在 Fn 仍按住时以 250 ms 起步、4 s 封顶的指数退避创建新串行会话；同一录音/入口持续捕获，已录分片通过有序日志从头回放，追上前沿时只发布最新回放假设（issue #26）
+- 无法取得 AX 范围时也支持按键期间的尽力输出：首个非空假设先再尝试一次 AX 绑定；仍不可用时绑定当时前台 PID，使用直接 Unicode 事件只输出首值和严格递增的 UTF-16 后缀。该路径在发送前后采样 Secure Input/PID，切换进程、安全或交付不确定后永久停止；不删除、不选择、不使用粘贴板，分歧/缩短假设被抑制（issue #26）
 - 按住 Fn 0.3 秒后进入光标绑定的飞书流式识别：每次交互由唯一 generation 共同拥有录音、精确字节上限且可感知消费进度的音频入口、严格串行的 Feishu session，以及绑定原始 `AXUIElement` 的文字会话；松开 Fn 或达到 60 秒进入 sealing 并只完成一次（issue #26）
 - 支持可验证的实时范围替换和 final-only 回退：暂定结果始终整体替换应用拥有的范围；不支持安全范围读写的非安全控件只在原始 PID/元素仍有效时发送一次 Cmd+V，目标失效、交付不确定或结果含控制字符时改为 copy-only，并显示固定 2 秒的无文本恢复提示（issue #26）
-- 新增流式音频、录音封口、飞书 action/sequence/cancel/token、光标范围、安全最终输出、generation 生命周期和完成提示的自动化覆盖；当前完整 macOS 测试记录为 184 通过、0 失败、0 跳过（issue #26）
+- 新增流式音频、录音封口、飞书 action/sequence/cancel/token、光标范围、安全输出、generation 生命周期和完成提示的自动化覆盖；本轮新增的失败流终止、重试/回放/松开竞态、异常终止即时撤权、旧录音屏障、按键级 1,920,000-byte 预算与同 PID UTF-16 后缀均纳入完整套件，当前记录为 249 通过、0 失败、0 跳过（issue #26）
 - 热键监控状态现在可被观察：新增 `MonitoringState`（`.stopped` / `.active` / `.failed`），菜单栏可实时反映 Event Tap 是否正常运行（issue #5）
 - 安全输入检测：终端、1Password 等程序启用安全键盘时，菜单栏显示橙色提示"安全输入已启用，热键暂不可用"（issue #10）
 - 新增 `FeishuAPIServiceTests` 单元测试目标，覆盖直连 HTTP 解析、token 过期时间和取消重试路径（issues #11/#12/#21）
@@ -13,8 +15,10 @@
 - 新增 `MainViewModelTests` 覆盖 `MonitoringState` 失败映射、恢复清除和 cleanup 订阅释放路径（issues #22/#23/#24）
 
 ### Fixed
-- 修复真实凭据 UAT 中首个 `action=1` 已获 HTTP 200 后仍立即失败的问题：客户端不再要求 code-zero 响应回显匹配的 `stream_id` / `sequence_id`，也不再把缺少 `data` 视为畸形响应；解析现与 KaolaTerminal 已跑通实现一致，优先接受 `recognition_text`、兼容 `text`，无文本时产生空 partial。非零飞书业务码和无法解码的 JSON 仍终止当前流；请求侧 stream identity、action/sequence、首次 token 刷新、generation 安全和隐私诊断边界保持不变（issue #26）
-- 根据首轮 UAT 修正过严的 Accessibility 目标门控：无法捕获或确认 AX 光标/焦点元素不再阻塞录音和流式识别；此时仅保留不透明响应，对 Secure Input 与最前台 PID 各采样两次后，通过不接触粘贴板的直接 Unicode CGEvent 把非空 final 向届时焦点最多发送一次，不声称确认光标位置。普通发送/PID 失败和 C0/C1 控制字符改为 copy-only；安全拒绝仍不输入、不复制，`autoInsert=false` 仍为零输出。已捕获目标的机会式实时替换及其 pasteboard/Cmd+V final-only 路径不变（issue #26，取代先前严格目标门控）
+- 修复“首次识别后持续显示流式失败”的客户端策略：已接受音频的失败会话现在在未成功完成 `action=2` 时尽力发送一次 `action=3`，然后由协调器决定是否使用新会话重试。可恢复失败在 Fn 按住期间不再发布错误状态或系统通知；松开 Fn 会先关闭新重试准入，再完成当前尝试或保留最后可用文本（issue #26）
+- 实机证据已将后续失败收窄到 HTTP 200 内的飞书业务码 `10024`：它先出现在一个已接受两包的会话，又出现在新会话的首包。当前飞书公开文档和官方 SDK 未定义 `10024`，因此本地将它列为可恢复是产品韧性策略，不是对限流、包频率、并发配额或未结束流的官方解释（issue #26）
+- 修复真实凭据 UAT 中首个 `action=1` 已获 HTTP 200 后仍立即失败的问题：客户端不再要求 code-zero 响应回显匹配的 `stream_id` / `sequence_id`，也不再把缺少 `data` 视为畸形响应；解析现与 KaolaTerminal 已跑通实现一致，优先接受 `recognition_text`、兼容 `text`，无文本时产生空 partial。非零飞书业务码和无法解码的 JSON 仍使当前传输会话失败；协调器随后根据类型决定在同一 Fn 按键内重试或终止。请求侧 stream identity、action/sequence、首次 token 刷新、generation 安全和隐私诊断边界保持不变（issue #26）
+- 根据首轮 UAT 取消过严的 Accessibility 启动门控：无法捕获或确认 AX 光标/焦点不再阻塞录音和流式识别。当时增加的松开后一次性 current-focus 输出已被本轮的首 partial AX 重绑定与同 PID UTF-16 后缀输出取代；已捕获但不支持范围替换的目标仍保留 pasteboard/Cmd+V final-only 路径。安全拒绝仍不输入、不复制，`autoInsert=false` 仍为零输出（issue #26）
 - 修复第二轮 UAT 中终止性 provider/流式失败反复回灌同一热键错误、导致浮窗隐藏动画永远无法完成的问题：失败会先使 generation 失效并隐藏浮窗，再且仅再清理一次；相同 `HotKeyService` 错误不再重复发布。租户 token 认证失败只显示固定提示“认证失败，请检查应用凭据”，不暴露凭据、识别文本或飞书后端详情（issue #26）
 - 睡眠/唤醒、手动重置、权限变化、录音/网络失败和进程清理现在先使流式 generation 与光标所有权失效，再终止入口、录音、网络任务和计时器；迟到事件不能恢复旧会话或写入新的焦点（issue #26）
 - 音频入口按实际排队和待组包字节精确计数，消费后立即复用容量；停止录音会越过真实音频回调队列屏障后再决定是否保留尾包，溢出显式失败而不丢包或乱序（issue #26）
@@ -58,7 +62,7 @@
 - 移除测试中引用已删除 `.armed` 状态的用例
 
 ### Verification pending
-- 最新安装版 UAT 已证明 token 获取成功、首个 `action=1` 到达飞书并收到 HTTP 200；旧客户端随后同步拒绝过严的响应契约。放宽后的解析尚未完成 owner UAT，因此当前仍不声明真实流式识别端到端成功。
+- 最新安装版 UAT 已证明 token 获取成功，且一个会话的前两个 HTTP-200 音频包被接受；第三个包与随后的新会话返回未定义的业务码 `10024`。新增的失败流 `action=3`、新会话重试/回放、松开 Fn 终止重试，以及按键期间的 AX/同 PID 输出尚未完成安装版 owner UAT，不声明真实端到端成功。
 - 真实飞书凭据下的后续 action、终止请求空音频编码、`recognition_text` / `text` 实际形态、首次 token 刷新同序列重试、partial/final 语义、PCM/tail 兼容性和慢网行为仍需安装版 Release UAT；这些本地策略不作为飞书保证。
 - TextEdit/原生控件、浏览器、Electron、终端和富文本编辑器的 Accessibility 范围、焦点干扰、Unicode 与 undo 行为仍需跨应用实机 UAT；当前不声明广泛兼容性。
 

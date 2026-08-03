@@ -9,6 +9,8 @@ let maxRecordingDuration: TimeInterval = 60.0
 let errorRecoveryDelay: TimeInterval = 3.0
 private let hotKeyMonitoringErrorMessage = "热键不可用，请检查辅助功能权限"
 private let completionFeedbackDuration: TimeInterval = 2.0
+private let streamingSecurityErrorMessage = "安全输入框不支持语音输入"
+private let streamingFailureErrorMessage = "流式识别失败"
 private let streamingIngressConfiguration = AudioIngressConfiguration(
     packetByteCount: 6_400,
     minimumTailByteCount: 3_200,
@@ -29,6 +31,26 @@ private enum FinalOnlyDestinationValidation {
 
 @MainActor
 class MainViewModel: ObservableObject {
+    private enum StreamingAttemptPhase {
+        case idle
+        case creatingSession
+        case waitingToRetry
+        case replayingJournal
+        case consumingLiveAudio
+        case finishing
+    }
+
+    private enum SessionCreationOutcome {
+        case ready(any SpeechStreamingSession)
+        case retry
+        case stop
+    }
+
+    private struct PendingRecorderBarrier {
+        let identifier: UInt64
+        let task: Task<Void, Never>
+    }
+
     @Published var status: RecordingState = .idle
     @Published var settings: AppSettings
     @Published var overlayMessage: String?
@@ -40,6 +62,9 @@ class MainViewModel: ObservableObject {
     private let accessibilityClient: AccessibilityClient
     private let finalTextOutput: FinalTextOutput
     private let overlayPresenter: RecordingOverlayPresenting
+    private let currentFocusAppendSessionFactory: (any CurrentFocusProvisionalOutputSessionFactory)?
+    private let streamingRetryDelay: @Sendable (Int) -> UInt64
+    private let streamingRetrySleeper: @Sendable (UInt64) async throws -> Void
     private let permissionManager = PermissionManager.shared
 
     private var cancellables = Set<AnyCancellable>()
@@ -56,8 +81,19 @@ class MainViewModel: ObservableObject {
     private var usesCurrentFocusFinalOutput = false
     private var deliveredCurrentFocusFinal = false
     private var latestFinalOnlyValue: String?
+    private var currentFocusAppendSession: (any CurrentFocusProvisionalOutputSession)?
+    private var attemptedFirstPartialRebind = false
+    private var packetJournal: [Data] = []
+    private var retryOrdinal = 0
+    private var currentAttemptCancellationTask: Task<Void, Never>?
+    private var retryAdmissionOpen = false
+    private var streamingAttemptPhase = StreamingAttemptPhase.idle
+    private var sessionCreationTask: Task<any SpeechStreamingSession, Error>?
+    private var retrySleepTask: Task<Void, Error>?
     private var consumerTask: Task<Void, Never>?
     private var sealingTask: Task<Void, Never>?
+    private var pendingRecorderBarrier: PendingRecorderBarrier?
+    private var nextRecorderBarrierIdentifier: UInt64 = 0
     private var sealStarted = false
     private var acceptedPacket = false
     private var stopSoundPlayed = false
@@ -74,7 +110,10 @@ class MainViewModel: ObservableObject {
         streamingProvider: (any SpeechStreamingSessionProviding)? = nil,
         accessibilityClient: AccessibilityClient? = nil,
         finalTextOutput: FinalTextOutput? = nil,
-        overlayPresenter: RecordingOverlayPresenting? = nil
+        overlayPresenter: RecordingOverlayPresenting? = nil,
+        currentFocusAppendSessionFactory: (any CurrentFocusProvisionalOutputSessionFactory)? = nil,
+        streamingRetryDelay: (@Sendable (Int) -> UInt64)? = nil,
+        streamingRetrySleeper: (@Sendable (UInt64) async throws -> Void)? = nil
     ) {
         let resolvedAudioRecorder = audioRecorder ?? AudioRecorder()
         self.audioRecorder = resolvedAudioRecorder
@@ -84,6 +123,24 @@ class MainViewModel: ObservableObject {
         self.accessibilityClient = accessibilityClient ?? MacAccessibilityClient()
         self.finalTextOutput = finalTextOutput ?? SystemFinalTextOutput()
         self.overlayPresenter = overlayPresenter ?? OverlayWindowController.shared
+        if let currentFocusAppendSessionFactory {
+            self.currentFocusAppendSessionFactory = currentFocusAppendSessionFactory
+        } else if audioRecorder == nil,
+                  streamingProvider == nil,
+                  accessibilityClient == nil,
+                  finalTextOutput == nil,
+                  overlayPresenter == nil {
+            self.currentFocusAppendSessionFactory = SystemCurrentFocusProvisionalOutputSessionFactory()
+        } else {
+            self.currentFocusAppendSessionFactory = nil
+        }
+        let retryPolicy = StreamingRetryPolicy()
+        self.streamingRetryDelay = streamingRetryDelay ?? { ordinal in
+            retryPolicy.delayNanoseconds(forRetryOrdinal: ordinal)
+        }
+        self.streamingRetrySleeper = streamingRetrySleeper ?? { nanoseconds in
+            try await Task.sleep(nanoseconds: nanoseconds)
+        }
         logger.info("MainViewModel init")
         resolvedAudioRecorder.forceCleanup()
         setupAudioRecorderFailureObserver()
@@ -171,7 +228,7 @@ class MainViewModel: ObservableObject {
     private func handleHotKeyState(_ state: HotKeyState, startsTranscriptionTask: Bool = true) {
         switch state {
         case .idle:
-            if activeSessionIdentity == nil {
+            if activeSessionIdentity == nil, pendingRecorderBarrier == nil {
                 if !isCompletionFeedbackPresented {
                     hideOverlay()
                 }
@@ -199,6 +256,7 @@ class MainViewModel: ObservableObject {
 
     private func handleHotKeyError(_ message: String) {
         guard activeSessionIdentity != nil else {
+            guard pendingRecorderBarrier == nil else { return }
             if status != .error(message) {
                 hideOverlay()
                 status = .error(message)
@@ -231,8 +289,8 @@ class MainViewModel: ObservableObject {
     #endif
 
     private func beginStreaming(identity: StreamingSessionIdentity) {
-        guard activeSessionIdentity == nil else {
-            logger.info("Ignoring streaming start while another generation is active")
+        guard activeSessionIdentity == nil, pendingRecorderBarrier == nil else {
+            logger.info("Ignoring streaming start while another generation or recorder barrier is active")
             return
         }
 
@@ -242,6 +300,14 @@ class MainViewModel: ObservableObject {
         sealStarted = false
         acceptedPacket = false
         stopSoundPlayed = false
+        attemptedFirstPartialRebind = false
+        packetJournal.removeAll(keepingCapacity: true)
+        retryOrdinal = 0
+        currentAttemptCancellationTask = nil
+        retryAdmissionOpen = true
+        streamingAttemptPhase = .idle
+        sessionCreationTask = nil
+        retrySleepTask = nil
 
         guard !permissionManager.secureInputEnabled else {
             failStartup(identity: identity, message: "安全输入框不支持语音输入")
@@ -254,7 +320,10 @@ class MainViewModel: ObservableObject {
         }
 
         showOverlay(status: status)
-        let ingress = ByteBoundedAudioIngress(configuration: streamingIngressConfiguration)
+        let ingress = ByteBoundedAudioIngress(
+            configuration: streamingIngressConfiguration,
+            retainsDeliveredPacketsForReplay: true
+        )
         activeIngress = ingress
 
         guard startStreamingCapture(identity: identity, ingress: ingress) else {
@@ -357,6 +426,7 @@ class MainViewModel: ObservableObject {
 
     private func failStartup(identity: StreamingSessionIdentity, message: String) {
         guard isActive(identity) else { return }
+        closeRetryAdmission()
         invalidateActiveIdentityAndCursor()
         activeIngress?.fail(.cancelled)
         clearInteractionReferences()
@@ -370,42 +440,122 @@ class MainViewModel: ObservableObject {
         identity: StreamingSessionIdentity,
         ingress: ByteBoundedAudioIngress
     ) async {
-        do {
-            let session = try await streamingProvider.makeStreamingSession(
-                appId: settings.appId,
-                appSecret: settings.appSecret
-            )
-            guard isActive(identity) else {
-                await session.cancel()
+        var iterator = ingress.stream.makeAsyncIterator()
+
+        while isActive(identity), !Task.isCancelled {
+            if sealStarted {
+                await completeAfterRecoverableRelease(identity: identity)
                 return
             }
-            activeStreamingSession = session
 
+            switch await createStreamingSession(identity: identity) {
+            case .retry:
+                continue
+            case .stop:
+                if isActive(identity), sealStarted {
+                    await completeAfterRecoverableRelease(identity: identity)
+                }
+                return
+            case .ready(let session):
+                guard await runStreamingAttempt(
+                    session,
+                    iterator: &iterator,
+                    identity: identity
+                ) else { return }
+            }
+        }
+    }
+
+    private func createStreamingSession(
+        identity: StreamingSessionIdentity
+    ) async -> SessionCreationOutcome {
+        guard isActive(identity), retryAdmissionOpen, !sealStarted else {
+            return .stop
+        }
+
+        currentAttemptCancellationTask = nil
+        streamingAttemptPhase = .creatingSession
+        let appId = settings.appId
+        let appSecret = settings.appSecret
+        let provider = streamingProvider
+        let creationTask = Task<any SpeechStreamingSession, Error> {
+            try await provider.makeStreamingSession(
+                appId: appId,
+                appSecret: appSecret
+            )
+        }
+        sessionCreationTask = creationTask
+
+        do {
+            let session = try await creationTask.value
+            sessionCreationTask = nil
+            guard isActive(identity), retryAdmissionOpen, !sealStarted else {
+                await session.cancel()
+                return .stop
+            }
+            streamingAttemptPhase = .idle
+            return .ready(session)
+        } catch is CancellationError {
+            sessionCreationTask = nil
+            return .stop
+        } catch {
+            sessionCreationTask = nil
+            return await waitForRetryIfAdmitted(identity: identity, error: error) ? .retry : .stop
+        }
+    }
+
+    private func runStreamingAttempt(
+        _ session: any SpeechStreamingSession,
+        iterator: inout AsyncThrowingStream<Data, Error>.Iterator,
+        identity: StreamingSessionIdentity
+    ) async -> Bool {
+        guard isActive(identity), !Task.isCancelled, !sealStarted else {
+            await cancelCurrentAttemptOnce(session)
+            if isActive(identity), sealStarted {
+                await completeAfterRecoverableRelease(identity: identity)
+            }
+            return false
+        }
+        currentAttemptCancellationTask = nil
+        activeStreamingSession = session
+
+        do {
+            streamingAttemptPhase = packetJournal.isEmpty ? .consumingLiveAudio : .replayingJournal
+            try await replayJournal(with: session, identity: identity)
+            streamingAttemptPhase = .consumingLiveAudio
             let receivedTerminalEvent = try await consumePackets(
-                from: ingress,
+                iterator: &iterator,
                 with: session,
                 identity: identity
             )
-            guard isActive(identity), !Task.isCancelled else { return }
-            guard !receivedTerminalEvent else { return }
+            guard isActive(identity), !Task.isCancelled else { return false }
+            guard !receivedTerminalEvent else { return false }
             await finishConsumedAudio(with: session, identity: identity)
-        } catch is CancellationError {
-            return
+            return false
         } catch {
-            await handleStreamingFailure(identity: identity, error: error)
+            await cancelCurrentAttemptOnce(session)
+            if isStreamingCancellation(error), isActive(identity), sealStarted {
+                await completeAfterRecoverableRelease(identity: identity)
+                return false
+            }
+            return await waitForRetryIfAdmitted(identity: identity, error: error)
         }
     }
 
     private func consumePackets(
-        from ingress: ByteBoundedAudioIngress,
+        iterator: inout AsyncThrowingStream<Data, Error>.Iterator,
         with session: any SpeechStreamingSession,
         identity: StreamingSessionIdentity
     ) async throws -> Bool {
-        for try await packet in ingress.stream {
+        while let packet = try await iterator.next() {
             guard isActive(identity), !Task.isCancelled else { return true }
+            packetJournal.append(packet)
             let event = try await session.sendAudioPacket(packet)
             guard isActive(identity), !Task.isCancelled else { return true }
             acceptedPacket = true
+            if case .failed(let failure) = event {
+                throw failure
+            }
             if handleStreamingEvent(event, identity: identity, isTerminal: false) {
                 return true
             }
@@ -413,30 +563,281 @@ class MainViewModel: ObservableObject {
         return false
     }
 
+    private func replayJournal(
+        with session: any SpeechStreamingSession,
+        identity: StreamingSessionIdentity
+    ) async throws {
+        guard !packetJournal.isEmpty else { return }
+        var catchUpEvent: StreamingRecognitionEvent?
+
+        for packet in packetJournal {
+            guard isActive(identity), !Task.isCancelled, !sealStarted else {
+                throw CancellationError()
+            }
+            let event = try await session.sendAudioPacket(packet)
+            if case .failed(let failure) = event {
+                throw failure
+            }
+            acceptedPacket = true
+            if isUsableHypothesis(event) {
+                catchUpEvent = event
+            }
+        }
+
+        guard let catchUpEvent,
+              isActive(identity),
+              !Task.isCancelled,
+              !sealStarted else {
+            return
+        }
+        _ = handleStreamingEvent(
+            catchUpEvent,
+            identity: identity,
+            isTerminal: false,
+            source: .replayCatchUp
+        )
+    }
+
     private func finishConsumedAudio(
         with session: any SpeechStreamingSession,
         identity: StreamingSessionIdentity
     ) async {
+        streamingAttemptPhase = .finishing
         guard sealStarted else {
             await terminateAbnormally(message: "音频流意外结束", reportsError: true)
             return
         }
 
         guard acceptedPacket else {
-            await session.cancel()
+            await cancelCurrentAttemptOnce(session)
             guard isActive(identity), !Task.isCancelled else { return }
             publishCompletionFeedback(.emptyFinalPreservedPartial)
-            completeNormally(identity: identity)
+            await completeNormally(identity: identity)
             return
         }
 
         do {
             let event = try await session.finish()
             guard isActive(identity), !Task.isCancelled else { return }
+            if case .failed(let failure) = event, isRecoverable(failure) {
+                await cancelCurrentAttemptOnce(session)
+                guard isActive(identity) else { return }
+                await completeAfterRecoverableRelease(identity: identity)
+                return
+            }
             _ = handleStreamingEvent(event, identity: identity, isTerminal: true)
         } catch {
-            await handleStreamingFailure(identity: identity, error: error)
+            if isRecoverable(error) {
+                await cancelCurrentAttemptOnce(session)
+                guard isActive(identity) else { return }
+                await completeAfterRecoverableRelease(identity: identity)
+            } else {
+                await handleStreamingFailure(identity: identity, error: error)
+            }
         }
+    }
+
+    private func waitForRetryIfAdmitted(
+        identity: StreamingSessionIdentity,
+        error: Error
+    ) async -> Bool {
+        guard isRecoverable(error) else {
+            await handleStreamingFailure(identity: identity, error: error)
+            return false
+        }
+        guard isActive(identity), !Task.isCancelled else { return false }
+        guard !sealStarted else {
+            await completeAfterRecoverableRelease(identity: identity)
+            return false
+        }
+        guard retryAdmissionOpen else { return false }
+
+        retryOrdinal += 1
+        let delay = streamingRetryDelay(retryOrdinal)
+        logger.warning("Streaming attempt failed recoverably; retry ordinal \(self.retryOrdinal)")
+        streamingAttemptPhase = .waitingToRetry
+        let sleeper = streamingRetrySleeper
+        let sleepTask = Task<Void, Error> {
+            try await sleeper(delay)
+        }
+        retrySleepTask = sleepTask
+        do {
+            try await sleepTask.value
+        } catch {
+            retrySleepTask = nil
+            if isActive(identity), sealStarted {
+                await completeAfterRecoverableRelease(identity: identity)
+            }
+            return false
+        }
+        retrySleepTask = nil
+        guard isActive(identity), !Task.isCancelled, retryAdmissionOpen, !sealStarted else {
+            if isActive(identity), sealStarted {
+                await completeAfterRecoverableRelease(identity: identity)
+            }
+            return false
+        }
+        streamingAttemptPhase = .idle
+        return true
+    }
+
+    private func isRecoverable(_ error: Error) -> Bool {
+        if let failure = error as? StreamFailure {
+            return isRecoverable(failure)
+        }
+        guard let apiError = error as? FeishuAPIService.APIError else {
+            return false
+        }
+        switch apiError {
+        case .httpError(let code):
+            return code == 408 || code == 425 || code == 429 || (500...599).contains(code)
+        case .timeout, .networkUnavailable, .connectionFailed, .networkError:
+            return true
+        case .authenticationUnavailable, .invalidResponse, .recognitionFailed,
+             .unknown, .authFailed:
+            return false
+        }
+    }
+
+    private func isRecoverable(_ failure: StreamFailure) -> Bool {
+        switch failure {
+        case .network, .timeout:
+            return true
+        case .httpStatus(let code):
+            return code == 408 || code == 425 || code == 429 || (500...599).contains(code)
+        case .backend(let code):
+            return code == 10024
+        case .invalidRequest, .authentication, .malformedResponse,
+             .responseIdentityMismatch, .cancelled:
+            return false
+        }
+    }
+
+    private func completeAfterRecoverableRelease(identity: StreamingSessionIdentity) async {
+        guard await awaitSealingBarrier(identity: identity) else { return }
+        guard let retainedText = retainedStreamingHypothesis else {
+            if !acceptedPacket, retryOrdinal == 0 {
+                // Releasing while the very first transport is still being created is
+                // an ordinary user cancellation, not a failed recognition attempt.
+                await completeNormally(identity: identity)
+            } else {
+                await terminateAbnormally(
+                    message: streamingFailureErrorMessage,
+                    reportsError: true
+                )
+            }
+            return
+        }
+
+        if let currentFocusAppendSession {
+            await completeAppendRecovery(
+                currentFocusAppendSession,
+                retainedText: retainedText,
+                identity: identity
+            )
+            return
+        }
+
+        routeRetainedRecoveryOutput(retainedText)
+        await completeNormally(identity: identity)
+    }
+
+    private var retainedStreamingHypothesis: String? {
+        guard let latestFinalOnlyValue, !isContentless(latestFinalOnlyValue) else {
+            return nil
+        }
+        return latestFinalOnlyValue
+    }
+
+    private func completeAppendRecovery(
+        _ appendSession: any CurrentFocusProvisionalOutputSession,
+        retainedText: String,
+        identity: StreamingSessionIdentity
+    ) async {
+        let outcome = appendSession.finalize(
+            finalText: nil,
+            lastAcceptedText: retainedText,
+            generation: identity.generation
+        )
+        switch outcome {
+        case .exactCommitted, .suffixCommitted, .staleGeneration:
+            await completeNormally(identity: identity)
+        case .preservedDivergence, .preservedDestinationLoss, .deliveryUncertain:
+            publishCompletionFeedback(.provisionalOutputPreserved)
+            await completeNormally(identity: identity)
+        case .preservedSecurityRejection:
+            await terminateAbnormally(
+                message: streamingSecurityErrorMessage,
+                reportsError: true
+            )
+        case .noUsableText:
+            await terminateAbnormally(
+                message: streamingFailureErrorMessage,
+                reportsError: true
+            )
+        }
+    }
+
+    private func routeRetainedRecoveryOutput(_ retainedText: String) {
+        if let destination = finalOnlyDestination {
+            routeFinalOnly(retainedText, destination: destination)
+        } else if usesCurrentFocusFinalOutput {
+            routeCurrentFocusFinal(retainedText)
+        } else if cursorSession != nil, settings.autoInsert {
+            publishCompletionFeedback(.provisionalOutputPreserved)
+        }
+    }
+
+    private func interpretAppendFinalOutcome(
+        _ outcome: CurrentFocusAppendFinalOutcome,
+        identity: StreamingSessionIdentity,
+        followsSealedRecoverableFailure: Bool
+    ) -> Bool {
+        switch outcome {
+        case .exactCommitted, .suffixCommitted, .staleGeneration:
+            return true
+        case .preservedDivergence, .preservedDestinationLoss, .deliveryUncertain:
+            publishCompletionFeedback(.provisionalOutputPreserved)
+            return true
+        case .preservedSecurityRejection:
+            scheduleStreamingTermination(
+                identity: identity,
+                message: streamingSecurityErrorMessage
+            )
+            return false
+        case .noUsableText:
+            guard followsSealedRecoverableFailure else { return true }
+            scheduleStreamingTermination(
+                identity: identity,
+                message: streamingFailureErrorMessage
+            )
+            return false
+        }
+    }
+
+    private func cancelCurrentAttemptOnce(_ session: any SpeechStreamingSession) async {
+        if let currentAttemptCancellationTask {
+            await currentAttemptCancellationTask.value
+            return
+        }
+
+        activeStreamingSession = nil
+        let cancellationTask = Task {
+            await session.cancel()
+        }
+        currentAttemptCancellationTask = cancellationTask
+        await cancellationTask.value
+    }
+
+    private func isStreamingCancellation(_ error: Error) -> Bool {
+        if error is CancellationError {
+            return true
+        }
+        guard let failure = error as? StreamFailure else { return false }
+        if case .cancelled = failure {
+            return true
+        }
+        return false
     }
 
     private func handleStreamingFailure(
@@ -467,16 +868,22 @@ class MainViewModel: ObservableObject {
     private func handleStreamingEvent(
         _ event: StreamingRecognitionEvent,
         identity: StreamingSessionIdentity,
-        isTerminal: Bool
+        isTerminal: Bool,
+        source: CurrentFocusHypothesisSource = .livePacket
     ) -> Bool {
         guard isActive(identity) else { return true }
 
         switch event {
         case .partial(let text):
-            return handlePartial(text, identity: identity)
+            return handlePartial(text, identity: identity, source: source)
 
         case .final(let text):
-            return handleFinal(text, identity: identity, isTerminal: isTerminal)
+            return handleFinal(
+                text,
+                identity: identity,
+                isTerminal: isTerminal,
+                source: source
+            )
 
         case .failed:
             return handleTerminalEvent(
@@ -498,12 +905,22 @@ class MainViewModel: ObservableObject {
 
     private func handlePartial(
         _ text: String,
-        identity: StreamingSessionIdentity
+        identity: StreamingSessionIdentity,
+        source: CurrentFocusHypothesisSource
     ) -> Bool {
+        guard !isContentless(text) else { return false }
         latestFinalOnlyValue = text
-        guard !isContentless(text), settings.autoInsert else { return false }
+        guard settings.autoInsert else { return false }
+        guard prepareContinuousOutputIfNeeded(identity: identity) else { return true }
         if let cursorSession {
             try? cursorSession.handle(.partial(text), generation: identity.generation)
+        } else if let currentFocusAppendSession {
+            let outcome = currentFocusAppendSession.applyOpaqueHypothesis(
+                text,
+                generation: identity.generation,
+                source: source
+            )
+            return interpretAppendApplyOutcome(outcome, identity: identity)
         }
         return false
     }
@@ -511,38 +928,169 @@ class MainViewModel: ObservableObject {
     private func handleFinal(
         _ text: String,
         identity: StreamingSessionIdentity,
-        isTerminal: Bool
+        isTerminal: Bool,
+        source: CurrentFocusHypothesisSource
     ) -> Bool {
-        latestFinalOnlyValue = text
         let contentless = isContentless(text)
-        if settings.autoInsert {
-            deliverFinal(text, contentless: contentless, identity: identity)
+        if !contentless {
+            latestFinalOnlyValue = text
         }
+        var mayCompleteNormally = true
+        if settings.autoInsert {
+            mayCompleteNormally = deliverFinal(
+                text,
+                contentless: contentless,
+                identity: identity,
+                isTerminal: isTerminal,
+                source: source
+            )
+        }
+        guard mayCompleteNormally else { return true }
         if contentless {
             overlayMessage = "未识别到内容"
         }
         guard isTerminal else { return false }
-        if contentless {
+        if contentless, !isCompletionFeedbackPresented {
             publishCompletionFeedback(.emptyFinalPreservedPartial)
         }
-        completeNormally(identity: identity)
+        Task { @MainActor [weak self] in
+            await self?.completeNormally(identity: identity)
+        }
         return true
     }
 
     private func deliverFinal(
         _ text: String,
         contentless: Bool,
-        identity: StreamingSessionIdentity
-    ) {
+        identity: StreamingSessionIdentity,
+        isTerminal: Bool,
+        source: CurrentFocusHypothesisSource
+    ) -> Bool {
         if let cursorSession {
             try? cursorSession.handle(
                 .final(contentless ? "" : text),
                 generation: identity.generation
             )
-        } else if let destination = finalOnlyDestination, !contentless {
-            routeFinalOnly(text, destination: destination)
-        } else if usesCurrentFocusFinalOutput, !contentless {
-            routeCurrentFocusFinal(text)
+        } else if let currentFocusAppendSession {
+            if isTerminal {
+                let outcome = currentFocusAppendSession.finalize(
+                    finalText: text,
+                    lastAcceptedText: latestFinalOnlyValue,
+                    generation: identity.generation
+                )
+                return interpretAppendFinalOutcome(
+                    outcome,
+                    identity: identity,
+                    followsSealedRecoverableFailure: false
+                )
+            } else if !contentless {
+                let outcome = currentFocusAppendSession.applyOpaqueHypothesis(
+                    text,
+                    generation: identity.generation,
+                    source: source
+                )
+                return !interpretAppendApplyOutcome(outcome, identity: identity)
+            }
+        } else if let destination = finalOnlyDestination,
+                  let candidate = contentless ? latestFinalOnlyValue : Optional(text),
+                  !isContentless(candidate) {
+            routeFinalOnly(candidate, destination: destination)
+        } else if usesCurrentFocusFinalOutput,
+                  let candidate = contentless ? latestFinalOnlyValue : Optional(text),
+                  !isContentless(candidate) {
+            routeCurrentFocusFinal(candidate)
+        }
+        return true
+    }
+
+    private func prepareContinuousOutputIfNeeded(identity: StreamingSessionIdentity) -> Bool {
+        guard usesCurrentFocusFinalOutput,
+              cursorSession == nil,
+              currentFocusAppendSession == nil,
+              !attemptedFirstPartialRebind else {
+            return true
+        }
+        attemptedFirstPartialRebind = true
+
+        let reboundSession = CursorTextSession(
+            generation: identity.generation,
+            accessibilityClient: accessibilityClient
+        )
+        let capability: CursorCapabilityResult
+        do {
+            capability = try reboundSession.begin()
+        } catch {
+            reboundSession.invalidate()
+            armCurrentFocusAppendSession(identity: identity)
+            return true
+        }
+
+        switch capability {
+        case .live:
+            cursorSession = reboundSession
+            usesCurrentFocusFinalOutput = false
+            logger.info("Bound an AX cursor destination on the first streaming hypothesis")
+        case .finalOnly(let token):
+            reboundSession.invalidate()
+            finalOnlyDestination = token
+            usesCurrentFocusFinalOutput = false
+            status = .finalOnly
+            overlayPresenter.update(status: .finalOnly)
+            logger.info("Captured a final-only AX destination on the first streaming hypothesis")
+        case .rejected(.secureTarget):
+            reboundSession.invalidate()
+            usesCurrentFocusFinalOutput = false
+            scheduleStreamingTermination(
+                identity: identity,
+                message: streamingSecurityErrorMessage
+            )
+            return false
+        case .rejected(.accessibilityUnavailable):
+            reboundSession.invalidate()
+            armCurrentFocusAppendSession(identity: identity)
+        }
+        return true
+    }
+
+    private func armCurrentFocusAppendSession(identity: StreamingSessionIdentity) {
+        guard let appendSession = currentFocusAppendSessionFactory?.makeSession(
+            generation: identity.generation
+        ) else {
+            logger.info("Continuous current-focus output is unavailable; retaining final-only fallback")
+            return
+        }
+        currentFocusAppendSession = appendSession
+        usesCurrentFocusFinalOutput = false
+        logger.info("Armed continuous current-focus append output")
+    }
+
+    private func interpretAppendApplyOutcome(
+        _ outcome: CurrentFocusAppendOutcome,
+        identity: StreamingSessionIdentity
+    ) -> Bool {
+        switch outcome {
+        case .securityRejected:
+            scheduleStreamingTermination(
+                identity: identity,
+                message: streamingSecurityErrorMessage
+            )
+            return true
+        case .insertedFirst, .appendedSuffix, .duplicate, .revisionSuppressed,
+             .contentless, .unsafeTextSuppressed, .destinationChanged,
+             .deliveryUncertain, .staleGeneration:
+            return false
+        }
+    }
+
+    private func scheduleStreamingTermination(
+        identity: StreamingSessionIdentity,
+        message: String
+    ) {
+        guard isActive(identity) else { return }
+        retryAdmissionOpen = false
+        Task { @MainActor [weak self] in
+            guard let self, self.isActive(identity) else { return }
+            await self.terminateAbnormally(message: message, reportsError: true)
         }
     }
 
@@ -654,7 +1202,10 @@ class MainViewModel: ObservableObject {
 
     private func beginSealing(identity: StreamingSessionIdentity) {
         guard isActive(identity), !sealStarted else { return }
+        let interruptedPhase = streamingAttemptPhase
+        let interruptedSession = activeStreamingSession
         sealStarted = true
+        closeRetryAdmission()
         stopMaxDurationTimer()
         status = .sealing
         overlayPresenter.update(status: .sealing)
@@ -664,17 +1215,61 @@ class MainViewModel: ObservableObject {
             playSound(named: "stop")
         }
 
-        sealingTask = Task { [weak self] in
-            guard let self else { return }
-            await self.audioRecorder.stopStreamingRecording(
-                streamEstablished: self.activeIngress?.hasEmittedFullPacket == true
-            )
+        let streamEstablished = activeIngress?.hasEmittedFullPacket == true
+        let recorder = audioRecorder
+        let barrierTask = Task {
+            await recorder.stopStreamingRecording(streamEstablished: streamEstablished)
+        }
+        nextRecorderBarrierIdentifier &+= 1
+        let barrier = PendingRecorderBarrier(
+            identifier: nextRecorderBarrierIdentifier,
+            task: barrierTask
+        )
+        sealingTask = barrierTask
+        pendingRecorderBarrier = barrier
+
+        switch interruptedPhase {
+        case .creatingSession, .waitingToRetry:
+            Task { @MainActor [weak self] in
+                await self?.completeAfterRecoverableRelease(identity: identity)
+            }
+        case .replayingJournal:
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if let interruptedSession {
+                    await self.cancelCurrentAttemptOnce(interruptedSession)
+                }
+                await self.completeAfterRecoverableRelease(identity: identity)
+            }
+        case .idle, .consumingLiveAudio, .finishing:
+            break
         }
     }
 
-    private func completeNormally(identity: StreamingSessionIdentity) {
-        guard isActive(identity) else { return }
+    private func awaitSealingBarrier(identity: StreamingSessionIdentity) async -> Bool {
+        guard isActive(identity) else { return false }
+        let barrier = pendingRecorderBarrier
+        if let barrier {
+            await barrier.task.value
+            guard isActive(identity) else { return false }
+            guard clearPendingRecorderBarrier(identifier: barrier.identifier) else {
+                return false
+            }
+        }
+        return isActive(identity)
+    }
+
+    @discardableResult
+    private func clearPendingRecorderBarrier(identifier: UInt64) -> Bool {
+        guard pendingRecorderBarrier?.identifier == identifier else { return false }
+        pendingRecorderBarrier = nil
+        return true
+    }
+
+    private func completeNormally(identity: StreamingSessionIdentity) async {
+        guard await awaitSealingBarrier(identity: identity) else { return }
         let preservesCompletionFeedback = isCompletionFeedbackPresented
+        closeRetryAdmission()
         invalidateActiveIdentityAndCursor(preserveCommittedCursorState: true)
         consumerTask = nil
         sealingTask = nil
@@ -684,6 +1279,11 @@ class MainViewModel: ObservableObject {
         usesCurrentFocusFinalOutput = false
         deliveredCurrentFocusFinal = false
         latestFinalOnlyValue = nil
+        attemptedFirstPartialRebind = false
+        packetJournal.removeAll(keepingCapacity: true)
+        retryOrdinal = 0
+        currentAttemptCancellationTask = nil
+        streamingAttemptPhase = .idle
         sealStarted = false
         acceptedPacket = false
         stopSoundPlayed = false
@@ -696,22 +1296,42 @@ class MainViewModel: ObservableObject {
     }
 
     private func terminateAbnormally(message: String?, reportsError: Bool) async {
+        let ingress = activeIngress
         let session = activeStreamingSession
-        let task = consumerTask
+        let existingCancellationTask = currentAttemptCancellationTask
+        let consumer = consumerTask
+        let barrier = pendingRecorderBarrier
 
+        closeRetryAdmission()
         invalidateActiveIdentityAndCursor()
-        activeIngress?.fail(.cancelled)
+        ingress?.fail(.cancelled)
         consumerTask = nil
-        sealingTask?.cancel()
         sealingTask = nil
         clearInteractionReferences()
         stopMaxDurationTimer()
+        consumer?.cancel()
         hideOverlay()
-
-        task?.cancel()
         audioRecorder.forceCleanup()
-        await session?.cancel()
+        if barrier == nil {
+            publishAbnormalTerminalState(message: message, reportsError: reportsError)
+        }
 
+        if let session {
+            await cancelCurrentAttemptOnce(session)
+        } else if let existingCancellationTask {
+            await existingCancellationTask.value
+        }
+
+        if let barrier {
+            await barrier.task.value
+            guard clearPendingRecorderBarrier(identifier: barrier.identifier) else {
+                return
+            }
+            publishAbnormalTerminalState(message: message, reportsError: reportsError)
+        }
+    }
+
+    private func publishAbnormalTerminalState(message: String?, reportsError: Bool) {
         if reportsError, let message {
             status = .error(message)
             hotKeyService.setError(message)
@@ -725,8 +1345,10 @@ class MainViewModel: ObservableObject {
         activeSessionIdentity = nil
         if !preserveCommittedCursorState {
             cursorSession?.invalidate()
+            currentFocusAppendSession?.invalidate()
         }
         cursorSession = nil
+        currentFocusAppendSession = nil
     }
 
     private func clearInteractionReferences() {
@@ -736,6 +1358,13 @@ class MainViewModel: ObservableObject {
         usesCurrentFocusFinalOutput = false
         deliveredCurrentFocusFinal = false
         latestFinalOnlyValue = nil
+        attemptedFirstPartialRebind = false
+        packetJournal.removeAll(keepingCapacity: true)
+        retryOrdinal = 0
+        retryAdmissionOpen = false
+        streamingAttemptPhase = .idle
+        sessionCreationTask = nil
+        retrySleepTask = nil
         sealStarted = false
         acceptedPacket = false
         stopSoundPlayed = false
@@ -747,6 +1376,23 @@ class MainViewModel: ObservableObject {
 
     private func isContentless(_ text: String) -> Bool {
         text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func isUsableHypothesis(_ event: StreamingRecognitionEvent) -> Bool {
+        switch event {
+        case .partial(let text), .final(let text):
+            return !isContentless(text)
+        case .failed, .cancelled:
+            return false
+        }
+    }
+
+    private func closeRetryAdmission() {
+        retryAdmissionOpen = false
+        sessionCreationTask?.cancel()
+        sessionCreationTask = nil
+        retrySleepTask?.cancel()
+        retrySleepTask = nil
     }
 
     private func publishCompletionFeedback(_ feedback: RecordingState) {
@@ -781,6 +1427,8 @@ class MainViewModel: ObservableObject {
                     reportsError: true
                 )
             }
+        } else if pendingRecorderBarrier != nil {
+            logger.info("Ignoring recorder failure while abnormal sealing cleanup owns the barrier")
         } else {
             audioRecorder.forceCleanup()
             stopMaxDurationTimer()
@@ -916,12 +1564,15 @@ class MainViewModel: ObservableObject {
 
     func cleanup() {
         logger.info("MainViewModel cleanup called")
+        closeRetryAdmission()
         invalidateActiveIdentityAndCursor()
         activeIngress?.fail(.cancelled)
         consumerTask?.cancel()
         consumerTask = nil
         sealingTask?.cancel()
         sealingTask = nil
+        pendingRecorderBarrier?.task.cancel()
+        pendingRecorderBarrier = nil
         clearInteractionReferences()
         audioRecorder.forceCleanup()
         stopHotKeyMonitoring()

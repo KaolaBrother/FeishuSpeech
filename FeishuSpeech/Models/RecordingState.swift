@@ -7,6 +7,7 @@ enum RecordingState: Equatable {
     case sealing
     case manualRecoveryCopied
     case emptyFinalPreservedPartial
+    case provisionalOutputPreserved
     // Compatibility-only states for the retired whole-file flow.
     case recording
     case transcribing
@@ -14,7 +15,7 @@ enum RecordingState: Equatable {
 
     var isCompletionFeedback: Bool {
         switch self {
-        case .manualRecoveryCopied, .emptyFinalPreservedPartial:
+        case .manualRecoveryCopied, .emptyFinalPreservedPartial, .provisionalOutputPreserved:
             return true
         default:
             return false
@@ -29,6 +30,7 @@ enum RecordingState: Equatable {
         case .sealing: return "ellipsis.circle.fill"
         case .manualRecoveryCopied: return "doc.on.clipboard.fill"
         case .emptyFinalPreservedPartial: return "text.badge.checkmark"
+        case .provisionalOutputPreserved: return "text.badge.checkmark"
         case .recording: return "waveform.circle.fill"
         case .transcribing: return "ellipsis.circle"
         case .error: return "exclamationmark.circle"
@@ -43,6 +45,7 @@ enum RecordingState: Equatable {
         case .sealing: return .orange
         case .manualRecoveryCopied: return .orange
         case .emptyFinalPreservedPartial: return .secondary
+        case .provisionalOutputPreserved: return .secondary
         case .recording: return .red
         case .transcribing: return .orange
         case .error: return .red
@@ -57,6 +60,7 @@ enum RecordingState: Equatable {
         case .sealing: return "正在完成识别…"
         case .manualRecoveryCopied: return "识别结果已复制，请手动粘贴"
         case .emptyFinalPreservedPartial: return "未返回最终文本，已保留已显示内容"
+        case .provisionalOutputPreserved: return "已保留已输入内容"
         case .recording: return "录音中..."
         case .transcribing: return "识别中..."
         case .error(let msg): return msg

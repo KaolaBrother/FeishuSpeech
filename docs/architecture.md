@@ -11,17 +11,22 @@ generation-bound streaming pipeline:
 HotKeyService
   -> MainViewModel (@MainActor generation owner)
       -> streaming AudioRecorder -> byte-bounded PCM ingress
-          -> FeishuStreamingSession actor -> partial/final events
+          -> ordered packet journal -> one fresh FeishuStreamingSession actor per attempt
       -> optional CursorTextSession (@MainActor) -> original AX editable element
-      -> unbound final output -> current frontmost focus when AX capture is unavailable
+      -> CurrentFocusAppendSession -> same-PID suffix output when AX capture is unavailable
 ```
 
 The production hot-key state is `idle -> pending -> streaming -> sealing -> idle | error`.
-`pending` retains the 0.3-second gate. `streaming` owns one recorder, Feishu stream, and optional
-cursor writer. Fn release or the 60-second cap enters `sealing`, closes capture, flushes at most one
-audio tail, emits one normal finish, and waits for the final response. A new hold cannot start while
-sealing. Reset, sleep/wake, cancellation, or failure invalidates the active session identity before
-cleanup so late callbacks are inert.
+`pending` retains the 0.3-second gate. `streaming` owns one recorder/ingress, one ordered packet
+journal, at most one active Feishu session, and at most one cursor writer. A recoverable attempt
+failure leaves the hold generation and capture alive, aborts an established failed stream once,
+backs off, and replays the journal through a fresh serial session. Fn release or the 60-second cap
+enters `sealing`, closes retry admission before awaiting work, actively cancels creation/backoff,
+closes capture, and flushes at most one audio tail. A live attempt may finish; a replaying attempt is
+cancelled through one shared bounded action-3 task. Completion waits for the old recorder barrier,
+then preserves/routes the latest usable result or reports one fixed no-result error. A new hold
+cannot start while sealing. Reset, sleep/wake, cancellation, or terminal lifecycle failure
+invalidates the active generation before cleanup so late callbacks are inert.
 
 ### Streaming audio boundary
 
@@ -29,12 +34,16 @@ cleanup so late callbacks are inert.
 `ByteBoundedAudioIngress`, which coalesces capture-order bytes into 6,400-byte elements
 (about 200 ms) before entering a non-blocking async stream. The retained 60-second cap is
 1,920,000 bytes / 300 elements. This is a byte/duration bound, not a raw callback-count bound.
-The ingress owns queued packets, pending coalescing bytes, terminal state, and waiters under one
-lock. Dequeue subtracts the exact packet size before resuming the consumer, so drained capacity is
-immediately reusable. After the real audio callback queue barrier, an established stream may pad
-its final non-empty tail to the 3,200-byte (100 ms) local minimum.
-Overflow fails the current stream explicitly; the pipeline never drops, reorders, replays, or sends
-PCM packets in parallel.
+The ingress owns queued packets, pending coalescing bytes, delivered replay-retention accounting,
+terminal state, and waiters under one lock. In production, drained packets remain charged because
+the journal retains them for replay; the queued, pending, and delivered captured-byte total cannot
+exceed 1,920,000 bytes. Explicit non-replay users still release exact capacity on dequeue. After the
+real audio callback queue barrier, an established stream may pad its final non-empty tail to the
+3,200-byte (100 ms) local minimum without charging generated silence as captured audio.
+Overflow fails the hold explicitly; the pipeline never drops, reorders, re-chunks, or sends PCM
+packets in parallel. The sole consumer appends every drained packet to the hold journal before its
+first send. A fresh attempt replays those exact packet elements in order while the same capture and
+ingress continue accepting audio.
 
 ### Streaming transport boundary
 
@@ -43,10 +52,18 @@ token snapshot, sequence number,
 first-packet acknowledgement, terminal intent, active request, and completion state. It serializes
 `action=1` open, `action=0` continuation, `action=2` finish, and bounded best-effort `action=3`
 abort requests; action 3 has one total one-second best-effort deadline and cannot overlap an audio
-or finish request. Only the exact known invalid-token business code in a bounded HTTP 400/401
-response may refresh before the first packet is accepted, retrying that same first action and
-sequence once.
-An established stream has no whole-file fallback or whole-audio retry.
+or finish request. Recognition outcome and abort eligibility are independent: a failed action 1
+before acceptance needs no abort; a failed established action 0 or action 2 may emit action 3 once;
+a successfully completed action 2 forbids it. Only the exact known invalid-token business code in
+a bounded HTTP 400/401 response may refresh inside the first session, retrying that same first
+action and sequence once.
+
+The coordinator, not the transport actor, owns retry. Recoverable failures create a fresh stream
+after hold-wide exponential backoff (250 ms base, doubling to a 4-second cap; jitter produces a
+200 ms minimum). It serially replays the journal from zero. Historical replay partials are
+suppressed until catch-up, when only the latest accepted hypothesis is offered to output. The retry
+ordinal never resets during the hold. Release closes admission to another session. There is no
+whole-file fallback or parallel request chain.
 
 Intermediate `recognition_text` is treated as opaque replacement state because Feishu does not
 document whether it is delta, cumulative, stabilized, or revisable.
@@ -55,7 +72,10 @@ The response trust boundary deliberately differs from the request identity bound
 still carry the session-owned `stream_id`, `sequence_id`, and action, but code-zero responses do
 not have to echo matching IDs. The parser prefers `data.recognition_text`, falls back to
 `data.text`, and maps missing `data`/text to an empty event, matching KaolaTerminal's proven
-streaming implementation. Nonzero business codes and malformed JSON remain terminal failures.
+streaming implementation. Nonzero business codes and malformed JSON fail that transport attempt;
+the coordinator retries only its explicit recoverable subset. Business code `10024` is in that
+subset because of the observed failure sequence, but its provider meaning is unknown: current
+official Feishu/Lark documentation and SDK do not define it.
 
 These packet sizes, tail padding, lowercase stream IDs, same-sequence token retry, strict
 serialization, and exact-once terminal behavior are FeishuSpeech application invariants. Public
@@ -85,16 +105,25 @@ selection, caret, text, element, or generation mismatch permanently invalidates 
 Late events are dropped and are never redirected to a newly focused control.
 
 The app does not use per-partial clipboard writes, synthetic Backspace, or Shift+Arrow selection.
-There are two final-only paths. If a safe editable element was captured but lacks verified range
+If a safe editable element was captured but lacks verified range
 replacement, the stream retains only the latest opaque response and posts one process-targeted
 Cmd+V only after the captured PID, focused element, and security state are revalidated; the sink
 validates again after posting. A stale/uncertain captured target uses copy-only manual recovery.
-If no AX destination can be captured or confirmed, the stream still starts, retains opaque
-responses, samples Secure Input and the frontmost PID twice, and posts a non-empty final at most
-once to the current focus as a direct Unicode CGEvent. Successful unbound delivery is clipboard-free
-and performs no cursor-position or original-destination confirmation. Ordinary event-posting or
-PID-stability failure uses copy-only manual recovery; a security rejection performs no input and
-no clipboard mutation.
+
+If no AX destination can be captured or confirmed at startup, the first non-empty partial triggers
+one final AX binding attempt. A live result takes the normal captured-range path. If that probe does
+not yield live capability,
+`CurrentFocusAppendSession` binds the then-current frontmost PID for this hold. It posts the first
+safe hypothesis through direct Unicode input, then posts only an exact unseen UTF-16 suffix when a
+later hypothesis begins with every already emitted code unit. Duplicates are no-ops; revised or
+shorter hypotheses are suppressed. Replay offers only the catch-up-frontier hypothesis, so
+historical responses do not duplicate visible output.
+
+The append path samples Secure Input and bound PID before and after posting and observes application
+activation changes. Any PID/security/delivery uncertainty permanently suspends it for the hold. It
+never deletes, selects, navigates, writes the pasteboard, or resends an uncertain payload. Without
+an AX range it cannot observe a caret move inside the same PID; that residual targeting risk is
+explicit. A divergent final preserves the emitted text rather than attempting destructive repair.
 
 Both paths reject automatic paste for action-capable C0/C1 control characters and use copy-only
 manual recovery instead. An affirmatively detected secure target or Secure Event Input is
@@ -103,10 +132,10 @@ pasteboard mutation.
 
 ### Finalization and privacy
 
-A non-empty final response replaces the verified provisional range and releases ownership without
-synthesizing Return. Empty final or stream failure preserves a last verified visible partial rather
-than risk deleting user content after ownership becomes uncertain. A failure before the first
-write causes no target mutation.
+A non-empty final response replaces the verified AX provisional range, or appends a final exact
+suffix through the current-focus session, and releases ownership without synthesizing Return.
+Empty final or recoverable failure preserves the last verified/accepted visible value rather than
+risk deleting user content. A failure before the first write causes no target mutation.
 
 The overlay remains status-only; target applications are the editing surface. Empty-final and
 manual-copy outcomes use fixed, generation-guarded feedback presented for two seconds even though
@@ -115,12 +144,15 @@ typed state/failure values, generations, sequence numbers, and byte counts, but 
 text, audio, credentials/tokens, stream IDs, focused-control contents, application/window titles,
 or clipboard payloads.
 
-A terminal provider or streaming event owns one abnormal exit. The coordinator invalidates the
-generation and cursor session, hides the overlay, then cleans recorder, ingress, transport, and
-timers once. A terminal packet does not fall through into normal `finish()`. When the resulting
-error is reflected through `HotKeyService`, an identical `.error(message)` is not republished;
-`MainViewModel` also does not start a second teardown after the active generation is gone. This
-keeps overlay animation generations finite and guarantees that the terminal hide can complete.
+A recoverable provider/transport event owns one attempt transition, not an abnormal hold exit. The
+coordinator cancels the failed attempt, waits with cancellable backoff, and admits a successor only
+while the same generation is active and unsealed. It publishes no user-facing error, overlay
+transition, clipboard recovery, or notification. A non-recoverable terminal event immediately
+invalidates the generation and every cursor writer, fails the ingress, cancels the
+consumer/transport, and hides the overlay. An already-running recorder-stop barrier is not awaited
+before those authority revocations; it is retained only to block a successor and delay the final
+idle/error publication until the old recorder has actually stopped. Identical reflected hot-key
+errors cannot re-enter teardown.
 
 An authentication-provider failure is surfaced only as `认证失败，请检查应用凭据`. The associated
 backend detail is not a public diagnostic surface.
@@ -201,9 +233,10 @@ event and replays the queued lifecycle events once the view model is injected.
 
 `MainViewModel.handleSystemWillSleep()` and `handleSystemDidWake()` both use the streaming terminal
 path: invalidate the active identity and cursor ownership first; fail the ingress; cancel consumer
-and sealing work; release captured destination/session references; force-clean the recorder; issue
-a bounded stream cancel when applicable; stop the timer and overlay; return coordinator and hot-key
-state to idle; then call `FeishuAPIService.resetStateForWake()`.
+and transport work; release captured destination/session references; force-clean the recorder; and
+stop the timer and overlay. If recorder sealing is already in flight, the terminal path retains and
+awaits that barrier before returning coordinator and hot-key state to idle. It then calls
+`FeishuAPIService.resetStateForWake()`.
 
 The wake handler also calls `HotKeyService.recoverAfterWake()` after the API
 wake reset.
@@ -299,12 +332,13 @@ The issue-26 final-only output instead:
 - accepts only text without C0, DEL, or C1 control scalars for automatic delivery;
 - when a destination token exists, targets that captured process with `CGEvent.postToPid` and
   validates the captured element and security state before and after delivery;
-- when AX capture/confirmation is unavailable, samples Secure Input and the frontmost PID twice,
-  then posts the final once to current focus as a direct Unicode CGEvent without using the
-  pasteboard or confirming cursor position;
+- when AX capture/confirmation is unavailable, re-probes AX once on the first non-empty partial;
+  if still unavailable, binds the frontmost PID and posts the first value plus exact UTF-16 suffixes
+  through direct Unicode events while Secure Input stays clear and the PID stays stable;
 - copies the exact final value without posting a key event when a captured non-security delivery
-  is stale/uncertain, when unbound PID/delivery fails ordinarily, or when the value contains
-  control characters, then shows fixed two-second transcript-free feedback;
+  is stale/uncertain or when the captured final-only value contains control characters, then shows
+  fixed two-second transcript-free feedback; current-focus provisional output never falls through
+  to clipboard recovery after revision, PID/security loss, or uncertain delivery;
 - performs no pasteboard recovery for an affirmatively detected secure target or Secure Event
   Input.
 

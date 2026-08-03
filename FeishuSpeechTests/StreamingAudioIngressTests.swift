@@ -155,6 +155,172 @@ final class StreamingAudioIngressTests: XCTestCase {
         )
     }
 
+    func test_replayRetention_acceptsExactlyTheHoldWideByteBudgetAfterDrain() async throws {
+        let configuration = AudioIngressConfiguration(
+            packetByteCount: 4,
+            minimumTailByteCount: 2,
+            maximumBufferedByteCount: 8
+        )
+        let ingress = ByteBoundedAudioIngress(
+            configuration: configuration,
+            retainsDeliveredPacketsForReplay: true
+        )
+        var iterator = ingress.stream.makeAsyncIterator()
+        let firstPacket = Data([0x01, 0x02, 0x03, 0x04])
+        let secondPacket = Data([0x05, 0x06, 0x07, 0x08])
+
+        XCTAssertNil(ingress.append(firstPacket))
+        let drainedFirstPacket = try await iterator.next()
+        XCTAssertEqual(drainedFirstPacket, firstPacket)
+
+        XCTAssertNil(
+            ingress.append(secondPacket),
+            "delivered plus undrained bytes exactly equal to the hold-wide limit must be accepted"
+        )
+        ingress.finish(streamEstablished: true)
+
+        let drainedSecondPacket = try await iterator.next()
+        XCTAssertEqual(drainedSecondPacket, secondPacket)
+        let terminalElement = try await iterator.next()
+        XCTAssertNil(terminalElement)
+    }
+
+    func test_replayRetention_oneBytePastBudgetFailsSynchronouslyAfterDeliveredPacket() async throws {
+        let configuration = AudioIngressConfiguration(
+            packetByteCount: 4,
+            minimumTailByteCount: 2,
+            maximumBufferedByteCount: 4
+        )
+        let ingress = ByteBoundedAudioIngress(
+            configuration: configuration,
+            retainsDeliveredPacketsForReplay: true
+        )
+        var iterator = ingress.stream.makeAsyncIterator()
+        let retainedPacket = Data([0x11, 0x12, 0x13, 0x14])
+
+        XCTAssertNil(ingress.append(retainedPacket))
+        let deliveredPacket = try await iterator.next()
+        XCTAssertEqual(deliveredPacket, retainedPacket)
+
+        XCTAssertEqual(
+            ingress.append(Data([0x15])),
+            AudioIngressError.ingressOverflow,
+            "a delivered replay packet must remain charged against the same byte limit"
+        )
+
+        do {
+            _ = try await iterator.next()
+            XCTFail("the synchronous overflow must terminate the ingress")
+        } catch let error as AudioIngressError {
+            XCTAssertEqual(error, .ingressOverflow)
+        } catch {
+            XCTFail("expected AudioIngressError.ingressOverflow, got \(error)")
+        }
+    }
+
+    func test_replayRetention_directWaiterDeliveryRemainsChargedAgainstBudget() async throws {
+        let configuration = AudioIngressConfiguration(
+            packetByteCount: 4,
+            minimumTailByteCount: 2,
+            maximumBufferedByteCount: 4
+        )
+        let ingress = ByteBoundedAudioIngress(
+            configuration: configuration,
+            retainsDeliveredPacketsForReplay: true
+        )
+        var iterator = ingress.stream.makeAsyncIterator()
+        let waiterEnteredNext = expectation(description: "consumer entered next")
+        let packet = Data([0x16, 0x17, 0x18, 0x19])
+        let deliveryTask = Task { @MainActor in
+            waiterEnteredNext.fulfill()
+            return try await iterator.next()
+        }
+
+        await fulfillment(of: [waiterEnteredNext], timeout: 1)
+        XCTAssertNil(ingress.append(packet))
+        let directlyDeliveredPacket = try await deliveryTask.value
+        XCTAssertEqual(directlyDeliveredPacket, packet)
+        XCTAssertEqual(
+            ingress.append(Data([0x1A])),
+            AudioIngressError.ingressOverflow,
+            "delivery through a suspended waiter must not bypass replay-byte accounting"
+        )
+    }
+
+    func test_explicitNonReplayIngress_releasesDeliveredBytesForReuse() async throws {
+        let configuration = AudioIngressConfiguration(
+            packetByteCount: 4,
+            minimumTailByteCount: 2,
+            maximumBufferedByteCount: 4
+        )
+        let ingress = ByteBoundedAudioIngress(
+            configuration: configuration,
+            retainsDeliveredPacketsForReplay: false
+        )
+        var iterator = ingress.stream.makeAsyncIterator()
+        let firstPacket = Data([0x21, 0x22, 0x23, 0x24])
+        let replacementPacket = Data([0x25, 0x26, 0x27, 0x28])
+
+        XCTAssertNil(ingress.append(firstPacket))
+        let deliveredFirstPacket = try await iterator.next()
+        XCTAssertEqual(deliveredFirstPacket, firstPacket)
+        XCTAssertNil(
+            ingress.append(replacementPacket),
+            "explicit non-replay mode must preserve occupancy-released buffering"
+        )
+
+        ingress.finish(streamEstablished: true)
+        let deliveredReplacementPacket = try await iterator.next()
+        XCTAssertEqual(deliveredReplacementPacket, replacementPacket)
+        let terminalElement = try await iterator.next()
+        XCTAssertNil(terminalElement)
+    }
+
+    func test_replayRetention_shortPaddedTailDoesNotDoubleChargeCapturedBytes() async throws {
+        let configuration = AudioIngressConfiguration(
+            packetByteCount: 4,
+            minimumTailByteCount: 4,
+            maximumBufferedByteCount: 4
+        )
+        let ingress = ByteBoundedAudioIngress(
+            configuration: configuration,
+            retainsDeliveredPacketsForReplay: true
+        )
+        var iterator = ingress.stream.makeAsyncIterator()
+
+        XCTAssertNil(ingress.append(Data([0x31])))
+        ingress.finish(streamEstablished: true)
+
+        let paddedTail = try await iterator.next()
+        XCTAssertEqual(paddedTail, Data([0x31, 0x00, 0x00, 0x00]))
+        let terminalElement = try await iterator.next()
+        XCTAssertNil(
+            terminalElement,
+            "padding the retained raw tail must not make the exact byte budget overflow"
+        )
+    }
+
+    func test_replayRetention_firstTerminalFailureRemainsAuthoritative() async {
+        let ingress = ByteBoundedAudioIngress(
+            configuration: productionConfiguration,
+            retainsDeliveredPacketsForReplay: true
+        )
+        let stream = ingress.stream
+
+        ingress.fail(AudioIngressError.captureFailed)
+        ingress.finish(streamEstablished: true)
+        ingress.fail(AudioIngressError.ingressOverflow)
+
+        do {
+            _ = try await collect(stream)
+            XCTFail("the first terminal failure must remain authoritative in replay mode")
+        } catch let error as AudioIngressError {
+            XCTAssertEqual(error, .captureFailed)
+        } catch {
+            XCTFail("expected AudioIngressError.captureFailed, got \(error)")
+        }
+    }
+
     func test_failureAndRepeatedFinish_closeTheContinuationExactlyOnce() async {
         let ingress = ByteBoundedAudioIngress(configuration: productionConfiguration)
         let stream = ingress.stream

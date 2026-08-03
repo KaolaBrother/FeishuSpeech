@@ -18,7 +18,7 @@ final class FeishuStreamingSessionTests: XCTestCase {
 
         let diagnostic = try await captureFirstPacketFailure(
             response: response,
-            expectedFailure: .backend
+            expectedFailure: .backend(code: 123_456)
         )
 
         XCTAssertEqual(diagnostic.action, 1)
@@ -374,7 +374,116 @@ final class FeishuStreamingSessionTests: XCTestCase {
         await continuation.value
     }
 
-    func test_cancelAfterAction2NeverEmitsAbort() async throws {
+    func test_backendFailureAfterAcceptedFirstPacket_thenRepeatedCancelEmitsOneSerialAbortAtUnconsumedSequence() async throws {
+        let transport = StreamingRequestStub(responses: [
+            streamResponse(text: "accepted"),
+            streamResponse(code: 10_024, message: "PRIVATE_BACKEND_MESSAGE", text: "PRIVATE_TRANSCRIPT"),
+            streamResponse(text: "abort acknowledged")
+        ])
+        let session = FeishuStreamingSession(
+            streamID: "fixed_stream_017",
+            initialToken: "PRIVATE_TOKEN",
+            refreshToken: { "unused" },
+            requestSender: { request in try await transport.send(request) }
+        )
+
+        _ = try await session.sendAudioPacket(Data(repeating: 0x37, count: 6_400))
+        do {
+            _ = try await session.sendAudioPacket(Data("PRIVATE_AUDIO".utf8))
+            XCTFail("the rejected continuation must retain its typed backend failure")
+        } catch let failure as StreamFailure {
+            XCTAssertEqual(failure, .backend(code: 10_024))
+            assertSafeFailureSurface(
+                failure,
+                forbiddenValues: [
+                    "PRIVATE_BACKEND_MESSAGE",
+                    "PRIVATE_TRANSCRIPT",
+                    "PRIVATE_TOKEN",
+                    "fixed_stream_017",
+                    "PRIVATE_AUDIO"
+                ]
+            )
+        } catch {
+            XCTFail("expected sanitized StreamFailure.backend, got \(error)")
+        }
+
+        await session.cancel()
+        await session.cancel()
+
+        let requests = try await transport.parsedRequests()
+        let maximumActiveRequestCount = await transport.maximumActiveRequestCount
+        XCTAssertEqual(requests.map(\.action), [1, 0, 3])
+        XCTAssertEqual(requests.map(\.sequenceID), [0, 1, 1])
+        XCTAssertEqual(requests.filter { $0.action == 3 }.count, 1)
+        XCTAssertEqual(maximumActiveRequestCount, 1, "failure teardown must remain serialized")
+    }
+
+    func test_backendFailureBeforeFirstPacketAcceptance_thenRepeatedCancelEmitsNoAbort() async throws {
+        let transport = StreamingRequestStub(responses: [
+            streamResponse(code: 10_024, message: "PRIVATE_BACKEND_MESSAGE", text: "PRIVATE_TRANSCRIPT")
+        ])
+        let session = FeishuStreamingSession(
+            streamID: "fixed_stream_018",
+            initialToken: "PRIVATE_TOKEN",
+            refreshToken: { "unused" },
+            requestSender: { request in try await transport.send(request) }
+        )
+
+        do {
+            _ = try await session.sendAudioPacket(Data(repeating: 0x39, count: 6_400))
+            XCTFail("the rejected first packet must fail")
+        } catch let failure as StreamFailure {
+            XCTAssertEqual(failure, .backend(code: 10_024))
+        } catch {
+            XCTFail("expected sanitized StreamFailure.backend, got \(error)")
+        }
+
+        await session.cancel()
+        await session.cancel()
+
+        let requests = try await transport.parsedRequests()
+        let maximumActiveRequestCount = await transport.maximumActiveRequestCount
+        XCTAssertEqual(requests.map(\.action), [1])
+        XCTAssertEqual(requests.map(\.sequenceID), [0])
+        XCTAssertFalse(requests.contains { $0.action == 3 })
+        XCTAssertEqual(maximumActiveRequestCount, 1)
+    }
+
+    func test_backendFailureOnAction2_thenRepeatedCancelEmitsOneAbortAtUnconsumedSequence() async throws {
+        let transport = StreamingRequestStub(responses: [
+            streamResponse(text: "accepted"),
+            streamResponse(code: 10_024, message: "PRIVATE_BACKEND_MESSAGE", text: "PRIVATE_TRANSCRIPT"),
+            streamResponse(text: "abort acknowledged")
+        ])
+        let session = FeishuStreamingSession(
+            streamID: "fixed_stream_019",
+            initialToken: "PRIVATE_TOKEN",
+            refreshToken: { "unused" },
+            requestSender: { request in try await transport.send(request) }
+        )
+
+        _ = try await session.sendAudioPacket(Data(repeating: 0x3A, count: 6_400))
+        do {
+            _ = try await session.finish()
+            XCTFail("the rejected action 2 must retain its typed backend failure")
+        } catch let failure as StreamFailure {
+            XCTAssertEqual(failure, .backend(code: 10_024))
+        } catch {
+            XCTFail("expected sanitized StreamFailure.backend, got \(error)")
+        }
+
+        await session.cancel()
+        await session.cancel()
+
+        let requests = try await transport.parsedRequests()
+        let maximumActiveRequestCount = await transport.maximumActiveRequestCount
+        XCTAssertEqual(requests.map(\.action), [1, 2, 3])
+        XCTAssertEqual(requests.map(\.sequenceID), [0, 1, 1])
+        XCTAssertEqual(requests.filter { $0.action == 3 }.count, 1)
+        XCTAssertEqual(maximumActiveRequestCount, 1, "failed finish teardown must remain serialized")
+    }
+
+    func test_cancelAfterSuccessfulAction2NeverEmitsAbort() async throws {
         let transport = StreamingRequestStub(responses: [
             streamResponse(text: "accepted"),
             streamResponse(text: "final")
@@ -391,9 +500,10 @@ final class FeishuStreamingSessionTests: XCTestCase {
         await session.cancel()
         await session.cancel()
 
-        let actions = try await transport.parsedRequests().map(\.action)
-        XCTAssertEqual(actions, [1, 2])
-        XCTAssertFalse(actions.contains(3), "action 3 is forbidden after action 2 was emitted")
+        let requests = try await transport.parsedRequests()
+        XCTAssertEqual(requests.map(\.action), [1, 2])
+        XCTAssertEqual(requests.map(\.sequenceID), [0, 1])
+        XCTAssertFalse(requests.contains { $0.action == 3 }, "action 3 is forbidden after action 2 succeeded")
     }
 
     func test_knownInvalidTokenBeforeAcceptance_refreshesOnceAndRetriesSameFirstPacketAndSequence() async throws {
@@ -472,7 +582,7 @@ final class FeishuStreamingSessionTests: XCTestCase {
             _ = try await genericSession.sendAudioPacket(Data(repeating: 0x43, count: 6_400))
             XCTFail("generic HTTP 400 must remain terminal")
         } catch let failure as StreamFailure {
-            XCTAssertEqual(failure, .httpStatus)
+            XCTAssertEqual(failure, .httpStatus(400))
         } catch {
             XCTFail("expected sanitized StreamFailure.httpStatus, got \(error)")
         }
@@ -636,9 +746,9 @@ final class FeishuStreamingSessionTests: XCTestCase {
         XCTAssertEqual(requests.filter { $0.action == 3 }.count, 1)
     }
 
-    func test_non200RawBody_isSanitizedAndNeverRetried() async {
+    func test_non200RawBody_isSanitizedCarriesStatusAndNeverRetried() async {
         let rawBody = Data("RAW_BODY PRIVATE_TRANSCRIPT PRIVATE_TOKEN".utf8)
-        let transport = StreamingRequestStub(responses: [DirectHTTPResponse(statusCode: 500, body: rawBody)])
+        let transport = StreamingRequestStub(responses: [DirectHTTPResponse(statusCode: 503, body: rawBody)])
         let session = FeishuStreamingSession(
             streamID: "fixed_stream_006",
             initialToken: "PRIVATE_TOKEN",
@@ -647,13 +757,22 @@ final class FeishuStreamingSessionTests: XCTestCase {
         )
 
         do {
-            _ = try await session.sendAudioPacket(Data(repeating: 0x71, count: 6_400))
+            _ = try await session.sendAudioPacket(Data("PRIVATE_AUDIO".utf8))
             XCTFail("HTTP failure must terminate the current stream")
+        } catch let failure as StreamFailure {
+            XCTAssertEqual(failure, .httpStatus(503))
+            assertSafeFailureSurface(
+                failure,
+                forbiddenValues: [
+                    "RAW_BODY",
+                    "PRIVATE_TRANSCRIPT",
+                    "PRIVATE_TOKEN",
+                    "fixed_stream_006",
+                    "PRIVATE_AUDIO"
+                ]
+            )
         } catch {
-            let publicSurface = error.localizedDescription + String(reflecting: error)
-            for secret in ["RAW_BODY", "PRIVATE_TRANSCRIPT", "PRIVATE_TOKEN", "fixed_stream_006"] {
-                XCTAssertFalse(publicSurface.contains(secret), "public failure leaked \(secret)")
-            }
+            XCTFail("expected sanitized StreamFailure.httpStatus, got \(error)")
         }
 
         let requestCount = await transport.requestCount
@@ -747,6 +866,25 @@ final class FeishuStreamingSessionTests: XCTestCase {
             XCTAssertFalse(
                 publicSurface.contains(forbiddenValue),
                 "diagnostic leaked forbidden value \(forbiddenValue)",
+                file: file,
+                line: line
+            )
+        }
+    }
+
+    private func assertSafeFailureSurface(
+        _ failure: StreamFailure,
+        forbiddenValues: [String],
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let publicSurface = failure.localizedDescription
+            + String(describing: failure)
+            + String(reflecting: failure)
+        for forbiddenValue in forbiddenValues {
+            XCTAssertFalse(
+                publicSurface.contains(forbiddenValue),
+                "stream failure leaked forbidden value \(forbiddenValue)",
                 file: file,
                 line: line
             )

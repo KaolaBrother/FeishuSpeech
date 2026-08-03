@@ -171,7 +171,7 @@ private final class SystemFinalTextKeyEventPoster: FinalTextKeyEventPosting {
 }
 
 @MainActor
-private final class SystemFinalTextCurrentFocusEventPoster: FinalTextCurrentFocusEventPosting {
+final class SystemFinalTextCurrentFocusEventPoster: FinalTextCurrentFocusEventPosting {
     func postUnicodeText(_ text: String) -> FinalTextCurrentFocusPostResult {
         let utf16 = Array(text.utf16)
         guard !utf16.isEmpty,
@@ -187,14 +187,14 @@ private final class SystemFinalTextCurrentFocusEventPoster: FinalTextCurrentFocu
 }
 
 @MainActor
-private final class SystemSecureInputStateProvider: SecureInputStateProviding {
+final class SystemSecureInputStateProvider: SecureInputStateProviding {
     func isSecureInputEnabled() -> Bool {
         IsSecureEventInputEnabled()
     }
 }
 
 @MainActor
-private final class SystemFrontmostProcessProvider: FrontmostProcessProviding {
+final class SystemFrontmostProcessProvider: FrontmostProcessProviding {
     func frontmostProcessIdentifier() -> pid_t? {
         NSWorkspace.shared.frontmostApplication?.processIdentifier
     }

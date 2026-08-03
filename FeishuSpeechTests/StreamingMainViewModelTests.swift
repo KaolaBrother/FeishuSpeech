@@ -77,11 +77,11 @@ final class StreamingMainViewModelTests: XCTestCase {
         XCTAssertFalse(visibleFeedback(context.viewModel).contains("无法确认输入位置"))
     }
 
-    func test_immediateProviderTerminalFailureDismissesOverlayAndTearsDownGenerationOnce() async {
+    func test_nonRecoverableProviderTerminalFailureDismissesOverlayAndTearsDownGenerationOnce() async {
         let transcript = "PRIVATE_LATE_AFTER_PROVIDER_FAILURE"
         let context = makeContext(
             capability: .accessibilityUnavailable,
-            packetEvents: [.failed(.network)]
+            packetEvents: [.failed(.authentication)]
         )
         let identity = StreamingSessionIdentity(generation: 186)
         context.recorder.onForceCleanup = {
@@ -607,6 +607,164 @@ final class StreamingMainViewModelTests: XCTestCase {
         }
     }
 
+    func test_resetDuringHeldSealingRevokesLiveWriterAndCancelsTransportBeforeRecorderBarrier() async {
+        let initialText = "PRIVATE_R11_LIVE_INITIAL"
+        let latePartial = "PRIVATE_R11_LIVE_LATE_PARTIAL"
+        let recorder = CoordinatorAudioRecorder(holdNextStopBarrier: true)
+        let session = ReviewControllableStreamingSession(
+            packetOutcomes: [
+                .event(.partial(initialText)),
+                .event(.partial(latePartial))
+            ],
+            holdSendCallNumber: 2,
+            cancelHeldSendOutcome: .event(.partial(latePartial))
+        )
+        let forbiddenSuccessor = RetryCoordinatorStreamingSession(
+            packetEvents: [.partial("PRIVATE_R11_FORBIDDEN_SUCCESSOR")]
+        )
+        let provider = RetryCoordinatorStreamingProvider(
+            factoryErrors: [],
+            sessions: [session, forbiddenSuccessor]
+        )
+        let context = makeReviewContext(
+            capability: .live,
+            provider: provider,
+            recorder: recorder,
+            retrySleeper: { _ in }
+        )
+        let resetCompletion = ReviewAsyncCompletionProbe()
+        let oldIdentity = StreamingSessionIdentity(generation: 172)
+        let successorIdentity = StreamingSessionIdentity(generation: 173)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: oldIdentity))
+        context.recorder.emit(Data(repeating: 0xB1, count: 12_800))
+        await waitUntil {
+            await session.isHoldingSend &&
+                context.accessibility.setSelectedTextCalls == [initialText]
+        }
+        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: oldIdentity))
+        await waitUntil { recorder.isHoldingStopBarrier }
+
+        let resetTask = Task { @MainActor in
+            await context.viewModel.resetService()
+            resetCompletion.markCompleted()
+        }
+        await settle(iterations: 50)
+        await session.releaseHeldIfNeeded()
+        await settle(iterations: 50)
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: successorIdentity))
+        await settle(iterations: 50)
+
+        let cancelCallCountBeforeBarrier = await session.cancelCallCount
+        let providerCallCountBeforeBarrier = await provider.makeSessionCallCount
+        XCTAssertNil(context.viewModel.activeSessionIdentityForTesting)
+        XCTAssertEqual(cancelCallCountBeforeBarrier, 1, "transport abort must not wait for recorder stop")
+        XCTAssertEqual(context.accessibility.setSelectedTextCalls, [initialText])
+        XCTAssertEqual(context.accessibility.rangeText, initialText)
+        XCTAssertEqual(context.output.insertedTexts, [])
+        XCTAssertEqual(context.output.copiedTexts, [])
+        XCTAssertEqual(providerCallCountBeforeBarrier, 1, "recorder latch must reject a successor")
+        XCTAssertEqual(recorder.startStreamingCallCount, 1)
+        XCTAssertTrue(recorder.isHoldingStopBarrier)
+        XCTAssertEqual(recorder.finishedIngressIdentifiers, [])
+        XCTAssertFalse(resetCompletion.completed)
+        XCTAssertEqual(context.viewModel.status, .sealing)
+        XCTAssertFalse(visibleFeedback(context.viewModel).contains(latePartial))
+
+        recorder.releaseStopBarrier()
+        await resetTask.value
+
+        let finalCancelCallCount = await session.cancelCallCount
+        XCTAssertTrue(resetCompletion.completed)
+        XCTAssertEqual(finalCancelCallCount, 1)
+        XCTAssertNil(context.viewModel.activeSessionIdentityForTesting)
+        XCTAssertEqual(context.viewModel.status, .idle)
+        XCTAssertEqual(recorder.finishedIngressIdentifiers, [recorder.startedIngressIdentifiers[0]])
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: successorIdentity))
+        await waitUntil { await provider.makeSessionCallCount == 2 }
+        await waitUntil { recorder.startStreamingCallCount == 2 }
+        XCTAssertEqual(context.viewModel.activeSessionIdentityForTesting, successorIdentity)
+        await context.viewModel.resetService()
+    }
+
+    func test_hotKeyFailureDuringHeldSealingRevokesAppendWriterAndCancelsTransportBeforeBarrier() async {
+        let initialText = "PRIVATE_R11_APPEND_INITIAL"
+        let lateFinal = "PRIVATE_R11_APPEND_LATE_FINAL"
+        let fixedError = "流式传输失败"
+        let recorder = CoordinatorAudioRecorder(holdNextStopBarrier: true)
+        let session = ReviewControllableStreamingSession(
+            packetOutcomes: [
+                .event(.partial(initialText)),
+                .event(.final(lateFinal))
+            ],
+            holdSendCallNumber: 2,
+            cancelHeldSendOutcome: .event(.final(lateFinal))
+        )
+        let forbiddenSuccessor = RetryCoordinatorStreamingSession(
+            packetEvents: [.partial("PRIVATE_R11_FORBIDDEN_SUCCESSOR")]
+        )
+        let provider = RetryCoordinatorStreamingProvider(
+            factoryErrors: [],
+            sessions: [session, forbiddenSuccessor]
+        )
+        let appendSession = CoordinatorCurrentFocusAppendSession()
+        let appendFactory = CoordinatorCurrentFocusAppendSessionFactory(session: appendSession)
+        let context = makeReviewContext(
+            capability: .accessibilityUnavailable,
+            rebindCapability: .accessibilityUnavailable,
+            provider: provider,
+            recorder: recorder,
+            appendFactory: appendFactory,
+            retrySleeper: { _ in }
+        )
+        let oldIdentity = StreamingSessionIdentity(generation: 174)
+        let successorIdentity = StreamingSessionIdentity(generation: 175)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: oldIdentity))
+        context.recorder.emit(Data(repeating: 0xB2, count: 12_800))
+        await waitUntil {
+            await session.isHoldingSend && appendSession.appliedTexts == [initialText]
+        }
+        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: oldIdentity))
+        await waitUntil { recorder.isHoldingStopBarrier }
+
+        context.viewModel.handleHotKeyStateForTesting(.error(fixedError))
+        await settle(iterations: 50)
+        await session.releaseHeldIfNeeded()
+        await settle(iterations: 50)
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: successorIdentity))
+        await settle(iterations: 50)
+
+        let cancelCallCountBeforeBarrier = await session.cancelCallCount
+        let providerCallCountBeforeBarrier = await provider.makeSessionCallCount
+        XCTAssertNil(context.viewModel.activeSessionIdentityForTesting)
+        XCTAssertEqual(appendSession.invalidateCallCount, 1)
+        XCTAssertEqual(cancelCallCountBeforeBarrier, 1, "transport abort must not wait for recorder stop")
+        XCTAssertEqual(appendSession.appliedTexts, [initialText])
+        XCTAssertEqual(appendSession.finalizeCallCount, 0)
+        XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
+        XCTAssertEqual(context.output.copiedTexts, [])
+        XCTAssertEqual(providerCallCountBeforeBarrier, 1, "recorder latch must reject a successor")
+        XCTAssertEqual(recorder.startStreamingCallCount, 1)
+        XCTAssertTrue(recorder.isHoldingStopBarrier)
+        XCTAssertEqual(recorder.finishedIngressIdentifiers, [])
+        XCTAssertEqual(context.viewModel.status, .sealing)
+        XCTAssertFalse(visibleFeedback(context.viewModel).contains(lateFinal))
+
+        recorder.releaseStopBarrier()
+        await waitUntil { context.viewModel.status == .error(fixedError) }
+        await waitUntil { await session.cancelCallCount == 1 }
+
+        let finalCancelCallCount = await session.cancelCallCount
+        XCTAssertEqual(finalCancelCallCount, 1)
+        XCTAssertNil(context.viewModel.activeSessionIdentityForTesting)
+        XCTAssertEqual(appendSession.invalidateCallCount, 1)
+        XCTAssertFalse(visibleFeedback(context.viewModel).contains(lateFinal))
+        XCTAssertEqual(recorder.finishedIngressIdentifiers, [recorder.startedIngressIdentifiers[0]])
+        await context.viewModel.resetService()
+    }
+
     func test_secureEventInputActivationInvalidatesAndCancelsBeforeFurtherLiveOrFinalOnlyOutput() async {
         for (offset, capability) in [
             CoordinatorAccessibilityClient.Capability.live,
@@ -674,8 +832,1161 @@ final class StreamingMainViewModelTests: XCTestCase {
         XCTAssertFalse(containsTranscript(context.viewModel, transcript: "PRIVATE_LATE_FINAL"))
     }
 
+    func test_recoverableMidStreamFailureReplaysJournalThenResumesSameGeneration() async {
+        let first = RetryCoordinatorStreamingSession(
+            packetEvents: [
+                .partial("first frontier"),
+                .failed(.backend(code: 10024))
+            ]
+        )
+        let replacement = RetryCoordinatorStreamingSession(
+            packetEvents: [
+                .partial("historical duplicate"),
+                .partial("catch-up frontier"),
+                .partial("live frontier")
+            ]
+        )
+        let sleeper = ControlledCoordinatorRetrySleeper()
+        let context = makeRetryContext(
+            capability: .live,
+            sessions: [first, replacement],
+            sleeper: sleeper
+        )
+        let identity = StreamingSessionIdentity(generation: 201)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await context.provider.makeSessionCallCount == 1 }
+        context.recorder.emit(Data(repeating: 0x11, count: 6_400))
+        await waitUntil { await first.sendCallCount == 1 }
+        XCTAssertEqual(context.accessibility.setSelectedTextCalls, ["first frontier"])
+
+        context.recorder.emit(Data(repeating: 0x22, count: 6_400))
+        await waitUntil { await sleeper.callCount == 1 }
+
+        XCTAssertEqual(context.viewModel.activeSessionIdentityForTesting, identity)
+        XCTAssertEqual(context.recorder.startStreamingCallCount, 1)
+        XCTAssertEqual(context.recorder.forceCleanupCallCount, 0)
+        XCTAssertEqual(context.overlayPresenter.hideCallCount, 0)
+        let firstCancelCallCount = await first.cancelCallCount
+        let providerCallCountBeforeRetry = await context.provider.makeSessionCallCount
+        XCTAssertEqual(firstCancelCallCount, 1)
+        XCTAssertEqual(providerCallCountBeforeRetry, 1)
+
+        context.recorder.emit(Data(repeating: 0x33, count: 6_400))
+        await sleeper.releaseNext()
+        await waitUntil { await replacement.sendCallCount == 3 }
+
+        let providerCallCountAfterRetry = await context.provider.makeSessionCallCount
+        let replacementPacketFirstBytes = await replacement.packetFirstBytes
+        XCTAssertEqual(providerCallCountAfterRetry, 2)
+        XCTAssertEqual(replacementPacketFirstBytes, [0x11, 0x22, 0x33])
+        XCTAssertEqual(
+            context.accessibility.setSelectedTextCalls,
+            ["first frontier", "catch-up frontier", "live frontier"],
+            "replay must suppress historical intermediate output and publish only its frontier"
+        )
+        XCTAssertEqual(context.viewModel.activeSessionIdentityForTesting, identity)
+        XCTAssertEqual(context.recorder.startStreamingCallCount, 1)
+    }
+
+    func test_repeatedRecoverableSessionFactoryFailuresBackOffWithoutEarlyError() async {
+        let session = RetryCoordinatorStreamingSession(packetEvents: [.partial("connected")])
+        let sleeper = ControlledCoordinatorRetrySleeper()
+        let context = makeRetryContext(
+            capability: .live,
+            factoryErrors: [.networkError("PRIVATE_NETWORK"), .timeout],
+            sessions: [session],
+            sleeper: sleeper
+        )
+        let identity = StreamingSessionIdentity(generation: 202)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await sleeper.callCount == 1 }
+        XCTAssertFalse(isError(context.viewModel.status))
+        XCTAssertEqual(context.recorder.forceCleanupCallCount, 0)
+        XCTAssertEqual(context.overlayPresenter.hideCallCount, 0)
+
+        await sleeper.releaseNext()
+        await waitUntil { await sleeper.callCount == 2 }
+        XCTAssertFalse(isError(context.viewModel.status))
+        let retryDelays = await sleeper.delays
+        XCTAssertEqual(retryDelays, [250_000_000, 500_000_000])
+
+        await sleeper.releaseNext()
+        await waitUntil { await context.provider.makeSessionCallCount == 3 }
+        context.recorder.emit(Data(repeating: 0x44, count: 6_400))
+        await waitUntil { await session.sendCallCount == 1 }
+
+        XCTAssertEqual(context.accessibility.setSelectedTextCalls, ["connected"])
+        XCTAssertEqual(context.recorder.startStreamingCallCount, 1)
+        XCTAssertEqual(context.viewModel.activeSessionIdentityForTesting, identity)
+    }
+
+    func test_authenticationAndInvalidRequestFailuresAreNotRetried() async {
+        for (offset, failure) in [StreamFailure.authentication, .invalidRequest].enumerated() {
+            let session = RetryCoordinatorStreamingSession(packetEvents: [.failed(failure)])
+            let sleeper = ControlledCoordinatorRetrySleeper()
+            let context = makeRetryContext(
+                capability: .live,
+                sessions: [session],
+                sleeper: sleeper
+            )
+            let identity = StreamingSessionIdentity(generation: UInt64(203 + offset))
+
+            context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+            await waitUntil { await context.provider.makeSessionCallCount == 1 }
+            context.recorder.emit(Data(repeating: 0x45, count: 6_400))
+            await waitUntil { context.recorder.forceCleanupCallCount == 1 }
+
+            let providerCallCount = await context.provider.makeSessionCallCount
+            let sleeperCallCount = await sleeper.callCount
+            XCTAssertEqual(providerCallCount, 1)
+            XCTAssertEqual(sleeperCallCount, 0)
+            XCTAssertNil(context.viewModel.activeSessionIdentityForTesting)
+            XCTAssertTrue(isError(context.viewModel.status))
+        }
+    }
+
+    func test_releaseDuringRetryBackoffAdmitsNoSuccessorAndPreservesLatestPartial() async {
+        let first = RetryCoordinatorStreamingSession(
+            packetEvents: [.partial("preserved frontier"), .failed(.network)]
+        )
+        let forbiddenSuccessor = RetryCoordinatorStreamingSession(packetEvents: [.partial("LATE")])
+        let sleeper = ControlledCoordinatorRetrySleeper()
+        let context = makeRetryContext(
+            capability: .live,
+            sessions: [first, forbiddenSuccessor],
+            sleeper: sleeper
+        )
+        let surface = RenderedStatusSurface(viewModel: context.viewModel)
+        let identity = StreamingSessionIdentity(generation: 205)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await context.provider.makeSessionCallCount == 1 }
+        context.recorder.emit(Data(repeating: 0x51, count: 6_400))
+        await waitUntil { await first.sendCallCount == 1 }
+        context.recorder.emit(Data(repeating: 0x52, count: 6_400))
+        await waitUntil { await sleeper.callCount == 1 }
+
+        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        await sleeper.releaseNext()
+        await settle(iterations: 100)
+
+        let providerCallCount = await context.provider.makeSessionCallCount
+        let forbiddenSendCallCount = await forbiddenSuccessor.sendCallCount
+        XCTAssertEqual(providerCallCount, 1)
+        XCTAssertEqual(forbiddenSendCallCount, 0)
+        XCTAssertEqual(context.accessibility.rangeText, "preserved frontier")
+        XCTAssertFalse(surface.states.contains(where: isError))
+        XCTAssertLessThanOrEqual(context.overlayPresenter.completionFeedbacks.count, 1)
+    }
+
+    func test_retryAdmissionIsCancelledByResetSecurityAndLifecycleInvalidation() async {
+        enum Invalidation: CaseIterable {
+            case reset
+            case security
+            case sleep
+            case wake
+        }
+
+        for (offset, invalidation) in Invalidation.allCases.enumerated() {
+            PermissionManager.shared.simulateSecureInputState(false)
+            let first = RetryCoordinatorStreamingSession(packetEvents: [.failed(.network)])
+            let forbiddenSuccessor = RetryCoordinatorStreamingSession(packetEvents: [.partial("LATE")])
+            let sleeper = ControlledCoordinatorRetrySleeper()
+            let context = makeRetryContext(
+                capability: .live,
+                sessions: [first, forbiddenSuccessor],
+                sleeper: sleeper
+            )
+            let identity = StreamingSessionIdentity(generation: UInt64(210 + offset))
+
+            context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+            await waitUntil { await context.provider.makeSessionCallCount == 1 }
+            context.recorder.emit(Data(repeating: 0x61, count: 6_400))
+            await waitUntil { await sleeper.callCount == 1 }
+
+            switch invalidation {
+            case .reset:
+                await context.viewModel.resetService()
+            case .security:
+                PermissionManager.shared.simulateSecureInputState(true)
+                await waitUntil { context.viewModel.activeSessionIdentityForTesting == nil }
+            case .sleep:
+                await context.viewModel.handleSystemWillSleep()
+            case .wake:
+                await context.viewModel.handleSystemDidWake()
+            }
+
+            await sleeper.releaseNext()
+            await settle(iterations: 100)
+
+            let providerCallCount = await context.provider.makeSessionCallCount
+            let forbiddenSendCallCount = await forbiddenSuccessor.sendCallCount
+            XCTAssertEqual(providerCallCount, 1, "late retry for \(invalidation)")
+            XCTAssertEqual(forbiddenSendCallCount, 0)
+            XCTAssertNil(context.viewModel.activeSessionIdentityForTesting)
+            XCTAssertEqual(context.accessibility.setSelectedTextCalls, [])
+            PermissionManager.shared.simulateSecureInputState(false)
+        }
+    }
+
+    func test_unboundFirstPartialRebindsOnceAndReplacesOwnedRangeContinuously() async {
+        let context = makeContext(
+            capability: .accessibilityUnavailable,
+            rebindCapability: .live,
+            packetEvents: [
+                .partial("a longer provisional value"),
+                .partial("short"),
+                .partial("revised frontier")
+            ],
+            finishEvent: .final("final frontier")
+        )
+        let identity = StreamingSessionIdentity(generation: 220)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await context.provider.makeSessionCallCount == 1 }
+        for marker in UInt8(0x71)...UInt8(0x73) {
+            context.recorder.emit(Data(repeating: marker, count: 6_400))
+        }
+        await waitUntil { await context.session.sendCallCount == 3 }
+
+        XCTAssertEqual(context.accessibility.captureCount, 2)
+        XCTAssertEqual(
+            context.accessibility.setSelectedTextCalls,
+            ["a longer provisional value", "short", "revised frontier"]
+        )
+        XCTAssertEqual(context.accessibility.rangeText, "revised frontier")
+
+        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        await waitUntil { await context.session.finishCallCount == 1 }
+
+        XCTAssertEqual(context.accessibility.setSelectedTextCalls.last, "final frontier")
+        XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
+        XCTAssertEqual(context.output.currentFocusInsertedTexts, [])
+    }
+
+    func test_failedUnboundRebindIsAttemptedOnceAndAutoInsertFalseDoesNotRebind() async {
+        let failed = makeContext(
+            capability: .accessibilityUnavailable,
+            rebindCapability: .accessibilityUnavailable,
+            packetEvents: [.partial("first"), .partial("second")]
+        )
+        let failedIdentity = StreamingSessionIdentity(generation: 221)
+        failed.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: failedIdentity))
+        await waitUntil { await failed.provider.makeSessionCallCount == 1 }
+        failed.recorder.emit(Data(repeating: 0x74, count: 12_800))
+        await waitUntil { await failed.session.sendCallCount == 2 }
+        XCTAssertEqual(failed.accessibility.captureCount, 2)
+
+        let disabled = makeContext(
+            capability: .accessibilityUnavailable,
+            rebindCapability: .live,
+            autoInsert: false,
+            packetEvents: [.partial("must not bind")]
+        )
+        let disabledIdentity = StreamingSessionIdentity(generation: 222)
+        disabled.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: disabledIdentity))
+        await waitUntil { await disabled.provider.makeSessionCallCount == 1 }
+        disabled.recorder.emit(Data(repeating: 0x75, count: 6_400))
+        await waitUntil { await disabled.session.sendCallCount == 1 }
+
+        XCTAssertEqual(disabled.accessibility.captureCount, 1)
+        XCTAssertEqual(disabled.accessibility.setSelectedTextCalls, [])
+        XCTAssertEqual(disabled.output.currentFocusAttemptedTexts, [])
+    }
+
+    func test_trulyUnboundModePublishesMonotonicPartialsBeforeRelease() async {
+        let context = makeAppendContext(
+            autoInsert: true,
+            packetEvents: [
+                .partial("first"),
+                .partial("first extension"),
+                .partial("first extension")
+            ],
+            finishEvent: .final("first extension final")
+        )
+        let identity = StreamingSessionIdentity(generation: 230)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await context.provider.makeSessionCallCount == 1 }
+        context.recorder.emit(Data(repeating: 0x81, count: 19_200))
+        await waitUntil { await context.transport.sendCallCount == 3 }
+
+        XCTAssertEqual(context.appendSession.appliedTexts, ["first", "first extension", "first extension"])
+        XCTAssertEqual(context.appendSession.appliedSources, ["live", "live", "live"])
+        XCTAssertEqual(context.appendFactory.makeSessionCallCount, 1)
+        XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
+        XCTAssertEqual(context.output.copiedTexts, [])
+        XCTAssertEqual(context.recorder.stopStreamingCallCount, 0, "release must not be first output")
+
+        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        await waitUntil { await context.transport.finishCallCount == 1 }
+
+        XCTAssertEqual(context.appendSession.finalizeCallCount, 1)
+        XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
+        XCTAssertEqual(context.output.copiedTexts, [])
+    }
+
+    func test_unboundRetryKeepsAppendOwnershipAndPublishesOnlyReplayFrontier() async {
+        let first = RetryCoordinatorStreamingSession(
+            packetEvents: [.partial("prefix"), .failed(.network)]
+        )
+        let replacement = RetryCoordinatorStreamingSession(
+            packetEvents: [.partial("historical"), .partial("prefix extension")]
+        )
+        let sleeper = ControlledCoordinatorRetrySleeper()
+        let context = makeAppendRetryContext(
+            sessions: [first, replacement],
+            sleeper: sleeper
+        )
+        let identity = StreamingSessionIdentity(generation: 231)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await context.provider.makeSessionCallCount == 1 }
+        context.recorder.emit(Data(repeating: 0x82, count: 12_800))
+        await waitUntil { await sleeper.callCount == 1 }
+
+        XCTAssertEqual(context.appendSession.appliedTexts, ["prefix"])
+        XCTAssertEqual(context.appendSession.appliedSources, ["live"])
+
+        await sleeper.releaseNext()
+        await waitUntil { await replacement.sendCallCount == 2 }
+
+        XCTAssertEqual(context.appendFactory.makeSessionCallCount, 1)
+        XCTAssertEqual(context.appendSession.appliedTexts, ["prefix", "prefix extension"])
+        XCTAssertEqual(context.appendSession.appliedSources, ["live", "replay"])
+        XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
+        XCTAssertEqual(context.output.copiedTexts, [])
+    }
+
+    func test_unboundDivergentAndEmptyFinalNeverFallThroughToOneShotOrClipboard() async {
+        for (offset, finalText) in ["revised", ""].enumerated() {
+            let context = makeAppendContext(
+                autoInsert: true,
+                packetEvents: [.partial("attempted realtime")],
+                finishEvent: .final(finalText)
+            )
+            let identity = StreamingSessionIdentity(generation: UInt64(232 + offset))
+
+            context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+            await waitUntil { await context.provider.makeSessionCallCount == 1 }
+            context.recorder.emit(Data(repeating: 0x83, count: 6_400))
+            await waitUntil { await context.transport.sendCallCount == 1 }
+            context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+            await waitUntil { await context.transport.finishCallCount == 1 }
+
+            XCTAssertEqual(context.appendSession.finalizeCallCount, 1)
+            XCTAssertEqual(context.appendSession.finalTexts, [finalText])
+            XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
+            XCTAssertEqual(context.output.insertedTexts, [])
+            XCTAssertEqual(context.output.copiedTexts, [])
+            XCTAssertLessThanOrEqual(context.overlayPresenter.completionFeedbacks.count, 1)
+        }
+    }
+
+    func test_autoInsertFalseCreatesNoAppendSessionAndSuccessfulAXRebindDoesNotUseIt() async {
+        let disabled = makeAppendContext(
+            autoInsert: false,
+            packetEvents: [.partial("disabled")],
+            finishEvent: .final("disabled final")
+        )
+        let disabledIdentity = StreamingSessionIdentity(generation: 234)
+        disabled.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: disabledIdentity))
+        await waitUntil { await disabled.provider.makeSessionCallCount == 1 }
+        disabled.recorder.emit(Data(repeating: 0x84, count: 6_400))
+        await waitUntil { await disabled.transport.sendCallCount == 1 }
+        disabled.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: disabledIdentity))
+        await waitUntil { await disabled.transport.finishCallCount == 1 }
+
+        XCTAssertEqual(disabled.appendFactory.makeSessionCallCount, 0)
+        XCTAssertEqual(disabled.appendSession.appliedTexts, [])
+        XCTAssertEqual(disabled.output.currentFocusAttemptedTexts, [])
+        XCTAssertEqual(disabled.output.copiedTexts, [])
+
+        let rebound = makeAppendContext(
+            autoInsert: true,
+            rebindCapability: .live,
+            packetEvents: [.partial("verified AX")],
+            finishEvent: .final("verified AX final")
+        )
+        let reboundIdentity = StreamingSessionIdentity(generation: 235)
+        rebound.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: reboundIdentity))
+        await waitUntil { await rebound.provider.makeSessionCallCount == 1 }
+        rebound.recorder.emit(Data(repeating: 0x85, count: 6_400))
+        await waitUntil { await rebound.transport.sendCallCount == 1 }
+
+        XCTAssertEqual(rebound.accessibility.setSelectedTextCalls, ["verified AX"])
+        XCTAssertEqual(rebound.appendSession.appliedTexts, [])
+        XCTAssertEqual(rebound.output.currentFocusAttemptedTexts, [])
+    }
+
+    func test_releaseDuringEstablishedReplayTreatsTypedCancellationAsSealedControlFlow() async {
+        let failedAttempt = RetryCoordinatorStreamingSession(
+            packetEvents: [.partial("journal frontier"), .failed(.network)]
+        )
+        let replacement = ReviewControllableStreamingSession(
+            packetOutcomes: [
+                .event(.partial("accepted replay frontier")),
+                .event(.partial("unreachable replay continuation"))
+            ],
+            holdSendCallNumber: 2,
+            cancelHeldSendOutcome: .failure(.cancelled),
+            holdCancelCompletion: true
+        )
+        let sleeper = ControlledCoordinatorRetrySleeper()
+        let context = makeRetryContext(
+            capability: .finalOnly,
+            sessions: [failedAttempt, replacement],
+            sleeper: sleeper
+        )
+        let surface = RenderedStatusSurface(viewModel: context.viewModel)
+        let identity = StreamingSessionIdentity(generation: 240)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await context.provider.makeSessionCallCount == 1 }
+        context.recorder.emit(Data(repeating: 0x91, count: 12_800))
+        await waitUntil { await sleeper.callCount == 1 }
+        await sleeper.releaseNext()
+        await waitUntil { await replacement.isHoldingSend }
+
+        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        await waitUntil { await replacement.isHoldingCancelCompletion }
+        await settle(iterations: 50)
+
+        let cancelCallCount = await replacement.cancelCallCount
+        let providerCallCount = await context.provider.makeSessionCallCount
+        XCTAssertEqual(cancelCallCount, 1)
+        XCTAssertEqual(providerCallCount, 2)
+        XCTAssertEqual(context.viewModel.activeSessionIdentityForTesting, identity)
+        XCTAssertEqual(context.viewModel.status, .sealing)
+        XCTAssertEqual(context.output.insertedTexts, [])
+        XCTAssertFalse(surface.states.contains(where: isError))
+
+        await replacement.releaseCancelCompletionIfNeeded()
+        await waitUntil { context.viewModel.activeSessionIdentityForTesting == nil }
+        let finalCancelCallCount = await replacement.cancelCallCount
+        let finalProviderCallCount = await context.provider.makeSessionCallCount
+        XCTAssertEqual(finalCancelCallCount, 1)
+        XCTAssertEqual(finalProviderCallCount, 2, "release closes retry admission permanently")
+        XCTAssertEqual(context.output.insertedTexts, ["journal frontier"])
+        XCTAssertFalse(surface.states.contains(where: isError))
+        await context.viewModel.resetService()
+    }
+
+    func test_recoverableFinishReturnOrThrowAfterSealCancelsOnceAndPreservesPartial() async {
+        for (offset, finishOutcome) in [
+            ReviewPacketOutcome.event(.failed(.network)),
+            .failure(.network)
+        ].enumerated() {
+            let session = ReviewControllableStreamingSession(
+                packetOutcomes: [.event(.partial("last usable partial"))],
+                finishOutcome: finishOutcome
+            )
+            let sleeper = ControlledCoordinatorRetrySleeper()
+            let context = makeReviewContext(
+                capability: .finalOnly,
+                provider: RetryCoordinatorStreamingProvider(
+                    factoryErrors: [],
+                    sessions: [session]
+                ),
+                retrySleeper: { nanoseconds in
+                    try await sleeper.sleep(nanoseconds: nanoseconds)
+                }
+            )
+            let identity = StreamingSessionIdentity(generation: UInt64(241 + offset))
+
+            context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+            context.recorder.emit(Data(repeating: 0x92, count: 6_400))
+            await waitUntil { await session.sendCallCount == 1 }
+            context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+            await waitUntil { await session.finishCallCount == 1 }
+            await waitUntil { context.viewModel.status == .idle }
+
+            let cancelCallCount = await session.cancelCallCount
+            let sleeperCallCount = await sleeper.callCount
+            XCTAssertEqual(cancelCallCount, 1)
+            XCTAssertEqual(sleeperCallCount, 0)
+            XCTAssertEqual(context.output.insertedTexts, ["last usable partial"])
+            XCTAssertNil(context.viewModel.activeSessionIdentityForTesting)
+        }
+    }
+
+    func test_releaseDuringRecoverableFactoryBackoffWithoutUsableTextPublishesOneFixedError() async {
+        let privateFailureDetail = "PRIVATE_FACTORY_BACKOFF_DETAIL"
+        let forbiddenSuccessor = RetryCoordinatorStreamingSession(packetEvents: [.partial("LATE")])
+        let provider = ReviewFactoryPlanProvider(
+            errors: [FeishuAPIService.APIError.networkError(privateFailureDetail)],
+            successor: forbiddenSuccessor
+        )
+        let sleeper = CooperativeReviewRetrySleeper()
+        let context = makeReviewContext(
+            capability: .finalOnly,
+            provider: provider,
+            retrySleeper: { nanoseconds in
+                try await sleeper.sleep(nanoseconds: nanoseconds)
+            }
+        )
+        let surface = RenderedStatusSurface(viewModel: context.viewModel)
+        let identity = StreamingSessionIdentity(generation: 243)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await sleeper.callCount == 1 }
+        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        await waitUntil { await sleeper.cancellationCount == 1 }
+        await waitUntil { context.viewModel.activeSessionIdentityForTesting == nil }
+
+        let errors = surface.states.filter(isError)
+        let providerCallCount = await provider.makeSessionCallCount
+        XCTAssertEqual(providerCallCount, 1)
+        XCTAssertEqual(errors.map(\.text), ["流式识别失败"])
+        XCTAssertFalse(errors.contains { $0.text.contains(privateFailureDetail) })
+        XCTAssertEqual(context.overlayPresenter.completionFeedbacks, [])
+        XCTAssertEqual(context.output.insertedTexts, [])
+        XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
+        XCTAssertEqual(context.output.copiedTexts, [])
+        await context.viewModel.resetService()
+    }
+
+    func test_releaseDuringRecoverableFirstPacketBackoffWithoutUsableTextPublishesOneFixedError() async {
+        let failed = RetryCoordinatorStreamingSession(packetEvents: [.failed(.network)])
+        let forbiddenSuccessor = RetryCoordinatorStreamingSession(packetEvents: [.partial("LATE")])
+        let provider = RetryCoordinatorStreamingProvider(
+            factoryErrors: [],
+            sessions: [failed, forbiddenSuccessor]
+        )
+        let sleeper = CooperativeReviewRetrySleeper()
+        let context = makeReviewContext(
+            capability: .finalOnly,
+            provider: provider,
+            retrySleeper: { nanoseconds in
+                try await sleeper.sleep(nanoseconds: nanoseconds)
+            }
+        )
+        let surface = RenderedStatusSurface(viewModel: context.viewModel)
+        let identity = StreamingSessionIdentity(generation: 244)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        context.recorder.emit(Data(repeating: 0xA1, count: 6_400))
+        await waitUntil { await sleeper.callCount == 1 }
+        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        await waitUntil { await sleeper.cancellationCount == 1 }
+        await waitUntil { context.viewModel.activeSessionIdentityForTesting == nil }
+
+        let errors = surface.states.filter(isError)
+        let providerCallCount = await provider.makeSessionCallCount
+        XCTAssertEqual(providerCallCount, 1)
+        XCTAssertEqual(errors.map(\.text), ["流式识别失败"])
+        XCTAssertEqual(context.overlayPresenter.completionFeedbacks, [])
+        XCTAssertEqual(context.output.insertedTexts, [])
+        XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
+        XCTAssertEqual(context.output.copiedTexts, [])
+        await context.viewModel.resetService()
+    }
+
+    func test_appendFactoryMissRoutesRetainedValueThroughCurrentFocusAfterRecoverableFinishFailure() async {
+        let retainedValue = "retained unbound value"
+        let session = ReviewControllableStreamingSession(
+            packetOutcomes: [.event(.partial(retainedValue))],
+            finishOutcome: .event(.failed(.network))
+        )
+        let appendSession = CoordinatorCurrentFocusAppendSession()
+        let missingAppendFactory = CoordinatorCurrentFocusAppendSessionFactory(
+            session: appendSession,
+            returnsSession: false
+        )
+        let context = makeReviewContext(
+            capability: .accessibilityUnavailable,
+            rebindCapability: .accessibilityUnavailable,
+            provider: RetryCoordinatorStreamingProvider(factoryErrors: [], sessions: [session]),
+            appendFactory: missingAppendFactory,
+            retrySleeper: { _ in }
+        )
+        let surface = RenderedStatusSurface(viewModel: context.viewModel)
+        let identity = StreamingSessionIdentity(generation: 245)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        context.recorder.emit(Data(repeating: 0xA2, count: 6_400))
+        await waitUntil { await session.sendCallCount == 1 }
+        XCTAssertEqual(missingAppendFactory.makeSessionCallCount, 1)
+        XCTAssertEqual(appendSession.appliedTexts, [])
+
+        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        await waitUntil { context.viewModel.activeSessionIdentityForTesting == nil }
+
+        XCTAssertEqual(context.output.currentFocusAttemptedTexts, [retainedValue])
+        XCTAssertEqual(context.output.currentFocusInsertedTexts, [retainedValue])
+        XCTAssertEqual(context.output.copiedTexts, [])
+        XCTAssertEqual(context.output.syntheticInputCallCount, 1)
+        XCTAssertFalse(surface.states.contains(where: isError))
+    }
+
+    func test_releaseDuringRetryBackoffWaitsForRecorderBarrierBeforeSuccessorAdmission() async {
+        let recorder = CoordinatorAudioRecorder(holdNextStopBarrier: true)
+        let first = RetryCoordinatorStreamingSession(
+            packetEvents: [.partial("retained before backoff"), .failed(.network)]
+        )
+        let successor = RetryCoordinatorStreamingSession(packetEvents: [.partial("successor alive")])
+        let provider = RetryCoordinatorStreamingProvider(
+            factoryErrors: [],
+            sessions: [first, successor]
+        )
+        let sleeper = CooperativeReviewRetrySleeper()
+        let context = makeReviewContext(
+            capability: .finalOnly,
+            provider: provider,
+            recorder: recorder,
+            retrySleeper: { nanoseconds in
+                try await sleeper.sleep(nanoseconds: nanoseconds)
+            }
+        )
+        let oldIdentity = StreamingSessionIdentity(generation: 246)
+        let successorIdentity = StreamingSessionIdentity(generation: 247)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: oldIdentity))
+        context.recorder.emit(Data(repeating: 0xA3, count: 12_800))
+        await waitUntil { await sleeper.callCount == 1 }
+        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: oldIdentity))
+        await waitUntil { recorder.isHoldingStopBarrier }
+        await waitUntil { await sleeper.cancellationCount == 1 }
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: successorIdentity))
+        await settle(iterations: 50)
+        let providerCountBeforeBarrier = await provider.makeSessionCallCount
+        XCTAssertEqual(context.viewModel.activeSessionIdentityForTesting, oldIdentity)
+        XCTAssertEqual(context.viewModel.status, .sealing)
+        XCTAssertEqual(providerCountBeforeBarrier, 1)
+        XCTAssertEqual(recorder.startStreamingCallCount, 1)
+        XCTAssertEqual(recorder.finishedIngressIdentifiers, [])
+
+        recorder.releaseStopBarrier()
+        await waitUntil { context.viewModel.activeSessionIdentityForTesting != oldIdentity }
+        XCTAssertNil(context.viewModel.activeSessionIdentityForTesting)
+        XCTAssertEqual(context.viewModel.status, .idle)
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: successorIdentity))
+        await waitUntil { await provider.makeSessionCallCount == 2 }
+        await waitUntil { recorder.startStreamingCallCount == 2 }
+
+        XCTAssertEqual(recorder.finishedIngressIdentifiers, [recorder.startedIngressIdentifiers[0]])
+        XCTAssertEqual(recorder.activeIngressIdentifier, recorder.startedIngressIdentifiers[1])
+        context.recorder.emit(Data(repeating: 0xA4, count: 6_400))
+        await waitUntil { await successor.sendCallCount == 1 }
+        XCTAssertEqual(context.viewModel.activeSessionIdentityForTesting, successorIdentity)
+        await context.viewModel.resetService()
+    }
+
+    func test_releaseDuringReplayWaitsForRecorderBarrierBeforeSuccessorAdmission() async {
+        let recorder = CoordinatorAudioRecorder(holdNextStopBarrier: true)
+        let failedAttempt = RetryCoordinatorStreamingSession(
+            packetEvents: [.partial("retained before replay"), .failed(.network)]
+        )
+        let replacement = ReviewControllableStreamingSession(
+            packetOutcomes: [
+                .event(.partial("accepted replay")),
+                .event(.partial("held replay"))
+            ],
+            holdSendCallNumber: 2
+        )
+        let successor = RetryCoordinatorStreamingSession(packetEvents: [.partial("successor alive")])
+        let provider = RetryCoordinatorStreamingProvider(
+            factoryErrors: [],
+            sessions: [failedAttempt, replacement, successor]
+        )
+        let sleeper = ImmediateReviewRetrySleeper()
+        let context = makeReviewContext(
+            capability: .finalOnly,
+            provider: provider,
+            recorder: recorder,
+            retrySleeper: { nanoseconds in
+                await sleeper.sleep(nanoseconds: nanoseconds)
+            }
+        )
+        let oldIdentity = StreamingSessionIdentity(generation: 248)
+        let successorIdentity = StreamingSessionIdentity(generation: 249)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: oldIdentity))
+        context.recorder.emit(Data(repeating: 0xA5, count: 12_800))
+        await waitUntil { await replacement.isHoldingSend }
+        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: oldIdentity))
+        await waitUntil { recorder.isHoldingStopBarrier }
+        await waitUntil { await replacement.cancelCallCount == 1 }
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: successorIdentity))
+        await settle(iterations: 50)
+        let providerCountBeforeBarrier = await provider.makeSessionCallCount
+        XCTAssertEqual(context.viewModel.activeSessionIdentityForTesting, oldIdentity)
+        XCTAssertEqual(context.viewModel.status, .sealing)
+        XCTAssertEqual(providerCountBeforeBarrier, 2)
+        XCTAssertEqual(recorder.startStreamingCallCount, 1)
+        XCTAssertEqual(recorder.finishedIngressIdentifiers, [])
+
+        recorder.releaseStopBarrier()
+        await waitUntil { context.viewModel.activeSessionIdentityForTesting != oldIdentity }
+        XCTAssertNil(context.viewModel.activeSessionIdentityForTesting)
+        XCTAssertEqual(context.viewModel.status, .idle)
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: successorIdentity))
+        await waitUntil { await provider.makeSessionCallCount == 3 }
+        await waitUntil { recorder.startStreamingCallCount == 2 }
+
+        XCTAssertEqual(recorder.finishedIngressIdentifiers, [recorder.startedIngressIdentifiers[0]])
+        XCTAssertEqual(recorder.activeIngressIdentifier, recorder.startedIngressIdentifiers[1])
+        context.recorder.emit(Data(repeating: 0xA6, count: 6_400))
+        await waitUntil { await successor.sendCallCount == 1 }
+        XCTAssertEqual(context.viewModel.activeSessionIdentityForTesting, successorIdentity)
+        await context.viewModel.resetService()
+    }
+
+    func test_retryAllowlistDeniesEveryTerminalFactoryClassAndHTTPBoundaryWithoutSuccessor() async {
+        let denied: [(String, any Error)] = [
+            ("authenticationUnavailable", FeishuAPIService.APIError.authenticationUnavailable),
+            ("invalidResponse", FeishuAPIService.APIError.invalidResponse),
+            ("recognitionFailed", FeishuAPIService.APIError.recognitionFailed("PRIVATE")),
+            ("unknown", FeishuAPIService.APIError.unknown),
+            ("authFailed", FeishuAPIService.APIError.authFailed("PRIVATE")),
+            ("http400", FeishuAPIService.APIError.httpError(400)),
+            ("http401", FeishuAPIService.APIError.httpError(401)),
+            ("http424", FeishuAPIService.APIError.httpError(424)),
+            ("http426", FeishuAPIService.APIError.httpError(426)),
+            ("http499", FeishuAPIService.APIError.httpError(499)),
+            ("http600", FeishuAPIService.APIError.httpError(600)),
+            ("unclassified", ReviewUnclassifiedError())
+        ]
+
+        for (offset, sample) in denied.enumerated() {
+            let successor = RetryCoordinatorStreamingSession(packetEvents: [.partial("LATE")])
+            let provider = ReviewFactoryPlanProvider(
+                errors: [sample.1],
+                successor: successor
+            )
+            let sleeper = ImmediateReviewRetrySleeper()
+            let context = makeReviewContext(
+                capability: .live,
+                provider: provider,
+                retrySleeper: { nanoseconds in
+                    await sleeper.sleep(nanoseconds: nanoseconds)
+                }
+            )
+            let identity = StreamingSessionIdentity(generation: UInt64(250 + offset))
+
+            context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+            await waitUntil {
+                await provider.makeSessionCallCount >= 2 ||
+                    context.viewModel.activeSessionIdentityForTesting == nil
+            }
+
+            let providerCallCount = await provider.makeSessionCallCount
+            let sleeperCallCount = await sleeper.callCount
+            XCTAssertEqual(providerCallCount, 1, "denied factory error: \(sample.0)")
+            XCTAssertEqual(sleeperCallCount, 0, "denied factory error: \(sample.0)")
+            XCTAssertNil(context.viewModel.activeSessionIdentityForTesting)
+            await context.viewModel.resetService()
+        }
+    }
+
+    func test_retryAllowlistDeniesEveryTerminalStreamClassAndHTTPBoundaryWithoutSuccessor() async {
+        let denied: [(String, StreamFailure)] = [
+            ("invalidRequest", .invalidRequest),
+            ("authentication", .authentication),
+            ("malformedResponse", .malformedResponse),
+            ("responseIdentityMismatch", .responseIdentityMismatch),
+            ("cancelled", .cancelled),
+            ("backendOther", .backend(code: 10023)),
+            ("http400", .httpStatus(400)),
+            ("http401", .httpStatus(401)),
+            ("http424", .httpStatus(424)),
+            ("http426", .httpStatus(426)),
+            ("http499", .httpStatus(499)),
+            ("http600", .httpStatus(600))
+        ]
+
+        for (offset, sample) in denied.enumerated() {
+            let failure = sample.1
+            let failed = RetryCoordinatorStreamingSession(packetEvents: [.failed(failure)])
+            let successor = RetryCoordinatorStreamingSession(packetEvents: [.partial("LATE")])
+            let provider = RetryCoordinatorStreamingProvider(
+                factoryErrors: [],
+                sessions: [failed, successor]
+            )
+            let sleeper = ImmediateReviewRetrySleeper()
+            let context = makeReviewContext(
+                capability: .live,
+                provider: provider,
+                retrySleeper: { nanoseconds in
+                    await sleeper.sleep(nanoseconds: nanoseconds)
+                }
+            )
+            let identity = StreamingSessionIdentity(generation: UInt64(260 + offset))
+
+            context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+            context.recorder.emit(Data(repeating: 0x93, count: 6_400))
+            await waitUntil {
+                await provider.makeSessionCallCount >= 2 ||
+                    context.viewModel.activeSessionIdentityForTesting == nil
+            }
+
+            let providerCallCount = await provider.makeSessionCallCount
+            let sleeperCallCount = await sleeper.callCount
+            XCTAssertEqual(providerCallCount, 1, "denied stream failure: \(sample.0)")
+            XCTAssertEqual(sleeperCallCount, 0, "denied stream failure: \(sample.0)")
+            XCTAssertNil(context.viewModel.activeSessionIdentityForTesting)
+            await context.viewModel.resetService()
+        }
+    }
+
+    func test_retryAllowlistAdmitsEveryReviewedFactoryAndStreamBoundary() async {
+        let factoryErrors: [(String, FeishuAPIService.APIError)] = [
+            ("networkUnavailable", .networkUnavailable),
+            ("connectionFailed", .connectionFailed),
+            ("networkError", .networkError("")),
+            ("timeout", .timeout),
+            ("http408", .httpError(408)),
+            ("http425", .httpError(425)),
+            ("http429", .httpError(429)),
+            ("http500", .httpError(500)),
+            ("http599", .httpError(599))
+        ]
+
+        for (offset, sample) in factoryErrors.enumerated() {
+            let successor = RetryCoordinatorStreamingSession(packetEvents: [.partial("")])
+            let provider = ReviewFactoryPlanProvider(errors: [sample.1], successor: successor)
+            let sleeper = ImmediateReviewRetrySleeper()
+            let context = makeReviewContext(
+                capability: .live,
+                provider: provider,
+                retrySleeper: { nanoseconds in
+                    await sleeper.sleep(nanoseconds: nanoseconds)
+                }
+            )
+            let identity = StreamingSessionIdentity(generation: UInt64(270 + offset))
+
+            context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+            await waitUntil { await provider.makeSessionCallCount == 2 }
+
+            let sleeperCallCount = await sleeper.callCount
+            XCTAssertEqual(sleeperCallCount, 1, "admitted factory error: \(sample.0)")
+            XCTAssertEqual(
+                context.viewModel.activeSessionIdentityForTesting,
+                identity,
+                "admitted factory error: \(sample.0)"
+            )
+            XCTAssertEqual(context.recorder.forceCleanupCallCount, 0, "admitted factory error: \(sample.0)")
+            await context.viewModel.resetService()
+        }
+
+        let streamFailures: [(String, StreamFailure)] = [
+            ("network", .network),
+            ("timeout", .timeout),
+            ("http408", .httpStatus(408)),
+            ("http425", .httpStatus(425)),
+            ("http429", .httpStatus(429)),
+            ("http500", .httpStatus(500)),
+            ("http599", .httpStatus(599)),
+            ("backend10024", .backend(code: 10024))
+        ]
+        for (offset, sample) in streamFailures.enumerated() {
+            let failure = sample.1
+            let failed = RetryCoordinatorStreamingSession(packetEvents: [.failed(failure)])
+            let successor = RetryCoordinatorStreamingSession(packetEvents: [.partial("caught up")])
+            let provider = RetryCoordinatorStreamingProvider(
+                factoryErrors: [],
+                sessions: [failed, successor]
+            )
+            let sleeper = ImmediateReviewRetrySleeper()
+            let context = makeReviewContext(
+                capability: .live,
+                provider: provider,
+                retrySleeper: { nanoseconds in
+                    await sleeper.sleep(nanoseconds: nanoseconds)
+                }
+            )
+            let identity = StreamingSessionIdentity(generation: UInt64(280 + offset))
+
+            context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+            context.recorder.emit(Data(repeating: 0x94, count: 6_400))
+            await waitUntil { await successor.sendCallCount == 1 }
+
+            let providerCallCount = await provider.makeSessionCallCount
+            let sleeperCallCount = await sleeper.callCount
+            XCTAssertEqual(providerCallCount, 2, "admitted stream failure: \(sample.0)")
+            XCTAssertEqual(sleeperCallCount, 1, "admitted stream failure: \(sample.0)")
+            XCTAssertEqual(
+                context.viewModel.activeSessionIdentityForTesting,
+                identity,
+                "admitted stream failure: \(sample.0)"
+            )
+            await context.viewModel.resetService()
+        }
+    }
+
+    func test_releaseActivelyCancelsCooperativeRetrySleepWithoutWaitingOrRetrying() async {
+        let failed = RetryCoordinatorStreamingSession(packetEvents: [.failed(.network)])
+        let forbidden = RetryCoordinatorStreamingSession(packetEvents: [.partial("LATE")])
+        let provider = RetryCoordinatorStreamingProvider(
+            factoryErrors: [],
+            sessions: [failed, forbidden]
+        )
+        let sleeper = CooperativeReviewRetrySleeper()
+        let context = makeReviewContext(
+            capability: .live,
+            provider: provider,
+            retrySleeper: { nanoseconds in
+                try await sleeper.sleep(nanoseconds: nanoseconds)
+            }
+        )
+        let identity = StreamingSessionIdentity(generation: 290)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        context.recorder.emit(Data(repeating: 0x95, count: 6_400))
+        await waitUntil { await sleeper.callCount == 1 }
+        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+
+        await waitUntil { await sleeper.cancellationCount == 1 }
+        await waitUntil { context.viewModel.activeSessionIdentityForTesting == nil }
+
+        let providerCallCount = await provider.makeSessionCallCount
+        XCTAssertEqual(providerCallCount, 1)
+        XCTAssertTrue(isError(context.viewModel.status))
+
+        await sleeper.releaseIfNeeded()
+        await settle(iterations: 50)
+    }
+
+    func test_releaseCancelsCooperativeSessionCreationAndLateSessionCannotBecomeActive() async {
+        let lateSession = RetryCoordinatorStreamingSession(packetEvents: [.partial("LATE")])
+        let provider = CooperativeReviewSessionCreationProvider(lateSession: lateSession)
+        let context = makeReviewContext(
+            capability: .live,
+            provider: provider,
+            retrySleeper: { _ in }
+        )
+        let identity = StreamingSessionIdentity(generation: 291)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await provider.makeSessionCallCount == 1 }
+        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+
+        await waitUntil { await provider.cancellationCount == 1 }
+        await waitUntil { context.viewModel.activeSessionIdentityForTesting == nil }
+
+        await provider.releaseLateSessionIfNeeded()
+        await settle(iterations: 50)
+        let lateSendCallCount = await lateSession.sendCallCount
+        let lateCancelCallCount = await lateSession.cancelCallCount
+        let providerCallCount = await provider.makeSessionCallCount
+        XCTAssertEqual(lateSendCallCount, 0)
+        XCTAssertLessThanOrEqual(lateCancelCallCount, 1)
+        XCTAssertEqual(providerCallCount, 1)
+        XCTAssertEqual(context.viewModel.status, .idle)
+    }
+
+    func test_contentlessUpdatesRetainLastNonemptyValueForFinalOnlyRecovery() async {
+        let session = ReviewControllableStreamingSession(
+            packetOutcomes: [
+                .event(.partial("last usable value")),
+                .event(.partial("  \n  ")),
+                .event(.failed(.network))
+            ],
+            holdSendCallNumber: 3
+        )
+        let context = makeReviewContext(
+            capability: .finalOnly,
+            provider: RetryCoordinatorStreamingProvider(factoryErrors: [], sessions: [session]),
+            retrySleeper: { _ in }
+        )
+        let identity = StreamingSessionIdentity(generation: 292)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        context.recorder.emit(Data(repeating: 0x96, count: 19_200))
+        await waitUntil { await session.isHoldingSend }
+        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        await session.releaseHeldIfNeeded()
+        await waitUntil { context.viewModel.status == .idle }
+
+        XCTAssertEqual(context.output.insertedTexts, ["last usable value"])
+        XCTAssertEqual(context.output.copiedTexts, [])
+    }
+
+    func test_emptyFinalRetainsLastNonemptyValueForFinalOnlyAndAppendRecovery() async {
+        let finalOnly = makeContext(
+            capability: .finalOnly,
+            packetEvents: [.partial("last usable final-only"), .partial(" \n ")],
+            finishEvent: .final("")
+        )
+        let finalOnlyIdentity = StreamingSessionIdentity(generation: 293)
+        finalOnly.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: finalOnlyIdentity))
+        await waitUntil { await finalOnly.provider.makeSessionCallCount == 1 }
+        finalOnly.recorder.emit(Data(repeating: 0x97, count: 12_800))
+        await waitUntil { await finalOnly.session.sendCallCount == 2 }
+        finalOnly.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: finalOnlyIdentity))
+        await waitUntil { finalOnly.viewModel.status == .idle }
+
+        XCTAssertEqual(finalOnly.output.insertedTexts, ["last usable final-only"])
+
+        let append = makeAppendContext(
+            autoInsert: true,
+            packetEvents: [.partial("last usable append"), .partial(" \n ")],
+            finishEvent: .final("")
+        )
+        let appendIdentity = StreamingSessionIdentity(generation: 294)
+        append.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: appendIdentity))
+        await waitUntil { await append.provider.makeSessionCallCount == 1 }
+        append.recorder.emit(Data(repeating: 0x98, count: 12_800))
+        await waitUntil { await append.transport.sendCallCount == 2 }
+        append.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: appendIdentity))
+        await waitUntil { append.viewModel.status == .idle }
+
+        XCTAssertEqual(append.appendSession.finalizeCallCount, 1)
+        XCTAssertEqual(append.appendSession.lastAcceptedTexts, ["last usable append"])
+        XCTAssertEqual(append.output.currentFocusAttemptedTexts, [])
+        XCTAssertEqual(append.output.copiedTexts, [])
+    }
+
+    func test_firstPartialSecureRebindFailsClosedWithoutAppendOrFallbackOutput() async {
+        let transcript = "PRIVATE_SECURE_REBIND"
+        let context = makeAppendContext(
+            autoInsert: true,
+            rebindCapability: .secureRejected,
+            packetEvents: [.partial(transcript)],
+            finishEvent: .cancelled
+        )
+        let identity = StreamingSessionIdentity(generation: 295)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await context.provider.makeSessionCallCount == 1 }
+        context.recorder.emit(Data(repeating: 0x99, count: 6_400))
+        await waitUntil {
+            await context.transport.sendCallCount == 1 &&
+                context.viewModel.activeSessionIdentityForTesting == nil
+        }
+
+        XCTAssertEqual(context.accessibility.captureCount, 2)
+        XCTAssertEqual(context.appendFactory.makeSessionCallCount, 0)
+        XCTAssertEqual(context.appendSession.appliedTexts, [])
+        XCTAssertTrue(isError(context.viewModel.status))
+        XCTAssertTrue(context.viewModel.status.text.contains("安全输入"))
+        XCTAssertFalse(visibleFeedback(context.viewModel).contains(transcript))
+        XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
+        XCTAssertEqual(context.output.copiedTexts, [])
+        await context.viewModel.resetService()
+    }
+
+    func test_firstPartialFinalOnlyRebindKeepsCapturedDestinationAndNeverArmsAppend() async {
+        let context = makeAppendContext(
+            autoInsert: true,
+            rebindCapability: .finalOnly,
+            packetEvents: [.partial("provisional")],
+            finishEvent: .final("captured final")
+        )
+        let identity = StreamingSessionIdentity(generation: 296)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await context.provider.makeSessionCallCount == 1 }
+        context.recorder.emit(Data(repeating: 0x9A, count: 6_400))
+        await waitUntil { await context.transport.sendCallCount == 1 }
+
+        XCTAssertEqual(context.accessibility.captureCount, 2)
+        XCTAssertEqual(context.appendFactory.makeSessionCallCount, 0)
+        XCTAssertEqual(context.appendSession.appliedTexts, [])
+        XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
+
+        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        await waitUntil { context.viewModel.status == .idle }
+
+        XCTAssertEqual(context.output.insertedTexts, ["captured final"])
+        XCTAssertEqual(context.output.copiedTexts, [])
+    }
+
+    func test_appendSecurityRejectionTerminatesImmediatelyWithFixedSecurityError() async {
+        let transcript = "PRIVATE_APPEND_SECURITY"
+        let context = makeAppendContext(
+            autoInsert: true,
+            packetEvents: [.partial(transcript)],
+            finishEvent: .cancelled,
+            appendApplyOutcomes: [.securityRejected]
+        )
+        let identity = StreamingSessionIdentity(generation: 297)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await context.provider.makeSessionCallCount == 1 }
+        context.recorder.emit(Data(repeating: 0x9B, count: 6_400))
+        await waitUntil {
+            await context.transport.sendCallCount == 1 &&
+                context.viewModel.activeSessionIdentityForTesting == nil
+        }
+
+        XCTAssertNil(context.viewModel.activeSessionIdentityForTesting)
+        XCTAssertTrue(isError(context.viewModel.status))
+        XCTAssertTrue(context.viewModel.status.text.contains("安全输入"))
+        XCTAssertFalse(visibleFeedback(context.viewModel).contains(transcript))
+        XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
+        XCTAssertEqual(context.output.insertedTexts, [])
+        XCTAssertEqual(context.output.copiedTexts, [])
+        await context.viewModel.resetService()
+    }
+
+    func test_appendPreservationFinalOutcomesPublishOneTranscriptFreeCompletion() async {
+        let outcomes: [CurrentFocusAppendFinalOutcome] = [
+            .preservedDestinationLoss,
+            .deliveryUncertain,
+            .preservedDivergence
+        ]
+        for (offset, outcome) in outcomes.enumerated() {
+            let transcript = "PRIVATE_PRESERVED_\(offset)"
+            let context = makeAppendContext(
+                autoInsert: true,
+                packetEvents: [.partial("attempted realtime")],
+                finishEvent: .final(transcript),
+                appendFinalOutcomes: [outcome]
+            )
+            let identity = StreamingSessionIdentity(generation: UInt64(298 + offset))
+
+            context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+            await waitUntil { await context.provider.makeSessionCallCount == 1 }
+            context.recorder.emit(Data(repeating: 0x9C, count: 6_400))
+            await waitUntil { await context.transport.sendCallCount == 1 }
+            context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+            await waitUntil { context.viewModel.status == .idle }
+
+            XCTAssertEqual(context.overlayPresenter.completionFeedbacks.count, 1, "outcome \(outcome)")
+            let feedback = context.overlayPresenter.completionFeedbacks.first
+            XCTAssertFalse(feedback?.text.contains(transcript) == true)
+            XCTAssertFalse(feedback?.text.contains("attempted realtime") == true)
+            XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
+            XCTAssertEqual(context.output.insertedTexts, [])
+            XCTAssertEqual(context.output.copiedTexts, [])
+        }
+    }
+
+    func test_appendNoUsableTextAfterSealedRecoveryPublishesOneFixedStreamError() async {
+        let transcript = "PRIVATE_NO_USABLE"
+        let context = makeAppendContext(
+            autoInsert: true,
+            packetEvents: [.partial(transcript)],
+            finishEvent: .failed(.network),
+            appendFinalOutcomes: [.noUsableText]
+        )
+        let surface = RenderedStatusSurface(viewModel: context.viewModel)
+        let identity = StreamingSessionIdentity(generation: 301)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await context.provider.makeSessionCallCount == 1 }
+        context.recorder.emit(Data(repeating: 0x9D, count: 6_400))
+        await waitUntil { await context.transport.sendCallCount == 1 }
+        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        await waitUntil { context.viewModel.activeSessionIdentityForTesting == nil }
+
+        let errorStates = surface.states.filter(isError)
+        XCTAssertEqual(errorStates.count, 1)
+        XCTAssertFalse(errorStates.first?.text.contains(transcript) == true)
+        XCTAssertEqual(context.overlayPresenter.completionFeedbacks.count, 0)
+        XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
+        XCTAssertEqual(context.output.insertedTexts, [])
+        XCTAssertEqual(context.output.copiedTexts, [])
+    }
+
     private func makeContext(
         capability: CoordinatorAccessibilityClient.Capability,
+        rebindCapability: CoordinatorAccessibilityClient.Capability? = nil,
         autoInsert: Bool = true,
         packetEvents: [StreamingRecognitionEvent] = [],
         finishEvent: StreamingRecognitionEvent = .cancelled,
@@ -692,7 +2003,10 @@ final class StreamingMainViewModelTests: XCTestCase {
             session: session,
             makeSessionError: providerError
         )
-        let accessibility = CoordinatorAccessibilityClient(capability: capability)
+        let accessibility = CoordinatorAccessibilityClient(
+            capability: capability,
+            rebindCapability: rebindCapability
+        )
         let output = CoordinatorFinalTextOutput()
         let overlayPresenter = CoordinatorOverlayPresenter()
         let viewModel = MainViewModel(
@@ -721,6 +2035,196 @@ final class StreamingMainViewModelTests: XCTestCase {
         )
     }
 
+    private func makeRetryContext(
+        capability: CoordinatorAccessibilityClient.Capability,
+        factoryErrors: [FeishuAPIService.APIError] = [],
+        sessions: [any SpeechStreamingSession],
+        sleeper: ControlledCoordinatorRetrySleeper
+    ) -> RetryStreamingCoordinatorContext {
+        let recorder = CoordinatorAudioRecorder()
+        let provider = RetryCoordinatorStreamingProvider(
+            factoryErrors: factoryErrors,
+            sessions: sessions
+        )
+        let accessibility = CoordinatorAccessibilityClient(capability: capability)
+        let output = CoordinatorFinalTextOutput()
+        let overlayPresenter = CoordinatorOverlayPresenter()
+        let viewModel = MainViewModel(
+            audioRecorder: recorder,
+            settings: AppSettings(
+                appId: "configured-app",
+                appSecret: "configured-secret",
+                autoInsert: true,
+                playSound: false
+            ),
+            hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
+            streamingProvider: provider,
+            accessibilityClient: accessibility,
+            finalTextOutput: output,
+            overlayPresenter: overlayPresenter,
+            streamingRetryDelay: { ordinal in
+                UInt64(250_000_000) << UInt64(max(0, ordinal - 1))
+            },
+            streamingRetrySleeper: { nanoseconds in
+                try await sleeper.sleep(nanoseconds: nanoseconds)
+            }
+        )
+        recorder.resetTracking()
+        return RetryStreamingCoordinatorContext(
+            viewModel: viewModel,
+            recorder: recorder,
+            provider: provider,
+            accessibility: accessibility,
+            output: output,
+            overlayPresenter: overlayPresenter
+        )
+    }
+
+    private func makeAppendContext(
+        autoInsert: Bool,
+        rebindCapability: CoordinatorAccessibilityClient.Capability? = .accessibilityUnavailable,
+        packetEvents: [StreamingRecognitionEvent],
+        finishEvent: StreamingRecognitionEvent,
+        appendApplyOutcomes: [CurrentFocusAppendOutcome] = [],
+        appendFinalOutcomes: [CurrentFocusAppendFinalOutcome] = []
+    ) -> AppendStreamingCoordinatorContext {
+        let recorder = CoordinatorAudioRecorder()
+        let transport = CoordinatorStreamingSession(
+            packetEvents: packetEvents,
+            finishEvent: finishEvent
+        )
+        let provider = CoordinatorStreamingProvider(session: transport)
+        let accessibility = CoordinatorAccessibilityClient(
+            capability: .accessibilityUnavailable,
+            rebindCapability: rebindCapability
+        )
+        let output = CoordinatorFinalTextOutput()
+        let overlayPresenter = CoordinatorOverlayPresenter()
+        let appendSession = CoordinatorCurrentFocusAppendSession(
+            applyOutcomes: appendApplyOutcomes,
+            finalOutcomes: appendFinalOutcomes
+        )
+        let appendFactory = CoordinatorCurrentFocusAppendSessionFactory(session: appendSession)
+        let viewModel = MainViewModel(
+            audioRecorder: recorder,
+            settings: AppSettings(
+                appId: "configured-app",
+                appSecret: "configured-secret",
+                autoInsert: autoInsert,
+                playSound: false
+            ),
+            hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
+            streamingProvider: provider,
+            accessibilityClient: accessibility,
+            finalTextOutput: output,
+            overlayPresenter: overlayPresenter,
+            currentFocusAppendSessionFactory: appendFactory
+        )
+        recorder.resetTracking()
+        return AppendStreamingCoordinatorContext(
+            viewModel: viewModel,
+            recorder: recorder,
+            transport: transport,
+            provider: provider,
+            accessibility: accessibility,
+            output: output,
+            overlayPresenter: overlayPresenter,
+            appendSession: appendSession,
+            appendFactory: appendFactory
+        )
+    }
+
+    private func makeReviewContext(
+        capability: CoordinatorAccessibilityClient.Capability,
+        rebindCapability: CoordinatorAccessibilityClient.Capability? = nil,
+        autoInsert: Bool = true,
+        provider: any SpeechStreamingSessionProviding,
+        recorder suppliedRecorder: CoordinatorAudioRecorder? = nil,
+        appendFactory: (any CurrentFocusProvisionalOutputSessionFactory)? = nil,
+        retrySleeper: @escaping @Sendable (UInt64) async throws -> Void
+    ) -> ReviewStreamingCoordinatorContext {
+        let recorder = suppliedRecorder ?? CoordinatorAudioRecorder()
+        let accessibility = CoordinatorAccessibilityClient(
+            capability: capability,
+            rebindCapability: rebindCapability
+        )
+        let output = CoordinatorFinalTextOutput()
+        let overlayPresenter = CoordinatorOverlayPresenter()
+        let viewModel = MainViewModel(
+            audioRecorder: recorder,
+            settings: AppSettings(
+                appId: "configured-app",
+                appSecret: "configured-secret",
+                autoInsert: autoInsert,
+                playSound: false
+            ),
+            hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
+            streamingProvider: provider,
+            accessibilityClient: accessibility,
+            finalTextOutput: output,
+            overlayPresenter: overlayPresenter,
+            currentFocusAppendSessionFactory: appendFactory,
+            streamingRetryDelay: { _ in 250_000_000 },
+            streamingRetrySleeper: retrySleeper
+        )
+        recorder.resetTracking()
+        return ReviewStreamingCoordinatorContext(
+            viewModel: viewModel,
+            recorder: recorder,
+            accessibility: accessibility,
+            output: output,
+            overlayPresenter: overlayPresenter
+        )
+    }
+
+    private func makeAppendRetryContext(
+        sessions: [RetryCoordinatorStreamingSession],
+        sleeper: ControlledCoordinatorRetrySleeper
+    ) -> AppendRetryStreamingCoordinatorContext {
+        let recorder = CoordinatorAudioRecorder()
+        let provider = RetryCoordinatorStreamingProvider(factoryErrors: [], sessions: sessions)
+        let accessibility = CoordinatorAccessibilityClient(
+            capability: .accessibilityUnavailable,
+            rebindCapability: .accessibilityUnavailable
+        )
+        let output = CoordinatorFinalTextOutput()
+        let overlayPresenter = CoordinatorOverlayPresenter()
+        let appendSession = CoordinatorCurrentFocusAppendSession()
+        let appendFactory = CoordinatorCurrentFocusAppendSessionFactory(session: appendSession)
+        let viewModel = MainViewModel(
+            audioRecorder: recorder,
+            settings: AppSettings(
+                appId: "configured-app",
+                appSecret: "configured-secret",
+                autoInsert: true,
+                playSound: false
+            ),
+            hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
+            streamingProvider: provider,
+            accessibilityClient: accessibility,
+            finalTextOutput: output,
+            overlayPresenter: overlayPresenter,
+            currentFocusAppendSessionFactory: appendFactory,
+            streamingRetryDelay: { ordinal in
+                UInt64(250_000_000) << UInt64(max(0, ordinal - 1))
+            },
+            streamingRetrySleeper: { nanoseconds in
+                try await sleeper.sleep(nanoseconds: nanoseconds)
+            }
+        )
+        recorder.resetTracking()
+        return AppendRetryStreamingCoordinatorContext(
+            viewModel: viewModel,
+            recorder: recorder,
+            provider: provider,
+            accessibility: accessibility,
+            output: output,
+            overlayPresenter: overlayPresenter,
+            appendSession: appendSession,
+            appendFactory: appendFactory
+        )
+    }
+
     private func runOnePacketInteraction(
         _ context: StreamingCoordinatorContext,
         identity: StreamingSessionIdentity
@@ -737,6 +2241,13 @@ final class StreamingMainViewModelTests: XCTestCase {
 
     private func visibleFeedback(_ viewModel: MainViewModel) -> String {
         String(describing: viewModel.status) + viewModel.status.text + (viewModel.overlayMessage ?? "")
+    }
+
+    private func isError(_ state: RecordingState) -> Bool {
+        if case .error = state {
+            return true
+        }
+        return false
     }
 
     private func assertContainsFixedFeedback(
@@ -841,6 +2352,50 @@ private struct StreamingCoordinatorContext {
 }
 
 @MainActor
+private struct RetryStreamingCoordinatorContext {
+    let viewModel: MainViewModel
+    let recorder: CoordinatorAudioRecorder
+    let provider: RetryCoordinatorStreamingProvider
+    let accessibility: CoordinatorAccessibilityClient
+    let output: CoordinatorFinalTextOutput
+    let overlayPresenter: CoordinatorOverlayPresenter
+}
+
+@MainActor
+private struct AppendStreamingCoordinatorContext {
+    let viewModel: MainViewModel
+    let recorder: CoordinatorAudioRecorder
+    let transport: CoordinatorStreamingSession
+    let provider: CoordinatorStreamingProvider
+    let accessibility: CoordinatorAccessibilityClient
+    let output: CoordinatorFinalTextOutput
+    let overlayPresenter: CoordinatorOverlayPresenter
+    let appendSession: CoordinatorCurrentFocusAppendSession
+    let appendFactory: CoordinatorCurrentFocusAppendSessionFactory
+}
+
+@MainActor
+private struct AppendRetryStreamingCoordinatorContext {
+    let viewModel: MainViewModel
+    let recorder: CoordinatorAudioRecorder
+    let provider: RetryCoordinatorStreamingProvider
+    let accessibility: CoordinatorAccessibilityClient
+    let output: CoordinatorFinalTextOutput
+    let overlayPresenter: CoordinatorOverlayPresenter
+    let appendSession: CoordinatorCurrentFocusAppendSession
+    let appendFactory: CoordinatorCurrentFocusAppendSessionFactory
+}
+
+@MainActor
+private struct ReviewStreamingCoordinatorContext {
+    let viewModel: MainViewModel
+    let recorder: CoordinatorAudioRecorder
+    let accessibility: CoordinatorAccessibilityClient
+    let output: CoordinatorFinalTextOutput
+    let overlayPresenter: CoordinatorOverlayPresenter
+}
+
+@MainActor
 private final class RenderedStatusSurface {
     private(set) var states: [RecordingState] = []
     private var cancellable: AnyCancellable?
@@ -853,11 +2408,21 @@ private final class RenderedStatusSurface {
 }
 
 @MainActor
+private final class ReviewAsyncCompletionProbe {
+    private(set) var completed = false
+
+    func markCompleted() {
+        completed = true
+    }
+}
+
+@MainActor
 private final class CoordinatorOverlayPresenter: RecordingOverlayPresenting {
     private(set) var visibleStatus: RecordingState?
     private(set) var lastCompletionFeedback: RecordingState?
     private(set) var lastMinimumVisibleDuration: TimeInterval?
     private(set) var hideCallCount = 0
+    private(set) var completionFeedbacks: [RecordingState] = []
     private var remainingVisibleDuration: TimeInterval?
 
     func show(status: RecordingState) {
@@ -879,6 +2444,7 @@ private final class CoordinatorOverlayPresenter: RecordingOverlayPresenting {
         _ feedback: RecordingState,
         minimumVisibleDuration: TimeInterval
     ) {
+        completionFeedbacks.append(feedback)
         visibleStatus = feedback
         lastCompletionFeedback = feedback
         lastMinimumVisibleDuration = minimumVisibleDuration
@@ -894,6 +2460,396 @@ private final class CoordinatorOverlayPresenter: RecordingOverlayPresenting {
         } else {
             self.remainingVisibleDuration = remaining
         }
+    }
+}
+
+@MainActor
+private final class CoordinatorCurrentFocusAppendSession: CurrentFocusProvisionalOutputSession {
+    private var applyOutcomes: [CurrentFocusAppendOutcome]
+    private var finalOutcomes: [CurrentFocusAppendFinalOutcome]
+    private(set) var appliedTexts: [String] = []
+    private(set) var appliedSources: [String] = []
+    private(set) var finalTexts: [String?] = []
+    private(set) var lastAcceptedTexts: [String?] = []
+    private(set) var finalizeCallCount = 0
+    private(set) var invalidateCallCount = 0
+
+    init(
+        applyOutcomes: [CurrentFocusAppendOutcome] = [],
+        finalOutcomes: [CurrentFocusAppendFinalOutcome] = []
+    ) {
+        self.applyOutcomes = applyOutcomes
+        self.finalOutcomes = finalOutcomes
+    }
+
+    func applyOpaqueHypothesis(
+        _ text: String,
+        generation: UInt64,
+        source: CurrentFocusHypothesisSource
+    ) -> CurrentFocusAppendOutcome {
+        appliedTexts.append(text)
+        switch source {
+        case .livePacket:
+            appliedSources.append("live")
+        case .replayCatchUp:
+            appliedSources.append("replay")
+        }
+        if !applyOutcomes.isEmpty {
+            return applyOutcomes.removeFirst()
+        }
+        return appliedTexts.count == 1 ? .insertedFirst : .appendedSuffix
+    }
+
+    func finalize(
+        finalText: String?,
+        lastAcceptedText: String?,
+        generation: UInt64
+    ) -> CurrentFocusAppendFinalOutcome {
+        finalizeCallCount += 1
+        finalTexts.append(finalText)
+        lastAcceptedTexts.append(lastAcceptedText)
+        if !finalOutcomes.isEmpty {
+            return finalOutcomes.removeFirst()
+        }
+        return .preservedDivergence
+    }
+
+    func invalidate() {
+        invalidateCallCount += 1
+    }
+}
+
+@MainActor
+private final class CoordinatorCurrentFocusAppendSessionFactory: CurrentFocusProvisionalOutputSessionFactory {
+    private let session: CoordinatorCurrentFocusAppendSession
+    private let returnsSession: Bool
+    private(set) var makeSessionCallCount = 0
+    private(set) var generations: [UInt64] = []
+
+    init(session: CoordinatorCurrentFocusAppendSession, returnsSession: Bool = true) {
+        self.session = session
+        self.returnsSession = returnsSession
+    }
+
+    func makeSession(generation: UInt64) -> (any CurrentFocusProvisionalOutputSession)? {
+        makeSessionCallCount += 1
+        generations.append(generation)
+        return returnsSession ? session : nil
+    }
+}
+
+private actor ControlledCoordinatorRetrySleeper {
+    private(set) var delays: [UInt64] = []
+    private var continuations: [CheckedContinuation<Void, Error>] = []
+
+    var callCount: Int {
+        delays.count
+    }
+
+    func sleep(nanoseconds: UInt64) async throws {
+        delays.append(nanoseconds)
+        try await withCheckedThrowingContinuation { continuation in
+            continuations.append(continuation)
+        }
+    }
+
+    func releaseNext() {
+        guard !continuations.isEmpty else { return }
+        continuations.removeFirst().resume()
+    }
+}
+
+private enum ReviewPacketOutcome {
+    case event(StreamingRecognitionEvent)
+    case failure(StreamFailure)
+}
+
+private actor ReviewControllableStreamingSession: SpeechStreamingSession {
+    private var packetOutcomes: [ReviewPacketOutcome]
+    private let finishOutcome: ReviewPacketOutcome
+    private let holdSendCallNumber: Int?
+    private let cancelHeldSendOutcome: ReviewPacketOutcome?
+    private let holdCancelCompletion: Bool
+    private var heldContinuation: CheckedContinuation<StreamingRecognitionEvent, Error>?
+    private var heldOutcome: ReviewPacketOutcome?
+    private var cancelCompletionContinuation: CheckedContinuation<Void, Never>?
+    private(set) var sendCallCount = 0
+    private(set) var finishCallCount = 0
+    private(set) var cancelCallCount = 0
+
+    var isHoldingSend: Bool {
+        heldContinuation != nil
+    }
+
+    var isHoldingCancelCompletion: Bool {
+        cancelCompletionContinuation != nil
+    }
+
+    init(
+        packetOutcomes: [ReviewPacketOutcome],
+        holdSendCallNumber: Int? = nil,
+        finishOutcome: ReviewPacketOutcome = .event(.cancelled),
+        cancelHeldSendOutcome: ReviewPacketOutcome? = nil,
+        holdCancelCompletion: Bool = false
+    ) {
+        self.packetOutcomes = packetOutcomes
+        self.holdSendCallNumber = holdSendCallNumber
+        self.finishOutcome = finishOutcome
+        self.cancelHeldSendOutcome = cancelHeldSendOutcome
+        self.holdCancelCompletion = holdCancelCompletion
+    }
+
+    func sendAudioPacket(_ pcm16: Data) async throws -> StreamingRecognitionEvent {
+        _ = pcm16
+        sendCallCount += 1
+        let outcome = packetOutcomes.isEmpty
+            ? ReviewPacketOutcome.event(.partial(""))
+            : packetOutcomes.removeFirst()
+        guard sendCallCount == holdSendCallNumber else {
+            return try resolve(outcome)
+        }
+        heldOutcome = outcome
+        return try await withCheckedThrowingContinuation { continuation in
+            heldContinuation = continuation
+        }
+    }
+
+    func releaseHeldIfNeeded() {
+        guard let continuation = heldContinuation, let outcome = heldOutcome else { return }
+        heldContinuation = nil
+        heldOutcome = nil
+        switch outcome {
+        case .event(let event):
+            continuation.resume(returning: event)
+        case .failure(let failure):
+            continuation.resume(throwing: failure)
+        }
+    }
+
+    func finish() async throws -> StreamingRecognitionEvent {
+        finishCallCount += 1
+        return try resolve(finishOutcome)
+    }
+
+    func cancel() async {
+        cancelCallCount += 1
+        heldOutcome = nil
+        if let heldContinuation {
+            switch cancelHeldSendOutcome {
+            case .event(let event):
+                heldContinuation.resume(returning: event)
+            case .failure(let failure):
+                heldContinuation.resume(throwing: failure)
+            case nil:
+                heldContinuation.resume(throwing: CancellationError())
+            }
+        }
+        heldContinuation = nil
+        if holdCancelCompletion {
+            await withCheckedContinuation { continuation in
+                cancelCompletionContinuation = continuation
+            }
+        }
+    }
+
+    func releaseCancelCompletionIfNeeded() {
+        cancelCompletionContinuation?.resume()
+        cancelCompletionContinuation = nil
+    }
+
+    private func resolve(_ outcome: ReviewPacketOutcome) throws -> StreamingRecognitionEvent {
+        switch outcome {
+        case .event(let event):
+            return event
+        case .failure(let failure):
+            throw failure
+        }
+    }
+}
+
+private actor ImmediateReviewRetrySleeper {
+    private(set) var delays: [UInt64] = []
+
+    var callCount: Int {
+        delays.count
+    }
+
+    func sleep(nanoseconds: UInt64) {
+        delays.append(nanoseconds)
+    }
+}
+
+private actor CooperativeReviewRetrySleeper {
+    private var continuation: CheckedContinuation<Void, Error>?
+    private var cancellationRequested = false
+    private(set) var callCount = 0
+    private(set) var cancellationCount = 0
+
+    func sleep(nanoseconds: UInt64) async throws {
+        _ = nanoseconds
+        callCount += 1
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<Void, Error>) in
+                if cancellationRequested {
+                    continuation.resume(throwing: CancellationError())
+                } else {
+                    self.continuation = continuation
+                }
+            }
+        } onCancel: {
+            Task {
+                await self.cancelPending()
+            }
+        }
+    }
+
+    func releaseIfNeeded() {
+        continuation?.resume()
+        continuation = nil
+    }
+
+    private func cancelPending() {
+        guard !cancellationRequested else { return }
+        cancellationRequested = true
+        cancellationCount += 1
+        continuation?.resume(throwing: CancellationError())
+        continuation = nil
+    }
+}
+
+private struct ReviewUnclassifiedError: Error {}
+
+private actor ReviewFactoryPlanProvider: SpeechStreamingSessionProviding {
+    private var errors: [any Error]
+    private let successor: any SpeechStreamingSession
+    private(set) var makeSessionCallCount = 0
+
+    init(errors: [any Error], successor: any SpeechStreamingSession) {
+        self.errors = errors
+        self.successor = successor
+    }
+
+    func makeStreamingSession(
+        appId: String,
+        appSecret: String
+    ) async throws -> any SpeechStreamingSession {
+        _ = appId
+        _ = appSecret
+        makeSessionCallCount += 1
+        if !errors.isEmpty {
+            throw errors.removeFirst()
+        }
+        return successor
+    }
+}
+
+private actor CooperativeReviewSessionCreationProvider: SpeechStreamingSessionProviding {
+    private let lateSession: any SpeechStreamingSession
+    private var continuation: CheckedContinuation<any SpeechStreamingSession, Error>?
+    private var cancellationRequested = false
+    private(set) var makeSessionCallCount = 0
+    private(set) var cancellationCount = 0
+
+    init(lateSession: any SpeechStreamingSession) {
+        self.lateSession = lateSession
+    }
+
+    func makeStreamingSession(
+        appId: String,
+        appSecret: String
+    ) async throws -> any SpeechStreamingSession {
+        _ = appId
+        _ = appSecret
+        makeSessionCallCount += 1
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<any SpeechStreamingSession, Error>) in
+                if cancellationRequested {
+                    continuation.resume(throwing: CancellationError())
+                } else {
+                    self.continuation = continuation
+                }
+            }
+        } onCancel: {
+            Task {
+                await self.cancelPendingCreation()
+            }
+        }
+    }
+
+    func releaseLateSessionIfNeeded() {
+        continuation?.resume(returning: lateSession)
+        continuation = nil
+    }
+
+    private func cancelPendingCreation() {
+        guard !cancellationRequested else { return }
+        cancellationRequested = true
+        cancellationCount += 1
+        continuation?.resume(throwing: CancellationError())
+        continuation = nil
+    }
+}
+
+private actor RetryCoordinatorStreamingSession: SpeechStreamingSession {
+    private var packetEvents: [StreamingRecognitionEvent]
+    private let finishEvent: StreamingRecognitionEvent
+    private(set) var sendCallCount = 0
+    private(set) var finishCallCount = 0
+    private(set) var cancelCallCount = 0
+    private(set) var packetFirstBytes: [UInt8] = []
+
+    init(
+        packetEvents: [StreamingRecognitionEvent],
+        finishEvent: StreamingRecognitionEvent = .cancelled
+    ) {
+        self.packetEvents = packetEvents
+        self.finishEvent = finishEvent
+    }
+
+    func sendAudioPacket(_ pcm16: Data) async throws -> StreamingRecognitionEvent {
+        sendCallCount += 1
+        packetFirstBytes.append(pcm16.first ?? 0)
+        guard !packetEvents.isEmpty else { return .partial("") }
+        return packetEvents.removeFirst()
+    }
+
+    func finish() async throws -> StreamingRecognitionEvent {
+        finishCallCount += 1
+        return finishEvent
+    }
+
+    func cancel() async {
+        cancelCallCount += 1
+    }
+}
+
+private actor RetryCoordinatorStreamingProvider: SpeechStreamingSessionProviding {
+    private var factoryErrors: [FeishuAPIService.APIError]
+    private var sessions: [any SpeechStreamingSession]
+    private(set) var makeSessionCallCount = 0
+
+    init(
+        factoryErrors: [FeishuAPIService.APIError],
+        sessions: [any SpeechStreamingSession]
+    ) {
+        self.factoryErrors = factoryErrors
+        self.sessions = sessions
+    }
+
+    func makeStreamingSession(
+        appId: String,
+        appSecret: String
+    ) async throws -> any SpeechStreamingSession {
+        makeSessionCallCount += 1
+        if !factoryErrors.isEmpty {
+            throw factoryErrors.removeFirst()
+        }
+        guard !sessions.isEmpty else {
+            throw FeishuAPIService.APIError.networkError("")
+        }
+        return sessions.removeFirst()
     }
 }
 
@@ -973,10 +2929,27 @@ private actor CoordinatorStreamingProvider: SpeechStreamingSessionProviding {
 @MainActor
 private final class CoordinatorAudioRecorder: AudioRecorder {
     private var ingress: ByteBoundedAudioIngress?
+    private var holdNextStopBarrier: Bool
+    private var stopBarrierContinuation: CheckedContinuation<Void, Never>?
     private(set) var startStreamingCallCount = 0
     private(set) var stopStreamingCallCount = 0
     private(set) var forceCleanupCallCount = 0
+    private(set) var startedIngressIdentifiers: [ObjectIdentifier] = []
+    private(set) var finishedIngressIdentifiers: [ObjectIdentifier] = []
     var onForceCleanup: (() -> Void)?
+
+    var isHoldingStopBarrier: Bool {
+        stopBarrierContinuation != nil
+    }
+
+    var activeIngressIdentifier: ObjectIdentifier? {
+        ingress.map(ObjectIdentifier.init)
+    }
+
+    init(holdNextStopBarrier: Bool = false) {
+        self.holdNextStopBarrier = holdNextStopBarrier
+        super.init()
+    }
 
     override func startStreamingRecording(
         ingress: ByteBoundedAudioIngress,
@@ -984,6 +2957,7 @@ private final class CoordinatorAudioRecorder: AudioRecorder {
     ) -> Bool {
         startStreamingCallCount += 1
         self.ingress = ingress
+        startedIngressIdentifiers.append(ObjectIdentifier(ingress))
         isRecording = true
         completion(true)
         return true
@@ -992,8 +2966,20 @@ private final class CoordinatorAudioRecorder: AudioRecorder {
     override func stopStreamingRecording(streamEstablished: Bool) async {
         stopStreamingCallCount += 1
         isRecording = false
-        ingress?.finish(streamEstablished: streamEstablished)
-        ingress = nil
+        let stoppingIngress = ingress
+        if holdNextStopBarrier {
+            holdNextStopBarrier = false
+            await withCheckedContinuation { continuation in
+                stopBarrierContinuation = continuation
+            }
+        }
+        stoppingIngress?.finish(streamEstablished: streamEstablished)
+        if let stoppingIngress {
+            finishedIngressIdentifiers.append(ObjectIdentifier(stoppingIngress))
+            if ingress === stoppingIngress {
+                ingress = nil
+            }
+        }
     }
 
     override func forceCleanup() {
@@ -1008,10 +2994,17 @@ private final class CoordinatorAudioRecorder: AudioRecorder {
         ingress?.append(data)
     }
 
+    func releaseStopBarrier() {
+        stopBarrierContinuation?.resume()
+        stopBarrierContinuation = nil
+    }
+
     func resetTracking() {
         startStreamingCallCount = 0
         stopStreamingCallCount = 0
         forceCleanupCallCount = 0
+        startedIngressIdentifiers = []
+        finishedIngressIdentifiers = []
         onForceCleanup = nil
     }
 }
@@ -1027,6 +3020,7 @@ private final class CoordinatorAccessibilityClient: AccessibilityClient {
     }
 
     private let capability: Capability
+    private let rebindCapability: Capability?
     private let token: CursorDestinationToken
     private(set) var captureCount = 0
     private(set) var frontmostProcessQueryCount = 0
@@ -1040,8 +3034,9 @@ private final class CoordinatorAccessibilityClient: AccessibilityClient {
     var securityStateError: AccessibilityClientError?
     private(set) var setSelectedTextCalls: [String] = []
 
-    init(capability: Capability) {
+    init(capability: Capability, rebindCapability: Capability? = nil) {
         self.capability = capability
+        self.rebindCapability = rebindCapability
         let element = AXUIElementCreateApplication(42)
         currentFocusedElement = element
         token = CursorDestinationToken(
@@ -1060,7 +3055,8 @@ private final class CoordinatorAccessibilityClient: AccessibilityClient {
             element: token.element,
             originalSelection: token.originalSelection
         )
-        switch capability {
+        let currentCapability = captureCount > 1 ? (rebindCapability ?? capability) : capability
+        switch currentCapability {
         case .live:
             return .live(captured)
         case .finalOnly:

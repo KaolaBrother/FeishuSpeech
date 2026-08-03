@@ -63,4 +63,24 @@ final class StreamingCoordinatorStateTests: XCTestCase {
             "listening, final-only, and sealing must remain distinguishable fixed statuses"
         )
     }
+
+    func test_retryPolicyUsesCappedExponentialBackoffWithDeterministicJitter() {
+        let policy = StreamingRetryPolicy(jitterFactor: { 1.0 })
+
+        XCTAssertEqual(policy.delayNanoseconds(forRetryOrdinal: 1), 250_000_000)
+        XCTAssertEqual(policy.delayNanoseconds(forRetryOrdinal: 2), 500_000_000)
+        XCTAssertEqual(policy.delayNanoseconds(forRetryOrdinal: 3), 1_000_000_000)
+        XCTAssertEqual(policy.delayNanoseconds(forRetryOrdinal: 4), 2_000_000_000)
+        XCTAssertEqual(policy.delayNanoseconds(forRetryOrdinal: 5), 4_000_000_000)
+        XCTAssertEqual(policy.delayNanoseconds(forRetryOrdinal: 40), 4_000_000_000)
+    }
+
+    func test_retryPolicyClampsJitterAndFinalDelayBounds() {
+        let low = StreamingRetryPolicy(jitterFactor: { 0.01 })
+        let high = StreamingRetryPolicy(jitterFactor: { 99.0 })
+
+        XCTAssertEqual(low.delayNanoseconds(forRetryOrdinal: 1), 200_000_000)
+        XCTAssertEqual(high.delayNanoseconds(forRetryOrdinal: 1), 300_000_000)
+        XCTAssertEqual(high.delayNanoseconds(forRetryOrdinal: 40), 4_000_000_000)
+    }
 }
