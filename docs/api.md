@@ -10,7 +10,7 @@ This page documents the Feishu integration contract implemented by
 | Purpose | Path | Request | Success response |
 |---|---|---|---|
 | Tenant token | `/open-apis/auth/v3/tenant_access_token/internal` | JSON object with `app_id` and `app_secret` | `AuthResponse` with `code == 0`, `tenant_access_token`, and optional `expire` |
-| Production streaming recognition | `/open-apis/speech_to_text/v1/speech/stream_recognize` | Base64 PCM fragment plus stream/action/sequence config | Code-zero response with optional IDs and `recognition_text` |
+| Production streaming recognition | `/open-apis/speech_to_text/v1/speech/stream_recognize` | Base64 PCM fragment plus stream/action/sequence config | Code-zero response; optional `data.recognition_text` with `data.text` fallback |
 | Compatibility-only whole-file recognition | `/open-apis/speech_to_text/v1/speech/file_recognize` | `SpeechRequest` JSON with base64 PCM data and `SpeechConfig` | `SpeechResponse` with `code == 0` and `data.recognition_text` |
 
 Speech requests use `Authorization: Bearer <tenant_access_token>`,
@@ -23,9 +23,11 @@ fall back to it after a streaming failure.
 
 The streaming provider must obtain a tenant token before it constructs a session or sends any
 request to `stream_recognize`. A tenant-token business rejection therefore means that the
-streaming endpoint was not reached. The recorded second installed-Release UAT failed at this token
-acquisition boundary; it is evidence of an authentication rejection, not of a successful live
-streaming request.
+streaming endpoint was not reached. The latest recorded installed-Release UAT passed this boundary:
+it obtained a token, sent the first `action=1` request, and received HTTP 200. The then-current
+client synchronously rejected that response because its local response contract required `data`
+and matching `stream_id` / `sequence_id` echoes. This proves endpoint reachability and a successful
+HTTP exchange, not successful recognition.
 
 `FeishuAPIService.APIError.authFailed` maps to the fixed public message
 `认证失败，请检查应用凭据`. The associated backend message, credential values, transcript, and raw
@@ -34,9 +36,9 @@ active generation, hides the recording overlay, and tears the interaction down o
 the same `HotKeyService` error is suppressed so it cannot re-enter teardown or indefinitely defer
 the overlay's hide completion.
 
-Owner UAT with a valid App ID/App Secret must still verify the tenant's
-`speech_to_text:speech` permission, published application state, supported edition, and the real
-streaming contract. The observed authentication rejection does not close that gate.
+Owner UAT must still verify successful recognition with the relaxed parser, subsequent actions,
+finalization, and the remaining runtime contract. The observed action-1 HTTP 200 does not close
+that gate.
 
 ## Streaming recognition contract (issues #25/#26)
 
@@ -89,6 +91,15 @@ terminal failure; audio is not dropped or reordered.
 Feishu does not define the semantic shape of intermediate `recognition_text`. Every partial is
 therefore the complete opaque replacement state, never an appendable delta. A non-empty action-2
 response is the final authority.
+
+Response decoding follows KaolaTerminal's credential-bearing, proven streaming implementation:
+after valid JSON and `code == 0`, response `stream_id` and `sequence_id` echoes are ignored;
+`data.recognition_text` is preferred, `data.text` is accepted as a fallback, and missing `data` or
+both text fields maps to an empty partial/final value. Identity, action, and sequence remain strict
+request-side invariants. A nonzero business `code` still fails the stream (with the existing
+bounded first-packet token-refresh exception), and malformed JSON still fails as an invalid
+response. Raw bodies, backend messages, IDs, text, audio, credentials, and tokens remain outside
+public diagnostics.
 
 The public Feishu contract confirms the endpoint, fields, action meanings, Base64 PCM, and a
 100–200 ms fragment recommendation. Lowercase-only IDs, exact packet/tail sizes, empty strings for
@@ -230,7 +241,7 @@ authentication feedback.
 pre-existing AudioRecorder-owned blocker outside the #11/#12/#21 API recovery bundle.
 
 Automated fakes do not complete the runtime contract. Installed Release UAT with real credentials
-must still verify terminal empty-audio encoding, real response identity/text shape, same-sequence
+must still verify terminal empty-audio encoding, real response text shape, same-sequence
 token refresh, PCM/tail acceptance, slow-network behavior, tenant permission/edition, and the
 cross-application Accessibility matrix. No transcript, audio, credential, token, stream ID, raw
 body/backend message, target content/title, or clipboard payload may be recorded during that UAT.

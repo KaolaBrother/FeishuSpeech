@@ -19,6 +19,11 @@ The implementation ports KaolaTerminal's stream transport and bounded-ingress ru
 replaces its preview/review UI with an opportunistic macOS Accessibility writer plus a final-only
 current-focus fallback when no AX destination can be established.
 
+It also ports KaolaTerminal's response compatibility boundary: response identity echoes are not
+trusted as acknowledgements, code-zero missing data is an empty value, and `recognition_text` is
+preferred with `text` as fallback. Request-side stream identity/action/sequence remain owned by the
+session.
+
 ## 2. Evidence and verified boundaries
 
 ### Local reference implementation
@@ -59,6 +64,11 @@ Issue #26's independent correctness and security reviews pass. The recorded full
 184 passing tests, 0 failures, and 0 skips. Those fakes and deterministic regressions verify local
 state, byte, transport, cursor, output, and lifecycle contracts; they do not replace installed
 Release UAT against a real Feishu tenant or real third-party applications.
+
+The latest installed-Release evidence obtained a token, sent `action=1`, and received HTTP 200.
+The client then synchronously rejected the response under its former requirement for `data` and
+matching response identity echoes. That evidence identifies a client-side contract mismatch; it
+does not prove a recognized transcript or completed stream.
 
 ## 3. Goals and non-goals
 
@@ -231,17 +241,20 @@ Request rules:
   and retry the same action/sequence. It does not consume a new sequence number.
 - After acceptance, any HTTP, backend, decoding, timeout, or connectivity failure terminates that
   stream. There is no replay, retry loop, or `file_recognize` fallback.
+- After valid JSON and `code == 0`, response `stream_id` / `sequence_id` echoes are ignored;
+  `recognition_text` is preferred, `text` is the fallback, and missing data/text returns an empty
+  event. Nonzero business codes and malformed JSON remain failures.
 - `finish()` and `cancel()` are idempotent. Cancellation abort has one total one-second deadline,
   remains strictly behind an established in-flight continuation, and is suppressed after action 2
   has been emitted.
 - Public errors are sanitized. Raw response bodies and backend messages do not reach UI or logs.
 
 The provider obtains a tenant token before creating this actor or sending `action=1`. A token
-business rejection at that stage is therefore pre-stream authentication failure. It maps to the
-fixed public message `认证失败，请检查应用凭据`; no associated backend detail is exposed. The second
-installed-Release UAT reached this boundary and was rejected before `stream_recognize`, so real
-streaming remains an owner-UAT gate with valid credentials, speech scope, published application,
-and supported tenant edition.
+business rejection at that stage is therefore pre-stream authentication failure and maps to the
+fixed public message `认证失败，请检查应用凭据`; no associated backend detail is exposed. The latest
+installed-Release UAT passed that boundary and received HTTP 200 for `action=1`, but the old client
+then rejected its own response contract. The relaxed parser still requires owner UAT before real
+recognition or finalization is claimed.
 
 Events exposed to the coordinator are typed:
 
@@ -471,6 +484,8 @@ Test/production custody separation was preserved for the automated implementatio
 - no retry or whole-file fallback after first acceptance;
 - finish/cancel idempotence and bounded abort;
 - empty, malformed, non-200, backend-error, timeout, and cancellation responses are sanitized.
+- code-zero missing data/text returns an empty event; response identity echoes and unexpected echo
+  types are ignored; `recognition_text` takes precedence over the `text` fallback.
 
 ### Audio
 
@@ -537,9 +552,9 @@ authentication feedback. Installed Release verification remains pending. Candida
 are a strict subset of the recorded baseline diagnostics rather than new issue-26 lint debt.
 
 General-availability closure remains intentionally separate: the owner will self-test the installed
-Release with real Feishu credentials and the live target-application matrix above. The second UAT
-attempt was rejected during tenant-token acquisition, before the streaming endpoint, and is not a
-live-stream success signal. Until owner UAT succeeds with valid credentials, speech scope, a
-published application, and a supported tenant edition, terminal request encoding, real response/
-token semantics, PCM/tail behavior, slow-network handling, and broad cross-application AX
-compatibility remain unverified.
+Release with real Feishu credentials and the live target-application matrix above. The latest UAT
+reached the streaming endpoint and received HTTP 200 for `action=1`, but the old client rejected an
+over-strict response contract before producing recognition output. Until owner UAT succeeds with
+the relaxed parser, subsequent action/final behavior, terminal request encoding, real text/token
+semantics, PCM/tail behavior, slow-network handling, and broad cross-application AX compatibility
+remain unverified.

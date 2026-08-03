@@ -16,9 +16,6 @@ private nonisolated let maximumErrorBodyByteCount = 64 * 1_024
 nonisolated enum StreamingResponseDiagnosticOutcome: String, Equatable, Sendable {
     case backendBusinessCode
     case malformedJSON
-    case missingData
-    case streamIDMismatch
-    case sequenceIDMismatch
 }
 
 nonisolated struct StreamingResponseDiagnostic: Equatable, Sendable {
@@ -27,9 +24,6 @@ nonisolated struct StreamingResponseDiagnostic: Equatable, Sendable {
     let httpStatus: Int
     let responseByteCount: Int
     let businessCode: Int?
-    let dataPresent: Bool?
-    let streamIDMatches: Bool?
-    let sequenceIDMatches: Bool?
     let outcome: StreamingResponseDiagnosticOutcome
 }
 
@@ -37,9 +31,6 @@ private nonisolated func logStreamingResponseDiagnostic(
     _ diagnostic: StreamingResponseDiagnostic
 ) {
     let businessCode = diagnostic.businessCode.map(String.init) ?? "nil"
-    let dataPresent = diagnostic.dataPresent.map(String.init) ?? "nil"
-    let streamIDMatches = diagnostic.streamIDMatches.map(String.init) ?? "nil"
-    let sequenceIDMatches = diagnostic.sequenceIDMatches.map(String.init) ?? "nil"
 
     logger.error(
         """
@@ -48,9 +39,6 @@ private nonisolated func logStreamingResponseDiagnostic(
         httpStatus=\(diagnostic.httpStatus, privacy: .public) \
         responseByteCount=\(diagnostic.responseByteCount, privacy: .public) \
         businessCode=\(businessCode, privacy: .public) \
-        dataPresent=\(dataPresent, privacy: .public) \
-        streamIDMatches=\(streamIDMatches, privacy: .public) \
-        sequenceIDMatches=\(sequenceIDMatches, privacy: .public) \
         outcome=\(diagnostic.outcome.rawValue, privacy: .public)
         """
     )
@@ -119,14 +107,16 @@ private nonisolated struct StreamingSpeechResponse: Decodable, Sendable {
 }
 
 private nonisolated struct StreamingRecognitionData: Decodable, Sendable {
-    let streamID: String?
-    let sequenceID: Int?
     let recognitionText: String?
+    let text: String?
 
     enum CodingKeys: String, CodingKey {
-        case streamID = "stream_id"
-        case sequenceID = "sequence_id"
         case recognitionText = "recognition_text"
+        case text
+    }
+
+    var transcription: String? {
+        recognitionText ?? text
     }
 }
 
@@ -440,43 +430,7 @@ actor FeishuStreamingSession: SpeechStreamingSession {
             }
             throw StreamFailure.backend
         }
-        guard let data = decoded.data else {
-            emitResponseDiagnostic(
-                action: action,
-                sequenceID: sequenceID,
-                response: response,
-                businessCode: decoded.code,
-                dataPresent: false,
-                outcome: .missingData
-            )
-            throw StreamFailure.malformedResponse
-        }
-        if let responseStreamID = data.streamID, responseStreamID != streamID {
-            emitResponseDiagnostic(
-                action: action,
-                sequenceID: sequenceID,
-                response: response,
-                businessCode: decoded.code,
-                dataPresent: true,
-                streamIDMatches: false,
-                outcome: .streamIDMismatch
-            )
-            throw StreamFailure.responseIdentityMismatch
-        }
-        if let responseSequenceID = data.sequenceID, responseSequenceID != sequenceID {
-            emitResponseDiagnostic(
-                action: action,
-                sequenceID: sequenceID,
-                response: response,
-                businessCode: decoded.code,
-                dataPresent: true,
-                streamIDMatches: data.streamID.map { $0 == streamID },
-                sequenceIDMatches: false,
-                outcome: .sequenceIDMismatch
-            )
-            throw StreamFailure.responseIdentityMismatch
-        }
-        return data.recognitionText ?? ""
+        return decoded.data?.transcription ?? ""
     }
 
     private func emitResponseDiagnostic(
@@ -484,9 +438,6 @@ actor FeishuStreamingSession: SpeechStreamingSession {
         sequenceID: Int,
         response: DirectHTTPResponse,
         businessCode: Int? = nil,
-        dataPresent: Bool? = nil,
-        streamIDMatches: Bool? = nil,
-        sequenceIDMatches: Bool? = nil,
         outcome: StreamingResponseDiagnosticOutcome
     ) {
         diagnosticSink(
@@ -496,9 +447,6 @@ actor FeishuStreamingSession: SpeechStreamingSession {
                 httpStatus: response.statusCode,
                 responseByteCount: response.body.count,
                 businessCode: businessCode,
-                dataPresent: dataPresent,
-                streamIDMatches: streamIDMatches,
-                sequenceIDMatches: sequenceIDMatches,
                 outcome: outcome
             )
         )

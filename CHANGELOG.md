@@ -13,6 +13,7 @@
 - 新增 `MainViewModelTests` 覆盖 `MonitoringState` 失败映射、恢复清除和 cleanup 订阅释放路径（issues #22/#23/#24）
 
 ### Fixed
+- 修复真实凭据 UAT 中首个 `action=1` 已获 HTTP 200 后仍立即失败的问题：客户端不再要求 code-zero 响应回显匹配的 `stream_id` / `sequence_id`，也不再把缺少 `data` 视为畸形响应；解析现与 KaolaTerminal 已跑通实现一致，优先接受 `recognition_text`、兼容 `text`，无文本时产生空 partial。非零飞书业务码和无法解码的 JSON 仍终止当前流；请求侧 stream identity、action/sequence、首次 token 刷新、generation 安全和隐私诊断边界保持不变（issue #26）
 - 根据首轮 UAT 修正过严的 Accessibility 目标门控：无法捕获或确认 AX 光标/焦点元素不再阻塞录音和流式识别；此时仅保留不透明响应，对 Secure Input 与最前台 PID 各采样两次后，通过不接触粘贴板的直接 Unicode CGEvent 把非空 final 向届时焦点最多发送一次，不声称确认光标位置。普通发送/PID 失败和 C0/C1 控制字符改为 copy-only；安全拒绝仍不输入、不复制，`autoInsert=false` 仍为零输出。已捕获目标的机会式实时替换及其 pasteboard/Cmd+V final-only 路径不变（issue #26，取代先前严格目标门控）
 - 修复第二轮 UAT 中终止性 provider/流式失败反复回灌同一热键错误、导致浮窗隐藏动画永远无法完成的问题：失败会先使 generation 失效并隐藏浮窗，再且仅再清理一次；相同 `HotKeyService` 错误不再重复发布。租户 token 认证失败只显示固定提示“认证失败，请检查应用凭据”，不暴露凭据、识别文本或飞书后端详情（issue #26）
 - 睡眠/唤醒、手动重置、权限变化、录音/网络失败和进程清理现在先使流式 generation 与光标所有权失效，再终止入口、录音、网络任务和计时器；迟到事件不能恢复旧会话或写入新的焦点（issue #26）
@@ -57,8 +58,8 @@
 - 移除测试中引用已删除 `.armed` 状态的用例
 
 ### Verification pending
-- 第二轮安装版 UAT 日志只证明飞书在租户 token 获取阶段拒绝了当前认证，流式识别端点尚未开始；有效 App ID / App Secret、`speech_to_text:speech` 权限、应用发布状态和租户版本/套餐仍需 owner UAT，当前不声明真实流式识别成功。
-- 真实飞书凭据下的终止请求空音频编码、响应形态、首次 token 刷新同序列重试、partial/final 语义、PCM/tail 兼容性和慢网行为仍需安装版 Release UAT；这些本地策略不作为飞书保证。
+- 最新安装版 UAT 已证明 token 获取成功、首个 `action=1` 到达飞书并收到 HTTP 200；旧客户端随后同步拒绝过严的响应契约。放宽后的解析尚未完成 owner UAT，因此当前仍不声明真实流式识别端到端成功。
+- 真实飞书凭据下的后续 action、终止请求空音频编码、`recognition_text` / `text` 实际形态、首次 token 刷新同序列重试、partial/final 语义、PCM/tail 兼容性和慢网行为仍需安装版 Release UAT；这些本地策略不作为飞书保证。
 - TextEdit/原生控件、浏览器、Electron、终端和富文本编辑器的 Accessibility 范围、焦点干扰、Unicode 与 undo 行为仍需跨应用实机 UAT；当前不声明广泛兼容性。
 
 ## [0.3.0] - 2025

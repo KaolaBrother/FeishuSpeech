@@ -51,6 +51,12 @@ An established stream has no whole-file fallback or whole-audio retry.
 Intermediate `recognition_text` is treated as opaque replacement state because Feishu does not
 document whether it is delta, cumulative, stabilized, or revisable.
 
+The response trust boundary deliberately differs from the request identity boundary. Requests
+still carry the session-owned `stream_id`, `sequence_id`, and action, but code-zero responses do
+not have to echo matching IDs. The parser prefers `data.recognition_text`, falls back to
+`data.text`, and maps missing `data`/text to an empty event, matching KaolaTerminal's proven
+streaming implementation. Nonzero business codes and malformed JSON remain terminal failures.
+
 These packet sizes, tail padding, lowercase stream IDs, same-sequence token retry, strict
 serialization, and exact-once terminal behavior are FeishuSpeech application invariants. Public
 Feishu documentation does not guarantee their runtime acceptance or idempotency; credential-bearing
@@ -348,9 +354,9 @@ fail-closed output, generation cleanup, settings, two-second transcript-free fee
 provider teardown, overlay dismissal, identical-error suppression, and private auth feedback.
 
 Credential-bearing Feishu behavior and cross-application Accessibility compatibility remain live
-UAT. The second installed-Release attempt was rejected while acquiring the tenant token, before
-the streaming endpoint; it does not establish live streaming success. A valid App ID/App Secret,
-speech scope, published application, supported edition, terminal encoding, real response and
-token-refresh behavior, PCM/tail handling, slow networks, native/browser/Electron/terminal/rich-text
-targets, focus/caret interference, Unicode, and undo remain owner-UAT gates. No broad application
-compatibility is claimed yet.
+UAT. The latest installed-Release evidence reached `action=1` and received HTTP 200, then the old
+client synchronously rejected its over-strict response contract; it does not establish live
+recognition success. The relaxed KaolaTerminal-compatible parser, subsequent actions, terminal
+encoding, real text/token-refresh behavior, PCM/tail handling, slow networks,
+native/browser/Electron/terminal/rich-text targets, focus/caret interference, Unicode, and undo
+remain owner-UAT gates. No broad application compatibility is claimed yet.

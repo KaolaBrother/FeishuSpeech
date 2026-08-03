@@ -66,7 +66,7 @@ cp -R build/Build/Products/Release/FeishuSpeech.app /Applications/
 
 “自动输入”关闭时仍会进行流式识别，但不会修改目标输入框或粘贴板。浮窗和日志只显示状态与分类错误，不显示识别文本、音频、凭据、token、stream ID、目标控件内容或剪贴板内容。
 
-> UAT 后修正已取代最初“必须先确认 AX 目标才开始录音”的严格门控：无法取得 AX 目标不再阻塞录音或流式识别。真实飞书凭据下的流式请求细节，以及 TextEdit、浏览器、Electron、终端和富文本编辑器之间的 Accessibility 差异，仍需已安装 Release 版本继续实机 UAT。请勿将尚未实测的应用视为已承诺兼容。
+> UAT 后修正已取代最初“必须先确认 AX 目标才开始录音”的严格门控：无法取得 AX 目标不再阻塞录音或流式识别。后续实机证据已确认首个 `action=1` 请求到达飞书并收到 HTTP 200，但当时客户端因过严校验响应中的 `data`、`stream_id` 和 `sequence_id` 而同步终止。当前版本已按 KaolaTerminal 的已跑通契约放宽响应解析；真实成功识别、后续 action/final 行为，以及不同应用的 Accessibility 差异仍需安装版 Release 继续 owner UAT，尚不声明端到端成功或广泛兼容。
 
 ## 常见问题
 
@@ -85,10 +85,11 @@ cp -R build/Build/Products/Release/FeishuSpeech.app /Applications/
 2. 检查设置中的 App ID 和 App Secret 是否正确
 3. 确认飞书应用已开通 `speech_to_text:speech` 权限并已发布
 
-若显示固定提示“认证失败，请检查应用凭据”，说明租户 token 获取阶段已被飞书拒绝，
-流式识别端点尚未开始；应用不会把飞书返回的凭据、正文或后端错误详情显示到界面或日志。
-已记录的 Release UAT 正是在这个阶段失败，不能据此声明真实流式请求已经成功。除 App ID /
-App Secret 外，还需确认租户权限、应用版本和可用版本/套餐，并由安装版继续实机验证。
+若显示固定提示“认证失败，请检查应用凭据”，说明租户 token 获取阶段已被飞书拒绝；
+应用不会把飞书返回的凭据、正文或后端错误详情显示到界面或日志。最新一次记录的 Release
+UAT 并非停在该阶段：它已成功取得 token、发送首个 `action=1` 请求并收到 HTTP 200，随后由
+旧版客户端的过严响应契约同步拒绝。当前版本已移除该客户端拒绝条件，但仍须由安装版继续
+实机确认真正的识别文本、后续 action/final 和目标应用输出。
 
 应用会在连续失败 3 次后自动重置服务状态。
 
