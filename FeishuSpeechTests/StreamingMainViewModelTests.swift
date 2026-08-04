@@ -255,6 +255,32 @@ final class StreamingMainViewModelTests: XCTestCase {
         XCTAssertFalse(containsTranscript(context.viewModel, transcript: "PRIVATE_FINAL"))
     }
 
+    func test_axOwnerDriftBeforeDifferingActionTwoPreservesPartialAndPublishesNonSuccess() async {
+        let context = makeContext(
+            capability: .live,
+            packetEvents: [.partial("held partial")],
+            finishEvent: .final("authoritative final")
+        )
+        let surface = RenderedStatusSurface(viewModel: context.viewModel)
+        let identity = StreamingSessionIdentity(generation: 4_101)
+
+        await runOnePacketInteraction(context, identity: identity)
+        XCTAssertEqual(context.accessibility.rangeText, "held partial")
+        context.accessibility.selectedRange = CursorTextRange(location: 999, length: 0)
+
+        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        await waitUntil { context.viewModel.activeSessionIdentityForTesting == nil }
+
+        XCTAssertEqual(context.accessibility.setSelectedTextCalls, ["held partial"])
+        XCTAssertEqual(context.accessibility.rangeText, "held partial")
+        XCTAssertEqual(context.overlayPresenter.completionFeedbacks, [.provisionalOutputPreserved])
+        XCTAssertFalse(surface.states.contains(where: isError))
+        XCTAssertFalse(surface.states.contains { $0.text.contains("held partial") })
+        XCTAssertFalse(surface.states.contains { $0.text.contains("authoritative final") })
+        XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
+        XCTAssertEqual(context.output.copiedTexts, [])
+    }
+
     func test_releaseWhileFirstPacketHTTPIsInFlightFlushesTailFromIngressEmissionState() async {
         let context = makeContext(
             capability: .finalOnly,
@@ -1664,6 +1690,83 @@ final class StreamingMainViewModelTests: XCTestCase {
         await viewModel.resetService()
     }
 
+    func test_externalResetSettlesFactoryGateAndCancelsNonCooperativeLateSessionOnce() async {
+        let lateSession = RetryCoordinatorStreamingSession(packetEvents: [])
+        let provider = ReviewNonCooperativeLateFactoryProvider(lateSession: lateSession)
+        let context = makeReviewContext(
+            capability: .live,
+            provider: provider,
+            retrySleeper: { _ in }
+        )
+        let identity = StreamingSessionIdentity(generation: 4_102)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await provider.isHoldingFactory }
+        await context.viewModel.resetService()
+        XCTAssertNil(context.viewModel.activeSessionIdentityForTesting)
+
+        await provider.releaseLateSessionIfNeeded()
+        await waitUntil { await lateSession.cancelCallCount == 1 }
+        await settle(iterations: 50)
+
+        let cancelCallCount = await lateSession.cancelCallCount
+        let sendCallCount = await lateSession.sendCallCount
+        let finishCallCount = await lateSession.finishCallCount
+        XCTAssertEqual(cancelCallCount, 1)
+        XCTAssertEqual(sendCallCount, 0)
+        XCTAssertEqual(finishCallCount, 0)
+        XCTAssertNil(context.viewModel.activeSessionIdentityForTesting)
+    }
+
+    func test_drainExpirySettlesFactoryGateAndCancelsNonCooperativeLateSessionOnce() async {
+        let lateSession = RetryCoordinatorStreamingSession(packetEvents: [])
+        let provider = ReviewNonCooperativeLateFactoryProvider(lateSession: lateSession)
+        let recorder = CoordinatorAudioRecorder()
+        let accessibility = CoordinatorAccessibilityClient(capability: .live)
+        let output = CoordinatorFinalTextOutput()
+        let overlayPresenter = CoordinatorOverlayPresenter()
+        let viewModel = MainViewModel(
+            audioRecorder: recorder,
+            settings: AppSettings(
+                appId: "configured-app",
+                appSecret: "configured-secret",
+                autoInsert: true,
+                playSound: false
+            ),
+            hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
+            streamingProvider: provider,
+            accessibilityClient: accessibility,
+            finalTextOutput: output,
+            overlayPresenter: overlayPresenter,
+            streamingDrainPolicy: StreamingDrainPolicy(
+                operationTimeoutNanoseconds: 100_000_000,
+                postReleaseDrainTimeoutNanoseconds: 2_000_000
+            ),
+            streamingRetryDelay: { _ in 0 },
+            streamingRetrySleeper: { _ in }
+        )
+        recorder.resetTracking()
+        let identity = StreamingSessionIdentity(generation: 4_103)
+
+        viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await provider.isHoldingFactory }
+        viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        await waitUntil { viewModel.activeSessionIdentityForTesting == nil }
+
+        await provider.releaseLateSessionIfNeeded()
+        await waitUntil { await lateSession.cancelCallCount == 1 }
+        await settle(iterations: 50)
+
+        let cancelCallCount = await lateSession.cancelCallCount
+        let sendCallCount = await lateSession.sendCallCount
+        let finishCallCount = await lateSession.finishCallCount
+        XCTAssertEqual(cancelCallCount, 1)
+        XCTAssertEqual(sendCallCount, 0)
+        XCTAssertEqual(finishCallCount, 0)
+        XCTAssertEqual(overlayPresenter.completionFeedbacks, [])
+        XCTAssertNil(viewModel.activeSessionIdentityForTesting)
+    }
+
     func test_postReleaseDrainExpiryPreservesOutputAndSuppressesLatePacketCompletion() async {
         let session = ReviewNonCooperativeLatePacketSession(
             firstEvent: .partial("preserved output"),
@@ -1726,6 +1829,283 @@ final class StreamingMainViewModelTests: XCTestCase {
             "a noncooperative completion after drain cleanup must be generation-suppressed"
         )
         XCTAssertNil(viewModel.activeSessionIdentityForTesting)
+    }
+
+    func test_postReleaseDrainExpiryReportsFixedFailureWhenNoSafeOutputWasCommitted() async {
+        for (offset, rejectedSnapshot) in ["", "keyboard\nline"].enumerated() {
+            let session = ReviewNonCooperativeLatePacketSession(
+                firstEvent: .partial(rejectedSnapshot),
+                lateEvent: .partial("late output")
+            )
+            let provider = RetryCoordinatorStreamingProvider(factoryErrors: [], sessions: [session])
+            let recorder = CoordinatorAudioRecorder()
+            let accessibility = CoordinatorAccessibilityClient(capability: .finalOnly)
+            let output = CoordinatorFinalTextOutput()
+            let overlayPresenter = CoordinatorOverlayPresenter()
+            let appendSession = CoordinatorCurrentFocusAppendSession()
+            let appendFactory = CoordinatorCurrentFocusAppendSessionFactory(session: appendSession)
+            let viewModel = MainViewModel(
+                audioRecorder: recorder,
+                settings: AppSettings(
+                    appId: "configured-app",
+                    appSecret: "configured-secret",
+                    autoInsert: true,
+                    playSound: false
+                ),
+                hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
+                streamingProvider: provider,
+                accessibilityClient: accessibility,
+                finalTextOutput: output,
+                overlayPresenter: overlayPresenter,
+                currentFocusAppendSessionFactory: appendFactory,
+                streamingDrainPolicy: StreamingDrainPolicy(
+                    operationTimeoutNanoseconds: 100_000_000,
+                    postReleaseDrainTimeoutNanoseconds: 2_000_000
+                ),
+                streamingRetryDelay: { _ in 0 },
+                streamingRetrySleeper: { _ in }
+            )
+            recorder.resetTracking()
+            let surface = RenderedStatusSurface(viewModel: viewModel)
+            let identity = StreamingSessionIdentity(generation: UInt64(4_110 + offset))
+
+            viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+            recorder.emit(Data(repeating: 0xE1, count: 12_800))
+            await waitUntil { await session.isHoldingLatePacket }
+            viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+            await waitUntil { viewModel.activeSessionIdentityForTesting == nil }
+
+            XCTAssertEqual(appendSession.appliedTexts, [], "snapshot \(rejectedSnapshot.debugDescription)")
+            XCTAssertEqual(overlayPresenter.completionFeedbacks, [])
+            XCTAssertEqual(surface.states.filter(isError).map(\.text), ["流式识别失败"])
+            XCTAssertEqual(output.currentFocusAttemptedTexts, [])
+            XCTAssertEqual(output.copiedTexts, [])
+            XCTAssertEqual(output.syntheticInputCallCount, 0)
+
+            await session.releaseLatePacketIfNeeded()
+        }
+    }
+
+    func test_postReleaseDrainExpiryMapsUncertainKeyboardDeliveryToProvisionalPreserved() async {
+        let session = ReviewNonCooperativeLatePacketSession(
+            firstEvent: .partial("uncertain output"),
+            lateEvent: .partial("late output")
+        )
+        let provider = RetryCoordinatorStreamingProvider(factoryErrors: [], sessions: [session])
+        let recorder = CoordinatorAudioRecorder()
+        let accessibility = CoordinatorAccessibilityClient(capability: .finalOnly)
+        let output = CoordinatorFinalTextOutput()
+        let overlayPresenter = CoordinatorOverlayPresenter()
+        let appendSession = CoordinatorCurrentFocusAppendSession(
+            applyOutcomes: [.deliveryUncertain]
+        )
+        let appendFactory = CoordinatorCurrentFocusAppendSessionFactory(session: appendSession)
+        let viewModel = MainViewModel(
+            audioRecorder: recorder,
+            settings: AppSettings(
+                appId: "configured-app",
+                appSecret: "configured-secret",
+                autoInsert: true,
+                playSound: false
+            ),
+            hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
+            streamingProvider: provider,
+            accessibilityClient: accessibility,
+            finalTextOutput: output,
+            overlayPresenter: overlayPresenter,
+            currentFocusAppendSessionFactory: appendFactory,
+            streamingDrainPolicy: StreamingDrainPolicy(
+                operationTimeoutNanoseconds: 100_000_000,
+                postReleaseDrainTimeoutNanoseconds: 2_000_000
+            ),
+            streamingRetryDelay: { _ in 0 },
+            streamingRetrySleeper: { _ in }
+        )
+        recorder.resetTracking()
+        let surface = RenderedStatusSurface(viewModel: viewModel)
+        let identity = StreamingSessionIdentity(generation: 4_112)
+
+        viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        recorder.emit(Data(repeating: 0xE2, count: 12_800))
+        await waitUntil {
+            await session.isHoldingLatePacket && appendSession.appliedTexts == ["uncertain output"]
+        }
+        viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        await waitUntil { viewModel.activeSessionIdentityForTesting == nil }
+
+        XCTAssertEqual(appendSession.postAttemptCount, 1)
+        XCTAssertEqual(overlayPresenter.completionFeedbacks, [.provisionalOutputPreserved])
+        XCTAssertFalse(surface.states.contains(where: isError))
+        XCTAssertEqual(output.currentFocusAttemptedTexts, [])
+        XCTAssertEqual(output.copiedTexts, [])
+
+        await session.releaseLatePacketIfNeeded()
+    }
+
+    func test_packetReadyAtDrainDeadlineIsRejectedBeforeOutputEvenBeforeExpiryTaskRuns() async {
+        let now = ReviewMutableMonotonicNow()
+        let session = ReviewControllableStreamingSession(
+            packetOutcomes: [.event(.partial("deadline packet"))],
+            holdSendCallNumber: 1
+        )
+        let provider = RetryCoordinatorStreamingProvider(factoryErrors: [], sessions: [session])
+        let recorder = CoordinatorAudioRecorder()
+        let accessibility = CoordinatorAccessibilityClient(capability: .live)
+        let output = CoordinatorFinalTextOutput()
+        let overlayPresenter = CoordinatorOverlayPresenter()
+        let surface: RenderedStatusSurface
+        let viewModel = MainViewModel(
+            audioRecorder: recorder,
+            settings: AppSettings(
+                appId: "configured-app",
+                appSecret: "configured-secret",
+                autoInsert: true,
+                playSound: false
+            ),
+            hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
+            streamingProvider: provider,
+            accessibilityClient: accessibility,
+            finalTextOutput: output,
+            overlayPresenter: overlayPresenter,
+            streamingDrainPolicy: StreamingDrainPolicy(
+                operationTimeoutNanoseconds: 100_000_000,
+                postReleaseDrainTimeoutNanoseconds: 1_000_000_000
+            ),
+            streamingMonotonicNow: { now.value },
+            streamingRetryDelay: { _ in 0 },
+            streamingRetrySleeper: { _ in }
+        )
+        surface = RenderedStatusSurface(viewModel: viewModel)
+        recorder.resetTracking()
+        let identity = StreamingSessionIdentity(generation: 4_120)
+
+        viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        recorder.emit(Data(repeating: 0xE3, count: 6_400))
+        await waitUntil { await session.isHoldingSend }
+        viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        await waitUntil { recorder.finishedIngressIdentifiers.count == 1 }
+        await settle(iterations: 50)
+
+        now.advance(nanoseconds: 1_000_000_000)
+        await session.releaseHeldIfNeeded()
+        await waitUntil { viewModel.activeSessionIdentityForTesting == nil }
+
+        XCTAssertEqual(accessibility.setSelectedTextCalls, [])
+        XCTAssertEqual(accessibility.rangeText, "")
+        XCTAssertEqual(overlayPresenter.completionFeedbacks, [])
+        XCTAssertEqual(surface.states.filter(isError).map(\.text), ["流式识别失败"])
+        XCTAssertEqual(output.currentFocusAttemptedTexts, [])
+        XCTAssertEqual(output.copiedTexts, [])
+    }
+
+    func test_finishReadyAtDrainDeadlineCannotReplaceCommittedPartialBeforeExpiryTaskRuns() async {
+        let now = ReviewMutableMonotonicNow()
+        let session = ReviewDeadlineControlledFinishSession(
+            packetEvent: .partial("committed partial"),
+            finishEvent: .final("late authoritative final")
+        )
+        let provider = RetryCoordinatorStreamingProvider(factoryErrors: [], sessions: [session])
+        let recorder = CoordinatorAudioRecorder()
+        let accessibility = CoordinatorAccessibilityClient(capability: .live)
+        let output = CoordinatorFinalTextOutput()
+        let overlayPresenter = CoordinatorOverlayPresenter()
+        let viewModel = MainViewModel(
+            audioRecorder: recorder,
+            settings: AppSettings(
+                appId: "configured-app",
+                appSecret: "configured-secret",
+                autoInsert: true,
+                playSound: false
+            ),
+            hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
+            streamingProvider: provider,
+            accessibilityClient: accessibility,
+            finalTextOutput: output,
+            overlayPresenter: overlayPresenter,
+            streamingDrainPolicy: StreamingDrainPolicy(
+                operationTimeoutNanoseconds: 100_000_000,
+                postReleaseDrainTimeoutNanoseconds: 1_000_000_000
+            ),
+            streamingMonotonicNow: { now.value },
+            streamingRetryDelay: { _ in 0 },
+            streamingRetrySleeper: { _ in }
+        )
+        recorder.resetTracking()
+        let identity = StreamingSessionIdentity(generation: 4_121)
+
+        viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        recorder.emit(Data(repeating: 0xE4, count: 6_400))
+        await waitUntil { accessibility.setSelectedTextCalls == ["committed partial"] }
+        viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        await waitUntil { await session.isHoldingFinish }
+
+        now.advance(nanoseconds: 1_000_000_000)
+        await session.releaseFinishIfNeeded()
+        await waitUntil { viewModel.activeSessionIdentityForTesting == nil }
+
+        XCTAssertEqual(accessibility.setSelectedTextCalls, ["committed partial"])
+        XCTAssertEqual(accessibility.rangeText, "committed partial")
+        XCTAssertEqual(overlayPresenter.completionFeedbacks, [.emptyFinalPreservedPartial])
+        XCTAssertEqual(output.currentFocusAttemptedTexts, [])
+        XCTAssertEqual(output.copiedTexts, [])
+    }
+
+    func test_zeroRemainingDrainBudgetFailsSynchronouslyWithoutStartingFinishOperation() async {
+        let start = ContinuousClock.now
+        let now = ReviewScriptedMonotonicNow(
+            values: [
+                start,
+                start.advanced(by: .seconds(1))
+            ]
+        )
+        let session = ReviewDeadlineControlledFinishSession(
+            packetEvent: .partial("unused"),
+            finishEvent: .final("must never start")
+        )
+        let provider = RetryCoordinatorStreamingProvider(factoryErrors: [], sessions: [session])
+        let recorder = CoordinatorAudioRecorder()
+        let accessibility = CoordinatorAccessibilityClient(capability: .live)
+        let output = CoordinatorFinalTextOutput()
+        let overlayPresenter = CoordinatorOverlayPresenter()
+        let viewModel = MainViewModel(
+            audioRecorder: recorder,
+            settings: AppSettings(
+                appId: "configured-app",
+                appSecret: "configured-secret",
+                autoInsert: true,
+                playSound: false
+            ),
+            hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
+            streamingProvider: provider,
+            accessibilityClient: accessibility,
+            finalTextOutput: output,
+            overlayPresenter: overlayPresenter,
+            streamingDrainPolicy: StreamingDrainPolicy(
+                operationTimeoutNanoseconds: 100_000_000,
+                postReleaseDrainTimeoutNanoseconds: 1_000_000_000
+            ),
+            streamingMonotonicNow: { now.next() },
+            streamingRetryDelay: { _ in 0 },
+            streamingRetrySleeper: { _ in }
+        )
+        recorder.resetTracking()
+        let surface = RenderedStatusSurface(viewModel: viewModel)
+        let identity = StreamingSessionIdentity(generation: 4_122)
+
+        viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await provider.makeSessionCallCount == 1 }
+        viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        await settle(iterations: 100)
+
+        let finishCallCount = await session.finishCallCount
+        XCTAssertEqual(finishCallCount, 0, "zero remaining budget must fail before creating the operation task")
+        if await session.isHoldingFinish {
+            await session.releaseFinishIfNeeded()
+        }
+        await waitUntil { viewModel.activeSessionIdentityForTesting == nil }
+        XCTAssertEqual(surface.states.filter(isError).map(\.text), ["流式识别失败"])
+        XCTAssertEqual(accessibility.setSelectedTextCalls, [])
+        XCTAssertEqual(output.copiedTexts, [])
     }
 
     func test_retryOwnsOnlyThePreviouslyFailedJournalIndexAndNeverReownsHistory() async {
@@ -4213,6 +4593,37 @@ private actor ReviewTimeoutThenSuccessProvider: SpeechStreamingSessionProviding 
     }
 }
 
+private actor ReviewNonCooperativeLateFactoryProvider: SpeechStreamingSessionProviding {
+    private let lateSession: any SpeechStreamingSession
+    private var continuation: CheckedContinuation<any SpeechStreamingSession, Never>?
+    private(set) var makeSessionCallCount = 0
+
+    var isHoldingFactory: Bool {
+        continuation != nil
+    }
+
+    init(lateSession: any SpeechStreamingSession) {
+        self.lateSession = lateSession
+    }
+
+    func makeStreamingSession(
+        appId: String,
+        appSecret: String
+    ) async throws -> any SpeechStreamingSession {
+        _ = appId
+        _ = appSecret
+        makeSessionCallCount += 1
+        return await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func releaseLateSessionIfNeeded() {
+        continuation?.resume(returning: lateSession)
+        continuation = nil
+    }
+}
+
 private actor ReviewNonCooperativeLatePacketSession: SpeechStreamingSession {
     private let firstEvent: StreamingRecognitionEvent
     private let lateEvent: StreamingRecognitionEvent
@@ -4254,6 +4665,87 @@ private actor ReviewNonCooperativeLatePacketSession: SpeechStreamingSession {
     func releaseLatePacketIfNeeded() {
         lateContinuation?.resume(returning: lateEvent)
         lateContinuation = nil
+    }
+}
+
+private actor ReviewDeadlineControlledFinishSession: SpeechStreamingSession {
+    private let packetEvent: StreamingRecognitionEvent
+    private let finishEvent: StreamingRecognitionEvent
+    private var finishContinuation: CheckedContinuation<StreamingRecognitionEvent, Error>?
+    private(set) var sendCallCount = 0
+    private(set) var finishCallCount = 0
+    private(set) var cancelCallCount = 0
+
+    var isHoldingFinish: Bool {
+        finishContinuation != nil
+    }
+
+    init(
+        packetEvent: StreamingRecognitionEvent,
+        finishEvent: StreamingRecognitionEvent
+    ) {
+        self.packetEvent = packetEvent
+        self.finishEvent = finishEvent
+    }
+
+    func sendAudioPacket(_ pcm16: Data) async throws -> StreamingRecognitionEvent {
+        _ = pcm16
+        sendCallCount += 1
+        return packetEvent
+    }
+
+    func finish() async throws -> StreamingRecognitionEvent {
+        finishCallCount += 1
+        return try await withCheckedThrowingContinuation { continuation in
+            finishContinuation = continuation
+        }
+    }
+
+    func cancel() async {
+        cancelCallCount += 1
+    }
+
+    func releaseFinishIfNeeded() {
+        finishContinuation?.resume(returning: finishEvent)
+        finishContinuation = nil
+    }
+}
+
+private final class ReviewMutableMonotonicNow: @unchecked Sendable {
+    private let lock = NSLock()
+    private var instant = ContinuousClock.now
+
+    var value: ContinuousClock.Instant {
+        lock.lock()
+        defer { lock.unlock() }
+        return instant
+    }
+
+    func advance(nanoseconds: Int64) {
+        lock.lock()
+        instant = instant.advanced(by: .nanoseconds(nanoseconds))
+        lock.unlock()
+    }
+}
+
+private final class ReviewScriptedMonotonicNow: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [ContinuousClock.Instant]
+    private var lastValue: ContinuousClock.Instant
+
+    init(values: [ContinuousClock.Instant]) {
+        precondition(!values.isEmpty)
+        self.values = values
+        lastValue = values[values.count - 1]
+    }
+
+    func next() -> ContinuousClock.Instant {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !values.isEmpty else { return lastValue }
+        let value = values.removeFirst()
+        lastValue = value
+        return value
     }
 }
 
