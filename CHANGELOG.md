@@ -16,7 +16,7 @@
 - 新增 `MainViewModelTests` 覆盖 `MonitoringState` 失败映射、恢复清除和 cleanup 订阅释放路径（issues #22/#23/#24）
 
 ### Fixed
-- 收窄任意目标的键盘替换安全边界：LF/newline 与其他 C0/C1/DEL action controls 在 generic keyboard route claim/post 前被拒绝，避免 Return/submit/execute；verified AX range 仍可把 multiline text 作为数据替换。现有 HID event tap 以锁保护 interference epoch 提供同步权威，并在 arming、事务前、每个 Backspace 之间检查；AppKit local/global monitors 仅作补充且 arm 失败即 fail closed（issue #27）
+- 收窄任意目标的键盘替换安全边界：LF/newline 与其他 C0/C1/DEL action controls 在 generic keyboard route claim/post 前被拒绝，避免 Return/submit/execute；verified AX range 仍可把 multiline text 作为数据替换。现有 HID event tap 与 synthetic writer 共用原子 gate：monitor 安装与 baseline capture 同锁完成，锁连续覆盖每个完整 key-down/key-up pair，物理事件取得同一 gate 后才能推进 epoch/派发，tap disable 也会推进 loss-of-observability；AppKit local/global monitors 仅作补充且 arm 失败即 fail closed（issue #27）
 - 修复 Release 1.0 build 6 在 Fn 按住期间重复识别词：飞书响应现按完整不透明 snapshot 替换，不再按新 journal index 拼接；不同 packet index 返回相同 snapshot 时不产生输出（issue #27）
 - 修复较短与中途修订 snapshot 的任意目标输出：AX writer 直接替换其已验证 owned range；键盘 writer 只替换本次 hold 已输出的尾部。固定 PID、外部输入/Secure Input/目标漂移永久 suspension、无 rollback/no resend、无光标确认或运行时权限提示以及 Fn release 零 mutation 边界保持不变（issue #27）
 - 修复 build 5 的“只输出一个词”下游停滞：实机日志已证明最新一次 hold 在 13.55 秒内完成 66 个 HTTP-200 transaction，因此本地不再用原始响应字符串的相等/前缀关系决定响应身份，而是以 journal index 所有权拼接 held frontier（issue #26）

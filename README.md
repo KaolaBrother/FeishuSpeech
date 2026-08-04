@@ -103,7 +103,7 @@ UAT 并非停在该阶段：它已成功取得 token、发送首个 `action=1` �
 
 ### 没有实时显示文字
 
-部分应用不提供可验证的 Accessibility 选区与范围读取能力。支持 AX 的目标会绑定原 PID 和精确 `AXUIElement`，并直接替换本次按键拥有的范围；LF 可作为多行文本数据写入，不会合成 Return。无法建立 AX 范围时，应用绑定当时的前台 PID，以一笔串行事务发送恰好所需的 grapheme-counted Backspace，再输入 replacement suffix；该键盘路由拒绝 LF 与所有 action controls。现有 HID event tap 在物理事件分发前同步更新锁保护的 interference epoch，并在 writer arming、事务前、每个破坏性 Backspace 之间复核；AppKit local/global monitors 只作补充，任一 monitor 无法 arm 都会 fail closed。物理输入、应用切换、安全输入、目标漂移或交付不确定会永久停止本次按键的后续替换，不回滚、不重发、不切换 writer、不复制。应用不会询问光标位置，也不会在按键期间弹出新的权限请求；无 AX 路径仍无法证明同一 PID 内由应用自身造成的光标移动。`CGEventPostToPid` 没有目标接受回执，因此安装版 Release owner UAT 仍是必需门槛。
+部分应用不提供可验证的 Accessibility 选区与范围读取能力。支持 AX 的目标会绑定原 PID 和精确 `AXUIElement`，并直接替换本次按键拥有的范围；LF 可作为多行文本数据写入，不会合成 Return。无法建立 AX 范围时，应用绑定当时的前台 PID，以一笔串行事务发送恰好所需的 grapheme-counted Backspace，再输入 replacement suffix；该键盘路由拒绝 LF 与所有 action controls。现有 HID event tap 与 synthetic writer 共用同一个锁门：monitor 安装和 baseline capture 原子完成，每个完整 key-down/key-up pair 都在连续持锁期间提交，物理事件必须先取得同一 gate 才能推进 epoch 并派发；tap timeout/user-input disable 也会推进 epoch，表示输入可观测性已丢失。AppKit local/global monitors 只作补充，任一 monitor 无法 arm 都会 fail closed。物理输入、应用切换、安全输入、目标漂移或交付不确定会永久停止本次按键的后续替换，不回滚、不重发、不切换 writer、不复制。应用不会询问光标位置，也不会在按键期间弹出新的权限请求；无 AX 路径仍无法证明同一 PID 内由应用自身造成的光标移动。`CGEventPostToPid` 没有目标接受回执，因此安装版 Release owner UAT 仍是必需门槛。
 
 ### 开机启动
 

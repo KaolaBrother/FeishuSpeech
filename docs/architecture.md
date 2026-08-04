@@ -137,12 +137,15 @@ token's current security, original PID, and exact focused `AXUIElement` identity
 before and after each mutation. Any PID/element/security/delivery uncertainty permanently suspends
 the owner for the hold.
 
-The existing HID `CGEventTap` is the synchronous physical-interference authority. Before dispatch,
-physical key-down, non-Fn modifier-change, mouse-down, and mouse-drag events increment one shared
-lock-protected epoch. The generic writer captures the epoch after monitoring arms and verifies it
-before the replacement transaction, before every destructive Backspace pair, and before suffix
-insertion. An epoch change permanently suspends output without rollback. Fn transitions and
-FeishuSpeech-tagged synthetic events do not advance the epoch.
+The existing HID `CGEventTap` is the synchronous physical-interference authority. Monitor
+installation and baseline capture occur atomically under one shared `NSLock` gate. The generic
+writer acquires that gate for each Backspace or insertion pair, verifies the armed epoch, and keeps
+the lock continuously from synthetic key-down through key-up. Physical key-down, non-Fn
+modifier-change, mouse-down, and mouse-drag events acquire the same gate before advancing the
+epoch, and the tap cannot return them for dispatch until a synthetic pair releases it. An epoch
+change permanently suspends output without rollback. Fn transitions and FeishuSpeech-tagged
+synthetic events do not advance the epoch. Tap timeout/user-input disable advances the epoch as
+loss of input observability before recovery.
 
 Local and global AppKit event monitors supplement this ordering guard with early main-actor
 suspension. They are not the authority; production requires both to arm, and arm failure fails
@@ -151,11 +154,11 @@ closed before keyboard output.
 The low-level poster creates one tagged `.privateState` source and constructs every required event
 before posting: modifier-neutral Backspace down/up pairs, then a Unicode suffix down/up pair when
 needed, all to the same positive bound PID. Any construction failure or final security rejection
-produces zero posts. The epoch is checked between destructive Backspace pairs and again before the
-suffix; an intervening physical event stops the remaining transaction and permanently suspends the
-owner. The prior snapshot advances only after the complete ordered transaction is submitted. There
-is no target acceptance acknowledgement, so a local `.posted` result cannot prove visible
-replacement.
+produces zero posts. The shared gate serializes each complete pair against physical epoch advance;
+an intervening physical event runs after the current pair, then stops the remaining transaction and
+permanently suspends the owner. The prior snapshot advances only after the complete ordered
+transaction is submitted. There is no target acceptance acknowledgement, so a local `.posted`
+result cannot prove visible replacement.
 
 After destination/security loss, external caret-affecting input, or delivery uncertainty, the owner
 never rolls back, selects, navigates, resends a full value, switches target, uses Cmd+V, or falls
@@ -374,11 +377,13 @@ current microphone authorization status without prompting and recomputes
 
 Issue #27 extends the existing HID event tap mask to physical key-down, non-Fn modifier changes,
 mouse-down, and mouse-drag events. At the start of the tap callback, before the event is returned
-for dispatch, `CurrentFocusInputInterferenceEpoch` increments a shared `NSLock`-protected counter.
-The generic writer uses that synchronous epoch rather than AppKit monitor callback timing to guard
-destructive replacement. FeishuSpeech's tagged synthetic events and the Fn transition itself are
-excluded. Local/global AppKit monitors remain supplemental; failure to install either prevents the
-writer from arming.
+for dispatch, `CurrentFocusInputInterferenceEpoch` acquires the same `NSLock` used to guard complete
+synthetic pairs and increments the epoch. Monitor installation plus baseline capture is atomic under
+that lock. The generic writer uses this synchronous gate rather than AppKit monitor callback timing
+to guard destructive replacement. Tap-disable events advance the epoch before recovery because
+input observability was lost. FeishuSpeech's tagged synthetic events and the Fn transition itself
+are excluded. Local/global AppKit monitors remain supplemental; failure to install either prevents
+the writer from arming.
 
 ## TextInputSimulator — clipboard-restore contract
 
@@ -393,8 +398,8 @@ path. It instead:
   validates the captured element and security state before and after delivery;
 - when AX capture/confirmation is unavailable, re-probes AX once on the first non-empty partial;
   if still unavailable, binds the frontmost PID and posts grapheme-aware Backspace-plus-Unicode
-  replacement transactions while Secure Input stays clear, the lock-protected HID interference
-  epoch stays unchanged at arming, pre-transaction, and between Backspaces, and the PID stays stable;
+  replacement transactions while Secure Input stays clear, atomic arming captures the HID epoch,
+  the shared lock covers every complete synthetic pair, and the PID stays stable;
 - treats local/global AppKit event monitors as supplemental suspension signals and fails closed if
   either monitor cannot arm;
 - gives captured final-only-capability targets the same continuous owner, additionally checking the original

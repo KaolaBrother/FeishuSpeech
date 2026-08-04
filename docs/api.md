@@ -214,11 +214,14 @@ and `CFEqual` identity of the current focused element before and after the synch
 Application activation change, PID/element drift, security rejection, generation invalidation, or
 uncertain delivery permanently suspends the owner.
 
-The existing HID `CGEventTap` is the synchronous interference authority. It increments a shared
-`NSLock`-protected epoch before dispatching physical key-down, non-Fn modifier-change, mouse-down,
-or mouse-drag events. The keyboard owner captures the epoch after input monitors arm, checks it
-before the transaction, before every destructive Backspace pair, and before suffix insertion.
-FeishuSpeech-tagged events and Fn transitions are excluded. Local/global AppKit monitors provide
+The existing HID `CGEventTap` is the synchronous interference authority. Input-monitor installation
+and baseline capture are atomic under a shared `NSLock` gate. Each destructive Backspace pair and
+the optional insertion pair acquire that gate, verify the armed epoch, and retain the lock
+continuously across both key-down and key-up posts. Physical key-down, non-Fn modifier-change,
+mouse-down, and mouse-drag events must acquire the same gate before advancing the epoch; the tap
+callback cannot return them for dispatch until an in-progress synthetic pair releases it.
+FeishuSpeech-tagged events and Fn transitions are excluded. Tap timeout/user-input disable advances
+the epoch as loss of observability before recovery. Local/global AppKit monitors provide
 supplemental early suspension only; both must arm successfully or the owner fails closed.
 
 The keyboard poster accepts a positive bound PID and one replacement plan. It creates one tagged
@@ -228,8 +231,9 @@ construction failure or the final security sample causes zero posts. `.posted` m
 ordered transaction was submitted: CoreGraphics provides no target-control acceptance
 acknowledgement.
 
-An epoch change after some Backspaces may leave a partial visible mutation. The poster stops before
-the next destructive pair or suffix, permanently suspends the owner, and never rolls back.
+An epoch change after some Backspaces may leave a partial visible mutation. A physical event cannot
+split a complete synthetic pair; it advances immediately after that pair releases the gate, and the
+next pair observes the drift. The poster then permanently suspends the owner and never rolls back.
 
 After any provisional delivery attempt, destination/security loss, or uncertainty, no full-text
 resend, one-shot current-focus insertion, Cmd+V, alternate target, or clipboard recovery is allowed.
@@ -365,8 +369,9 @@ passing. That evidence predates issue #27 and does not prove snapshot reconcilia
 requires focused and full-suite coverage for duplicate, extension, shorter, revision, replay,
 Unicode-grapheme Backspace counts, transaction ordering/suspension, AX replacement, and release
 suppression. Multiline tests must prove LF is accepted only by AX range replacement and rejected by
-the generic keyboard route; interference tests must prove epoch checks at arming, pre-transaction,
-between Backspaces, and fail-closed monitor arming.
+the generic keyboard route. Final interference tests `8ebf31e` + `81dbfc8` cover atomic baseline
+capture, a continuous lock hold across each complete pair, physical advance through the same gate,
+tap-disable loss-of-observability, and fail-closed monitor arming; production is `ec4ddd6`.
 
 `AudioRecorderRecoveryTests.swift` remains excluded from the test target because it is a recorded
 pre-existing AudioRecorder-owned blocker outside the #11/#12/#21 API recovery bundle.

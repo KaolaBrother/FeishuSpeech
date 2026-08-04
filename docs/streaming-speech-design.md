@@ -1,8 +1,9 @@
 # Cursor-bound streaming speech design
 
-Status: issue #27 snapshot replacement and the final HID interference-epoch narrowing are
-implemented locally through `d138624`; final workflow gates and installed Release
-credential-bearing/cross-application UAT remain pending.
+Status: issue #27 snapshot replacement and the final atomic HID interference gate are implemented
+locally through tests `8ebf31e` + `81dbfc8` and production `ec4ddd6`; final workflow gates and
+installed Release credential-bearing/cross-application UAT remain pending. Earlier
+`47d90ed`/`d138624` checks are intermediate, pre-atomic provenance only.
 
 ## 1. Outcome
 
@@ -448,8 +449,9 @@ For an interaction where no AX cursor/focused element can be captured or confirm
    A previously failed index may own once when replay first succeeds. There is no selection,
    navigation, pasteboard write, or uncertain resend.
 6. Generation/admission, Secure Input, and the bound PID are rechecked immediately before and after
-   a transaction. The existing HID event tap's lock-protected interference epoch is captured after
-   monitors arm and checked pre-transaction, before every Backspace pair, and before insertion.
+   a transaction. Monitor installation and baseline capture are atomic under the shared HID gate.
+   The epoch is checked pre-transaction; the same lock is then held continuously across each
+   complete Backspace or insertion key-down/key-up pair.
    App activation away, PID mismatch, external keyboard/mouse input, security rejection, epoch
    change, or delivery uncertainty permanently suspends output. Fn transitions and
    FeishuSpeech-tagged synthetic events are exempt.
@@ -471,15 +473,18 @@ tail. The shared poster validates the positive PID, creates one tagged `.private
 constructs every Backspace down/up pair followed by the modifier-free Unicode insertion down/up
 pair, when needed, before posting anything. Construction or final security failure produces zero
 posts. LF and all other action controls are rejected before snapshot claim/event construction. It
-submits Backspaces and then the suffix in order to the one captured PID, rechecking the epoch before
-each destructive pair and once more before insertion. The previous snapshot advances only after
+submits Backspaces and then the suffix in order to the one captured PID. Each pair acquires the
+shared gate, verifies the armed epoch, and retains the lock until both key-down and key-up have been
+posted. The previous snapshot advances only after
 the complete transaction is submitted successfully. If the epoch changes after visible deletion,
 the remaining transaction stops, the owner suspends, and the partial mutation is never rolled back.
 
 This unbound path is best effort. The existing HID `CGEventTap` is the synchronous interference
-authority: before dispatch it increments a shared `NSLock`-protected epoch for physical key-down,
-non-Fn modifier-change, mouse-down, and mouse-drag events. Local/global AppKit monitors are
-supplemental early-suspension signals; both must arm or the writer fails closed. Application-initiated
+authority: physical key-down, non-Fn modifier-change, mouse-down, and mouse-drag events acquire the
+same gate before epoch advance, and the tap callback cannot return them for dispatch until a held
+synthetic pair finishes. Tap timeout/user-input disable advances the epoch as loss of observability
+before recovery. Local/global AppKit monitors are supplemental early-suspension signals; both must
+arm or the writer fails closed. Application-initiated
 caret movement inside the same PID still cannot be proven without AX. Fixed
 PID, permanent suspension, and no resend contain but do not eliminate that residual risk. The app
 does not ask for cursor confirmation and does not request a new runtime permission during the hold.
@@ -498,7 +503,7 @@ uncertainty.
 | Boundary | Owner | Rule |
 |---|---|---|
 | CGEventTap callbacks | private tap thread | marshal state changes; never run capture or AX work inline |
-| input interference epoch | private tap thread + `NSLock` | increment before physical event dispatch; generic writer checks at arm and mutation boundaries |
+| input interference gate | private tap thread + `NSLock` | atomically arm/capture baseline; serialize physical epoch advance against each complete synthetic pair; tap-disable advances loss-of-observability |
 | capture session start/stop | existing `sessionQueue` | blocking `AVCaptureSession` work stays off main |
 | PCM conversion/coalescing | audio/buffer serial queues | preserve order; never block capture on network |
 | Feishu sequence/token state | `FeishuStreamingSession` actor | one strict request chain per attempt; at most one active attempt |
@@ -585,7 +590,8 @@ No cursor destination survives the process lifetime or is persisted to UserDefau
 4. **Cursor text session and issue #27 continuous output — implemented locally**
    - AX replace/read-back and fixed destination boundaries remain. The issue #26 suffix-only generic
      writer and blanket Backspace prohibition are replaced by the issue #27 transaction contract;
-     LF/action-control route narrowing and synchronous interference epoch landed in `d138624`.
+     Final race tests landed in `8ebf31e` and the unified gate seam in `81dbfc8`; production
+     `ec4ddd6` atomically arms/captures the baseline and holds the shared gate across each pair.
 5. **Coordinator/state migration — implemented locally**
    - Production hot-key work uses one generation-owned recorder/ingress, ordered journal, fresh
      serial session attempts, hold-wide capped backoff, journal-indexed replay ownership,
@@ -646,8 +652,11 @@ Test/production custody separation was preserved for the automated implementatio
   range data;
 - all Backspace and insertion events are constructed before the first post and submitted in order
   to the captured PID; construction failure produces zero mutation;
-- the HID tap epoch is captured at successful arming and checked pre-transaction, before each
-  Backspace pair, and before insertion; external input or an epoch change permanently suspends;
+- monitor installation and baseline epoch capture are atomic under the shared gate;
+- the HID tap epoch is checked pre-transaction; the shared lock remains held across each complete
+  Backspace or insertion key-down/key-up pair, and physical input acquires the same gate before
+  epoch advance/dispatch;
+- tap timeout/user-input disable advances loss-of-observability and permanently suspends;
 - local/global AppKit monitors are supplemental, both must arm, and arm failure is fail-closed;
 - app activation/PID, security, generation, or delivery uncertainty permanently suspends; tagged
   synthetic events and Fn transitions do not self-suspend;
@@ -678,7 +687,7 @@ Test/production custody separation was preserved for the automated implementatio
   empty-result/stream-error feedback and with zero output/copy;
 - the PID poster constructs the whole tagged private-source Backspace-plus-Unicode transaction
   before the final Secure Input sample, rejects LF/action controls, and submits events in order to
-  the bound PID only while the interference epoch remains unchanged;
+  the bound PID only through complete-pair atomic gate operations while the epoch remains unchanged;
 - `autoInsert=false` produces no target writes;
 - logs and feedback never contain recognized text.
 
@@ -706,8 +715,10 @@ then recorded 66 HTTP-200 transactions over 13.55 seconds while visible output s
 word, motivating issue #26's journal-indexed local frontier. Release 1.0 build 6 later proved that
 this concatenated complete snapshots and repeated text. [D-27-01](decisions/D-27-01.md) replaces
 that assembly rule with opaque snapshot replacement while retaining replay ownership and
-release-only sealing. The final LF/action-control and HID interference-epoch narrowing landed in
-`d138624`; final workflow gates and installed Release verification remain pending.
+release-only sealing. Final race coverage `8ebf31e`, unified atomic-gate test seam `81dbfc8`, and
+production `ec4ddd6` establish the current LF/action-control and HID interference contract;
+`47d90ed`/`d138624` are intermediate pre-atomic steps. Final workflow gates and installed Release
+verification remain pending.
 
 General-availability closure remains intentionally separate: the owner will self-test the installed
 Release with real Feishu credentials and the live target-application matrix above. Until the
