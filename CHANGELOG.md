@@ -16,14 +16,17 @@
 - 新增 `MainViewModelTests` 覆盖 `MonitoringState` 失败映射、恢复清除和 cleanup 订阅释放路径（issues #22/#23/#24）
 
 ### Fixed
+- 修复松开 Fn 时尾部识别被截断：Fn-up 现在只关闭采集；当前 generation 继续等待 recorder callback barrier、排空 queued/tail packet、在可恢复失败后串行重连并回放 journal，最后把安全非空的 `action=2` snapshot 作为权威最终值替换原 AX owned range 或固定 PID 的键盘 owned tail，完成后才关闭输出 owner（issue #27）
+- 修复偶发“显示活动但长期无输出”的韧性缺口：连续失败 streak 在任意 packet/replay ACK 后重置；session factory、packet send、finish 各受 30 秒 attempt-scoped watchdog 保护；recorder barrier 完成后的 drain 总预算为 60 秒。重复业务码 `10024` 在预算内继续恢复，超时/取消/旧 attempt 的迟到结果不能取得输出 authority（issue #27）
+- Drain 到期现在按实际交付状态区分结果：可靠提交保留已有文字，交付不确定显示中性 preservation 提示，没有安全输出才显示固定流式失败；AX final 只有 verified commit 才算成功。所有路径保持固定目标、Secure Input、物理干扰 epoch、unsafe control 与 transcript-free diagnostics 边界（issue #27）
 - 收窄任意目标的键盘替换安全边界：LF/newline 与其他 C0/C1/DEL action controls 在 generic keyboard route claim/post 前被拒绝，避免 Return/submit/execute；verified AX range 仍可把 multiline text 作为数据替换。现有 HID event tap 与 synthetic writer 共用原子 gate：monitor 安装与 baseline capture 同锁完成，锁连续覆盖每个完整 key-down/key-up pair，物理事件取得同一 gate 后才能推进 epoch/派发，tap disable 也会推进 loss-of-observability；AppKit local/global monitors 仅作补充且 arm 失败即 fail closed（issue #27）
 - 修复 Release 1.0 build 6 在 Fn 按住期间重复识别词：飞书响应现按完整不透明 snapshot 替换，不再按新 journal index 拼接；不同 packet index 返回相同 snapshot 时不产生输出（issue #27）
-- 修复较短与中途修订 snapshot 的任意目标输出：AX writer 直接替换其已验证 owned range；键盘 writer 只替换本次 hold 已输出的尾部。固定 PID、外部输入/Secure Input/目标漂移永久 suspension、无 rollback/no resend、无光标确认或运行时权限提示以及 Fn release 零 mutation 边界保持不变（issue #27）
+- 修复较短与中途修订 snapshot 的任意目标输出：AX writer 直接替换其已验证 owned range；键盘 writer 只替换本次 hold 已输出的尾部。固定 PID、外部输入/Secure Input/目标漂移永久 suspension、无 rollback/no resend、无光标确认或运行时权限提示保持不变；原 Fn release 零 mutation 边界已被本次 issue #27 release-drain 修正取代
 - 修复 build 5 的“只输出一个词”下游停滞：实机日志已证明最新一次 hold 在 13.55 秒内完成 66 个 HTTP-200 transaction，因此本地不再用原始响应字符串的相等/前缀关系决定响应身份，而是以 journal index 所有权拼接 held frontier（issue #26）
-- release 现在在录音、会话排空之前同步关闭响应 ledger 与重试准入。`action=2`、在途包和晚到 partial/final 均不能创建、追加、改写或复制文本；旧的 release-time 一次性/final-only/Cmd+V/手动剪贴板回退已移除（issue #26）
+- issue #26 的“release 立即关闭响应/重试准入”策略已由 issue #27 取代；保留的是 generation/fixed-target 安全边界以及无一次性/Cmd+V/剪贴板回退，release 后只允许当前 generation 的已录音频 drain 和权威 final reconciliation
 - 识别可用性与输出资格分离：`autoInsert=false`、不安全文本或无 owner 时，可用 held 识别不再被误报为空结果/流式失败，同时仍保持零输出与零复制（issue #26）
 - 修复 final-only 目标把所有 partial 延迟到 Fn release 的路由：初始与首 partial 重绑定的 final-only 现在会立即建立绑定 PID 的连续 owner，并在每次 mutation 前后复核 live Secure Input、捕获 token 的安全状态、原 PID 与 `CFEqual` 精确 AX 元素。Unicode 输出使用同一 `.privateState` source，先完整构造相同 UTF-16 payload/空 flags 的 key-down 与 key-up，再做最终 Secure Input 采样并相邻 `CGEventPostToPid`；任一构造失败零投递，任一投递尝试或不确定性都永久禁止完整重发、Cmd+V、其他目标或剪贴板回退。完成反馈改为中性、无 transcript 的“不确定/无可用 final”提示（issue #26）
-- 修复“首次识别后持续显示流式失败”的客户端策略：已接受音频的失败会话现在在未成功完成 `action=2` 时尽力发送一次 `action=3`，然后由协调器决定是否使用新会话重试。可恢复失败在 Fn 按住期间不再发布错误状态或系统通知；松开 Fn 先关闭新重试和响应输出准入，再完成当前尝试（issue #26）
+- 修复“首次识别后持续显示流式失败”的客户端策略：已接受音频的失败会话现在在未成功完成 `action=2` 时尽力发送一次 `action=3`，然后由协调器决定是否使用新会话重试。可恢复失败不再立即发布错误状态或系统通知；issue #26 的“松开即关闭重试/输出准入”细节已被 issue #27 bounded release-drain 取代
 - 实机证据已将后续失败收窄到 HTTP 200 内的飞书业务码 `10024`：它先出现在一个已接受两包的会话，又出现在新会话的首包。当前飞书公开文档和官方 SDK 未定义 `10024`，因此本地将它列为可恢复是产品韧性策略，不是对限流、包频率、并发配额或未结束流的官方解释（issue #26）
 - 修复真实凭据 UAT 中首个 `action=1` 已获 HTTP 200 后仍立即失败的问题：客户端不再要求 code-zero 响应回显匹配的 `stream_id` / `sequence_id`，也不再把缺少 `data` 视为畸形响应；解析现与 KaolaTerminal 已跑通实现一致，优先接受 `recognition_text`、兼容 `text`，无文本时产生空 partial。非零飞书业务码和无法解码的 JSON 仍使当前传输会话失败；协调器随后根据类型决定在同一 Fn 按键内重试或终止。请求侧 stream identity、action/sequence、首次 token 刷新、generation 安全和隐私诊断边界保持不变（issue #26）
 - 根据首轮 UAT 取消过严的 Accessibility 启动门控：无法捕获或确认 AX 光标/焦点不再阻塞录音和流式识别。已捕获但不支持范围替换的目标使用绑定原 PID/精确 AX 元素的连续 owner，无 AX 目标使用同 PID owner；所有 release-time final-only/一次性/Cmd+V/剪贴板回退已移除。安全拒绝仍不输入、不复制，`autoInsert=false` 仍为零输出（issue #26）
@@ -71,11 +74,11 @@
 
 ### Verification
 
-- issue #27 的最终候选 Release 1.0 build 7 已通过 300/300 完整测试、strict SwiftLint、Debug 与 Release 构建；生产实现为 `ec4ddd6`，最终 production-gate 测试到 `cd1132c`，行为/安全文档到 `6e5d262`。这些本地门槛不证明目标控件实际接受 PID-targeted 事件。
+- issue #27 的最终候选 Release 1.0 build 8 已通过 316/316 完整测试、strict SwiftLint、Debug 与 Release 构建。发布 drain、权威 final、重复 `10024` 恢复、watchdog、deadline race、迟到回调和 fixed-target 安全边界均有自动化覆盖；这些本地门槛不证明真实凭据服务或目标控件实际接受 PID-targeted 事件。
 
 ### Verification pending
 
-- 最新 build-5 安装版 UAT 已证明一次 13.55 秒 hold 内有 66 个 HTTP-200 transaction，但可见输出在一个词后停滞；这将故障收窄到传输之后，不能证明响应内容形态或目标接受。新的 journal-index ledger、重放一次所有权、release 禁止输出与隐私安全 receipt 仍需安装版 Release owner UAT，不声明真实端到端成功。
+- 既有安装版 UAT 已证明 held-time snapshot replacement 基本符合预期，并暴露 build 7 在 Fn-up 后抑制有效 tail/final 的截断；build 8 已在本地修复为 release drain，但尚未经过本轮真实凭据与目标应用 UAT，不声明端到端通过。
 - `CGEventPostToPid` 没有目标控件接受确认；本地 `.posted` 仅证明完整 PID-bound replacement transaction 已提交，不能证明目标完成了可见替换。当前修正仍须安装版 owner UAT，若无可见输出应报告 PARTIAL，不能通过全局 HID、重复事件、回滚或不确定后的剪贴板回退扩展行为。
 - 真实飞书凭据下的后续 action、终止请求空音频编码、首次 token 刷新同序列重试、PCM/tail 兼容性和慢网行为仍需安装版 Release UAT。issue #26 的本地拼接策略已由 build 6 证据否定；issue #27 将响应按可相同、变长、缩短或修订的完整不透明 snapshot 替换，仍不推断稳定词或做文本归一化。
 - TextEdit/原生控件、浏览器、Electron、终端和富文本编辑器的 Accessibility 范围、焦点干扰、Unicode 与 undo 行为仍需跨应用实机 UAT；当前不声明广泛兼容性。

@@ -40,8 +40,9 @@ provider code.
 
 `FeishuAPIService.APIError.authFailed` maps to the fixed public message
 `认证失败，请检查应用凭据`. The associated backend message, credential values, transcript, and raw
-response stay outside UI and logs. A recoverable failure while Fn remains held produces only a
-sanitized diagnostic: it does not publish `RecordingState.error`, call `HotKeyService.setError`,
+response stay outside UI and logs. A recoverable failure while the generation retains retry
+authority—during capture or bounded release drain—produces only a sanitized diagnostic: it does
+not publish `RecordingState.error`, call `HotKeyService.setError`,
 hide/re-show the overlay, copy text, or post a system notification. A non-recoverable failure still
 invalidates the active generation, hides the overlay, and tears the interaction down once.
 
@@ -117,10 +118,12 @@ previously failed unowned index may be claimed once when replay first succeeds. 
 during abort, backoff, and replay continues through the same ingress. There is no
 `file_recognize` fallback.
 
-The retry policy is hold-wide and has no attempt-count limit independent of the 60-second hold cap.
+The retry policy is generation-wide and has no attempt-count limit independent of the capture/drain
+deadlines.
 Its base delays are 250 ms, 500 ms, 1 s, 2 s, then 4 s; injected jitter is clamped to 0.8–1.2 and
-the final delay is clamped to 200 ms–4 s. The ordinal never resets after a partially successful
-replacement stream. Recoverable classifications are:
+the final delay is clamped to 200 ms–4 s. The consecutive failure streak resets after every
+successful packet acknowledgement, including replay acknowledgement; the monotonic attempt
+identifier does not reset. Recoverable classifications are:
 
 - `StreamFailure.network` and `.timeout`;
 - HTTP 408, 425, 429, and 5xx;
@@ -134,14 +137,20 @@ permission/security failures remain lifecycle-owned rather than reconnectable. O
 destination/security changes suspend automatic output for the hold; they do not authorize a
 transport reconnect or retarget.
 
-Fn release and the 60-second cap set sealing before any suspension point and close admission to a
-new session. Pending delay and session-creation tasks are actively cancelled. A live attempt may
-drain the sealed ingress and finish once; a replaying replacement is cancelled once and production
-typed cancellation is treated as sealed control flow, not a new failure. Every early exit waits
-for the old recorder's stop/barrier task before returning idle, so a successor cannot inherit or be
-closed by stale ingress/resource cleanup. A recoverable failure after sealing cannot claim or route
-response text. If no usable held recognition was ever observed, it produces one fixed stream error;
-otherwise completion does not invent an output or empty-result error. Reset, sleep/wake,
+Fn release and the 60-second cap set `captureClosed` before any suspension point. They do not close
+the current generation's response/retry admission or cancel its factory, backoff, replay, packet,
+or finish work. Recorder shutdown crosses the real callback queue, flushes/pads the accepted tail,
+and closes ingress; only then does the coordinator arm one 60-second post-release drain deadline.
+Within that budget, recoverable failures create a fresh session, replay the complete journal, ACK
+all queued/tail packets, and call action 2. Factory, packet-send, and finish operations each use a
+30-second attempt-scoped watchdog clamped to the remaining drain budget. A deadline or cancellation
+winner retires that attempt, and its late result cannot claim packet or terminal authority.
+
+A safe non-empty action-2 snapshot is terminal authority. It is reconciled through the already
+captured AX range or fixed-PID keyboard owner before response admission closes. A contentless final
+preserves the last safe snapshot. Drain expiry preserves verified committed output, reports
+delivery uncertainty separately, and emits the fixed stream error only when no safe output exists;
+it never reports ordinary success for unrecognized tail. Reset, sleep/wake,
 permission/security loss, capture failure, and cleanup invalidate
 generation and output authority and cancel the current transport immediately, making late callbacks
 inert. When recorder shutdown is already in flight, its barrier remains independently retained: it
@@ -153,7 +162,9 @@ packet-index replay ownership separate from `latestSnapshot`: each eligible jour
 response once, but an equal snapshot emits no output and any different snapshot replaces the held
 recognition state. Historical replay indices remain suppressed even if a replacement attempt
 returns different text; a previously failed unowned index may advance the snapshot once. Action 2
-is not output authority and cannot mutate text after release.
+is authoritative for the safe terminal snapshot and may reconcile already-owned output after
+release; it cannot select a new target or bypass the generation, destination, Secure Input,
+interference, or text-safety gates.
 
 Response decoding follows KaolaTerminal's credential-bearing, proven streaming implementation:
 after valid JSON and `code == 0`, response `stream_id` and `sequence_id` echoes are ignored;
@@ -191,9 +202,9 @@ not synthesize Return.
 When a non-secure destination was captured but cannot support live range replacement, the initial
 `.finalOnly` result arms a continuous keyboard owner bound to the captured PID and exact
 `AXUIElement`. A first-partial rebind that returns `.finalOnly` does the same and offers that
-triggering partial immediately. Thus every eligible packet response received before sealing can
-claim its index once; only a different complete snapshot is offered while Fn remains held.
-Release only closes that existing owner and cannot create output.
+triggering partial immediately. Thus every eligible current-generation packet response can claim
+its index once; only a different complete snapshot is offered. Release retains that existing owner
+through drain and cannot create or retarget one.
 
 When AX destination capture or confirmation is unavailable, the first non-contentless hypothesis
 causes one more `CursorTextSession.begin()` attempt. If that yields live AX capability, normal
@@ -247,8 +258,9 @@ therefore reach a different caret in that process. This residual risk is explici
 snapshot advances only after a full transaction is submitted. Physical keyboard or
 mouse input, PID/activation change, security rejection, generation mismatch, or delivery
 uncertainty permanently suspends the owner without rollback. FeishuSpeech-tagged events and Fn
-transitions are exempt. At release, response/retry admission is already closed: action-2 and late
-packet/final values cannot append or replace text.
+transitions are exempt. During release drain, eligible packet snapshots and the safe action-2 final
+may update only this already-armed owner. Once terminal settlement, expiry, cancellation, or
+generation invalidation closes admission, later packet/final values cannot append or replace text.
 
 The generic route does not ask the user to confirm cursor position and does not request a new macOS
 permission during the hold. Same-PID caret movement initiated by the target application cannot be
@@ -368,15 +380,15 @@ completion feedback. Direct lifecycle-free execution of the complete XCTest bund
 passing. That evidence predates issue #27 and does not prove snapshot reconciliation. Issue #27
 requires focused and full-suite coverage for duplicate, extension, shorter, revision, replay,
 Unicode-grapheme Backspace counts, transaction ordering/suspension, AX replacement, and release
-suppression. Multiline tests must prove LF is accepted only by AX range replacement and rejected by
+drain. Multiline tests must prove LF is accepted only by AX range replacement and rejected by
 the generic keyboard route. `8ebf31e` and `81dbfc8` provide earlier atomic race and unified-seam
 evidence, including baseline capture, continuous lock hold across each complete pair, physical
 advance through the same gate, tap-disable loss-of-observability, and fail-closed monitor arming.
-Production is `ec4ddd6`; `cd1132c` directly exercises `SystemFinalTextCurrentFocusEventPoster`
-through the real `CurrentFocusInputInterferenceEpoch` gate and is the final production-gate test
-provenance. The Release 1.0 build 7 candidate passes the complete 300/300 test bundle, strict
-SwiftLint, and Debug and Release builds; behavior/security documentation through `6e5d262`
-describes that validated contract.
+The Release 1.0 build 8 candidate passes the complete 316/316 test bundle, strict SwiftLint, and
+Debug and Release builds. Coverage includes action-2 authority, recorder-tail drain, release during
+factory/backoff/replay, repeated-`10024` recovery with ACK reset, factory/send/finish watchdogs,
+post-barrier expiry, deadline admission races, late noncooperative callbacks, and typed output
+preservation.
 
 `AudioRecorderRecoveryTests.swift` remains excluded from the test target because it is a recorded
 pre-existing AudioRecorder-owned blocker outside the #11/#12/#21 API recovery bundle.

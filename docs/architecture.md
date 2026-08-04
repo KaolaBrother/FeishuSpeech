@@ -22,10 +22,11 @@ journal, one generation-scoped snapshot/replay ledger, at most one active Feishu
 most one cursor writer. A recoverable attempt
 failure leaves the hold generation and capture alive, aborts an established failed stream once,
 backs off, and replays the journal through a fresh serial session. Fn release or the 60-second cap
-enters `sealing`, closes retry admission before awaiting work, actively cancels creation/backoff,
-closes capture, and flushes at most one audio tail. A live attempt may finish; a replaying attempt is
-cancelled through one shared bounded action-3 task. Completion waits for the old recorder barrier,
-then closes the already-owned latest snapshot. A new hold
+enters `sealing` and closes capture, but keeps the same generation's response/retry authority alive.
+After the recorder crosses its callback barrier and flushes at most one audio tail, a 60-second
+post-release drain budget covers queued/tail packets, recoverable fresh-session replay, and the
+authoritative action-2 final. Completion closes the output owner only after that final is reconciled.
+A new hold
 cannot start while sealing. Reset, sleep/wake, cancellation, or terminal lifecycle failure
 invalidates the active generation before cleanup so late callbacks are inert.
 
@@ -60,12 +61,14 @@ a bounded HTTP 400/401 response may refresh inside the first session, retrying t
 action and sequence once.
 
 The coordinator, not the transport actor, owns retry. Recoverable failures create a fresh stream
-after hold-wide exponential backoff (250 ms base, doubling to a 4-second cap; jitter produces a
+after consecutive-failure exponential backoff (250 ms base, doubling to a 4-second cap; jitter produces a
 200 ms minimum). It serially replays the journal from zero. Each response carries the stable packet
 index used by the coordinator ledger: already-owned historical indices never own output again,
-while a previously failed unowned index may claim once when replay first succeeds. The retry ordinal
-never resets during the hold. Release closes admission to another session. There is no whole-file
-fallback or parallel request chain.
+while a previously failed unowned index may claim once when replay first succeeds. Every successful
+packet acknowledgement, including replay acknowledgement, resets the failure streak to zero;
+monotonic attempt identity remains separate. Factory, packet, and finish operations each have a
+30-second coordinator watchdog, clamped to any remaining post-release drain budget. There is no
+whole-file fallback or parallel request chain.
 
 Each successful response exposes one complete opaque recognition snapshot. Packet-index replay
 ownership is independent: each eligible journal index may be admitted once, but an equal snapshot
@@ -116,9 +119,10 @@ selection. D-27-01 permits Backspace only in the generic keyboard route describe
 If a safe editable element was captured but lacks verified range replacement, startup immediately
 arms a `CurrentFocusAppendSession` bound to the captured PID and exact element. If the first-partial
 rebind returns final-only, it arms the same kind of owner and applies that triggering partial before
-returning. Every eligible packet response received before sealing may own its journal index once;
-only a different complete snapshot is offered to output. Release cannot open a writer, claim a
-response, or mutate output; it only closes the already selected owner.
+returning. Every eligible current-generation packet response, including a response produced while
+draining already-recorded audio after release, may own its journal index once; only a different
+complete snapshot is offered to output. Release cannot open or retarget a writer; it retains the
+already selected owner until terminal settlement.
 
 If no AX destination can be captured or confirmed at startup, the first non-empty partial triggers
 one final AX binding attempt. A live result takes the normal captured-range path. If that probe does
@@ -166,8 +170,10 @@ through to clipboard recovery. Backspace is allowed only inside a validated tran
 exceeds this hold's recorded owned tail. Release-time one-shot/final-only insertion and manual-copy
 recovery remain removed.
 Without an AX range, the unbound owner cannot observe a caret move
-inside the same PID; that residual targeting risk is explicit. A divergent final leaves output
-unchanged rather than attempting destructive repair.
+inside the same PID; that residual targeting risk is explicit. A safe differing action-2 final uses
+the same exact grapheme replacement transaction while the original monitors and fixed PID remain
+armed. If safety validation fails, output remains unchanged rather than attempting destructive
+repair; an equal final emits no duplicate event.
 
 All routes reject action-capable C0/C1/DEL controls except that verified AX range replacement may
 carry LF as multiline text data. The generic keyboard route rejects LF as well. An affirmatively
@@ -178,12 +184,23 @@ unsafe, or ownerless output is not misreported as empty recognition or a stream 
 
 ### Finalization and privacy
 
-Release closes response and retry admission before recorder or session drain. Action-2 text and
-late packet/partial/final callbacks are transcript-free diagnostic inputs only; they cannot create,
-append, replace, rewrite, or copy output. Finalization closes the existing owner without changing
-text or synthesizing Return. Because PID posting has no target
+Release closes capture, not current-generation recognition authority. The recorder barrier first
+proves that queued callbacks and the accepted tail are closed; the coordinator then drains every
+journaled packet, retries recoverable attempts within the remaining budget, and waits for action 2.
+A safe non-empty action-2 snapshot is authoritative and is offered to the existing AX or fixed-PID
+owner before response admission closes. Callbacks from a stale generation, retired/timed-out
+attempt, expired drain, or completed terminal boundary are transcript-free suppressed inputs and
+cannot mutate output. Because PID posting has no target
 acceptance acknowledgement, this is retained local submission state rather than proof that text is
 visible. A failure before the first write causes no target mutation.
+
+Each factory, packet, and finish operation has a 30-second watchdog. Once the recorder barrier
+completes, all post-release work shares one 60-second budget. Deadline admission is checked inside
+the same lock-backed winner gate as operation completion, so an at-or-after-deadline success cannot
+outrun cleanup. Drain expiry preserves verified committed output, reports delivery uncertainty
+separately, and reports fixed streaming failure only when no safe output exists; late results are
+suppressed. A successful packet ACK resets the consecutive retry streak, including after repeated
+backend `10024` responses.
 
 The overlay remains status-only; target applications are the editing surface. Empty-recognition and
 uncertain-output outcomes use fixed, neutral, generation-guarded feedback presented
@@ -197,7 +214,8 @@ or clipboard payloads.
 
 A recoverable provider/transport event owns one attempt transition, not an abnormal hold exit. The
 coordinator cancels the failed attempt, waits with cancellable backoff, and admits a successor only
-while the same generation is active and unsealed. It publishes no user-facing error, overlay
+while the same generation retains response/retry authority and, after release, has drain budget.
+It publishes no user-facing error, overlay
 transition, clipboard recovery, or notification. A non-recoverable terminal event immediately
 invalidates the generation and every cursor writer, fails the ingress, cancels the
 consumer/transport, and hides the overlay. An already-running recorder-stop barrier is not awaited
@@ -449,10 +467,12 @@ recording overlay.
 Issue #26's 272/272 lifecycle-free evidence predates the issue #27 correction and must not be used
 as proof of snapshot reconciliation. Issue #27 requires focused and full-suite evidence for
 duplicate, extension, shorter, revision, replay, Unicode grapheme, ordered transaction, suspension,
-and release-sealing cases. The final issue #27 candidate at Release 1.0 build 7 passes 300/300 full
-tests, strict SwiftLint, and Debug and Release builds. Production is `ec4ddd6`, final
-production-gate tests run through `cd1132c`, and the behavior/security documentation provenance is
-`6e5d262`. Automated evidence still cannot prove target-control acceptance.
+and release-drain cases. The final issue #27 candidate at Release 1.0 build 8 passes 316/316 full
+tests, strict SwiftLint, and Debug and Release builds. Automated coverage includes authoritative
+terminal replacement, release during retry/replay/in-flight work, repeated-`10024` recovery,
+operation watchdogs, deadline races, delivery-state expiry, and stale callback suppression.
+Automated evidence still cannot prove target-control acceptance or credential-bearing service
+behavior.
 
 Credential-bearing Feishu behavior and cross-application Accessibility compatibility remain live
 UAT. Installed build 5 recorded 66 HTTP-200 transactions over 13.55 seconds while visible output

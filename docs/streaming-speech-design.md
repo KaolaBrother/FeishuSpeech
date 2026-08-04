@@ -1,12 +1,9 @@
 # Cursor-bound streaming speech design
 
-Status: issue #27 snapshot replacement and the final atomic HID interference gate are implemented
-locally in production `ec4ddd6`; `8ebf31e`/`81dbfc8` provide earlier atomic race/seam evidence,
-and `cd1132c` directly exercises `SystemFinalTextCurrentFocusEventPoster` through the real
-`CurrentFocusInputInterferenceEpoch` gate. Release 1.0 build 7 passes the final 300/300 test suite,
-strict SwiftLint, and Debug and Release builds; installed Release credential-bearing and
-cross-application UAT remains pending. Earlier `47d90ed`/`d138624` checks are intermediate,
-pre-atomic provenance only.
+Status: issue #27 snapshot replacement, release-drain lifecycle, resilience watchdogs, and the
+atomic HID interference gate are implemented. Release 1.0 build 8 passes the final 316/316 test
+suite, strict SwiftLint, and Debug and Release builds; installed Release credential-bearing and
+cross-application UAT remains pending.
 
 ## 1. Outcome
 
@@ -20,8 +17,10 @@ re-probes AX once, and a final-only rebound arms the same captured owner while a
 result arms an unbound PID-only owner. Each eligible held packet response owns its journal index
 once, independently of recognition state. Equal complete snapshots emit nothing; a different
 snapshot replaces `latestSnapshot` and is offered immediately while Fn remains held. Release
-closes admission and only closes the
-existing owner; it cannot mutate output. The FeishuSpeech overlay reports neutral state only; it
+stops capture but leaves the existing generation and owner active while queued/tail audio drains,
+recoverable attempts replay, and action 2 produces the authoritative terminal snapshot. The owner
+closes only after that snapshot is reconciled or a bounded terminal outcome wins. Release never
+retargets output. The FeishuSpeech overlay reports neutral state only; it
 does not host a transcript preview,
 editable draft, or send button and does not claim that a target accepted synthetic input.
 
@@ -203,12 +202,13 @@ rebindOnFirstPartial
   | AX still unavailable              -> currentFocusAppend(boundPID, emittedUTF16)
 
 capturedAppend / currentFocusAppend
-  | each eligible journal index -> admit complete snapshot at most once
+  | each eligible current-generation journal index -> admit complete snapshot at most once
   | equal snapshot              -> no event
   | different snapshot          -> replace owned keyboard tail by Character LCP
   | historical replay index     -> no-op
   | route-unsafe/contentless    -> no ownership or output
-  | release                     -> close existing owner without response text
+  | release                     -> retain existing owner through bounded drain
+  | safe action-2 final         -> reconcile authoritatively, then close
   | PID/element/security/delivery change -> suspended
   | external caret-affecting input        -> suspended
 
@@ -320,22 +320,25 @@ permission/security failures remain lifecycle-owned; destination/security change
 rather than authorizing reconnect or retargeting.
 
 After a recoverable failure, the coordinator cancels the failed session once, increments a
-hold-wide retry ordinal, and awaits cancellable exponential backoff. Base delays are 250 ms,
+consecutive failure streak, and awaits cancellable exponential backoff. Base delays are 250 ms,
 500 ms, 1 s, 2 s, then 4 s; jitter is clamped to 0.8–1.2 and final delay to 200 ms–4 s. There is no
-independent attempt limit before the existing 60-second hold cap, and an accepted prefix does not
-reset the ordinal.
+independent attempt limit. Every successful packet acknowledgement, including replay ACK, resets
+the streak to zero; the attempt identifier remains monotonic for stale-callback suppression.
 
 A fresh session replays the exact ordered packet journal from zero. Responses keep their stable
 journal indices: already-owned history is suppressed, a previously failed unowned index may claim
 once when replay succeeds, and later live packets continue at new indices.
 Recoverable failures publish diagnostics only: no early `.error`, hot-key error, overlay hide/show,
-clipboard recovery, or notification. Fn release sets sealing before any await, closes retry
-admission, and actively cancels delay/session-creation waits. A live attempt may drain/seal once;
-an established replay cancelled by release shares one in-flight cancel/action-3 task across every
-caller, and its typed cancellation is sealed control flow rather than a new terminal error. Early
-exit waits for the recorder stop barrier before advertising idle. Release-time response values are
-never routed to output; held recognition availability is classified independently of whether an
-output owner exists. No usable held recognition produces one fixed error.
+clipboard recovery, or notification. Factory, packet-send, and finish operations each have a
+30-second attempt-scoped watchdog. Fn release sets `captureClosed` before any await but does not
+close response/retry admission or cancel current factory/backoff/replay work. The recorder stop
+barrier flushes and closes ingress, then arms one 60-second drain budget. Recovery and full journal
+replay continue inside that budget until every packet is acknowledged and action 2 settles.
+
+A safe non-empty action-2 snapshot is authoritative and is reconciled through the existing AX or
+fixed-PID keyboard owner before admission closes. Expiry preserves verified committed output,
+distinguishes delivery uncertainty, and emits one fixed error only when no safe output exists.
+Deadline/cancellation winners retire their attempt; late results cannot mutate output.
 An abnormal lifecycle event does not wait on that barrier to revoke authority: generation/output
 writers and transport are cancelled immediately, while the independently retained recorder barrier
 continues to block a successor and final idle/error publication.
@@ -409,11 +412,12 @@ ensure that a stale result cannot be intentionally routed to a newly focused fie
 
 ### Release and failures
 
-- Release: close admission before drain and close the owner without mutation; action-2 text
-  and late callbacks cannot replace, append, create, or copy output.
-- No held recognition: release ownership and surface the fixed empty-recognition outcome.
+- Release: stop capture, cross the recorder callback barrier, then drain queued/tail audio and
+  recoverable replay within the same generation; do not retarget or reopen an owner.
+- Safe action-2 final: reconcile the existing owned range/tail authoritatively, then close.
+- No safe recognition after bounded drain: release ownership and surface the fixed failure outcome.
 - Stream failure after visible partial: keep the last verified text, release ownership, surface
-  failure.
+  typed preservation feedback rather than ordinary success.
 - Failure before visible text: zero target mutation.
 - Destination invalidation: no later write and no automatic rollback.
 
@@ -427,7 +431,8 @@ For a captured non-secure editable control that cannot support verified live rep
 1. Startup `.finalOnly`, or a first-partial rebind returning `.finalOnly`, creates a continuous
    owner bound to the captured PID and exact `AXUIElement`; the rebound triggering partial is
    applied before its callback returns.
-2. Every eligible packet response received while Fn remains held may claim its journal index once;
+2. Every eligible current-generation packet response, including post-release drain responses, may
+   claim its journal index once;
    an equal complete snapshot emits nothing and a different snapshot is offered immediately.
 3. Before and after each replacement transaction, validation requires live Secure Input to be off, the
    captured token's security to remain affirmatively safe, the original PID to remain frontmost,
@@ -436,8 +441,9 @@ For a captured non-secure editable control that cannot support verified live rep
 5. External caret-affecting input, destination/security failure, or delivery uncertainty permanently
    closes all full-text resend, one-shot current-focus, Cmd+V, alternate-target, and clipboard
    fallback paths.
-6. Release closes ledger and retry admission before draining, then closes the owner without final
-   text. It cannot create, append, replace, rewrite, Cmd+V, or copy output.
+6. Release keeps this owner armed through bounded drain. The safe action-2 final uses the same
+   fixed-target replacement transaction before monitoring closes; it never opens a new owner,
+   Cmd+V, or copy path.
 
 For an interaction where no AX cursor/focused element can be captured or confirmed:
 
@@ -458,7 +464,8 @@ For an interaction where no AX cursor/focused element can be captured or confirm
    App activation away, PID mismatch, external keyboard/mouse input, security rejection, epoch
    change, or delivery uncertainty permanently suspends output. Fn transitions and
    FeishuSpeech-tagged synthetic events are exempt.
-7. Action-2 and late packet/final values cannot mutate submitted output after release.
+7. Eligible action-2 and packet values may reconcile this owner only while the same generation and
+   drain budget remain authoritative. Terminal/expiry cleanup suppresses all later values.
 
 For the generic keyboard owner, reconciliation uses Swift extended grapheme clusters without
 normalization:
@@ -519,7 +526,8 @@ uncertainty.
 The coordinator starts capture and stream setup without blocking the main actor. It consumes audio
 and stream events in generation-bound tasks. A recoverable attempt failure first claims/cancels the
 current session, preserves generation/capture/output ownership, awaits backoff, and admits a fresh
-session only after rechecking that the hold is active and unsealed. Terminal cleanup order is:
+session only after rechecking that the generation retains retry authority and, after release, drain
+budget. Normal terminal cleanup follows authoritative final reconciliation; abnormal cleanup order is:
 
 1. invalidate the active identity and every output writer;
 2. fail ingress, cancel consumer/transport work, and hide the overlay;
@@ -561,7 +569,7 @@ teardown from continuously advancing the overlay generation and leaving its wind
 Allowed diagnostic fields:
 
 - typed lifecycle/capability/failure, eligibility, ownership, shape, and output enums;
-- generation, retry ordinal, journal index, source, and event kind;
+- generation, monotonic attempt identifier, retry failure streak, journal index, source, and event kind;
 - packet action, sequence number, byte count, bounded-queue occupancy, snapshot decision,
   previous/new/common-prefix UTF-16 and `Character` counts, Backspace/insertion counts, route, and
   transaction outcome.
@@ -598,9 +606,9 @@ No cursor destination survives the process lifetime or is persisted to UserDefau
      while `cd1132c` directly exercises that production poster and epoch gate together.
 5. **Coordinator/state migration — implemented locally**
    - Production hot-key work uses one generation-owned recorder/ingress, ordered journal, fresh
-     serial session attempts, hold-wide capped backoff, journal-indexed replay ownership,
-     release-closed response/retry admission, and identity-owned cleanup. Whole-file recognition
-     remains compatibility-only.
+     serial session attempts, ACK-reset consecutive-failure backoff, journal-indexed replay
+     ownership, capture-only release followed by bounded drain, attempt-scoped operation watchdogs,
+     and identity-owned cleanup. Whole-file recognition remains compatibility-only.
 6. **UI/settings docking — complete**
    - Status-only listening/sealing/final-only and fixed completion feedback preserve `autoInsert`
      and `playSound` semantics without exposing recognized text.
@@ -675,9 +683,9 @@ Test/production custody separation was preserved for the automated implementatio
 - sleep/wake and manual reset invalidate before cleanup;
 - recoverable 10024/network failures keep one capture active, abort one failed session, back off,
   create one fresh session, and replay the full ordered journal without early error feedback;
-- retry ordinal remains hold-wide, delays cap at 4 seconds, and attempts never overlap;
-- release during backoff admits no successor; reset/security/lifecycle invalidation makes late
-  retry work inert;
+- packet ACK resets the consecutive retry streak, delays cap at 4 seconds, and attempts never overlap;
+- release during backoff retains same-generation recovery inside the post-barrier budget;
+  reset/security/lifecycle invalidation makes late retry work inert;
 - terminal capture/auth/configuration failure cannot leave mic, overlay, writer, or hot-key state active;
 - an immediate terminal provider event and a provider-auth exception each hide the overlay and
   clean the active generation exactly once;
@@ -685,8 +693,10 @@ Test/production custody separation was preserved for the automated implementatio
 - initial final-only-capability, rebound final-only-capability, and unbound routes admit each
   eligible journal index once while independently suppressing equal snapshots; historical replay
   never re-owns, while a previously failed index may own once;
-- release closes response/retry admission before drain; action-2 and late callbacks never create,
-  append, rewrite, Cmd+V, or copy output;
+- release closes capture but keeps current-generation response/retry authority through a 60-second
+  post-barrier drain; factory/send/finish each have a 30-second watchdog;
+- safe action-2 text reconciles the existing AX/fixed-PID owner before closure; expired, retired,
+  stale, or post-terminal callbacks never create, append, rewrite, Cmd+V, or copy output;
 - output-disabled, unsafe, and ownerless usable held recognition completes without false
   empty-result/stream-error feedback and with zero output/copy;
 - the PID poster constructs the whole tagged private-source Backspace-plus-Unicode transaction
@@ -719,13 +729,12 @@ then recorded 66 HTTP-200 transactions over 13.55 seconds while visible output s
 word, motivating issue #26's journal-indexed local frontier. Release 1.0 build 6 later proved that
 this concatenated complete snapshots and repeated text. [D-27-01](decisions/D-27-01.md) replaces
 that assembly rule with opaque snapshot replacement while retaining replay ownership and
-release-only sealing. Earlier atomic race coverage `8ebf31e` and unified seam coverage `81dbfc8`
-support the current LF/action-control and HID interference contract; production `ec4ddd6` and
-`cd1132c`'s direct exercise of `SystemFinalTextCurrentFocusEventPoster` through the real
-`CurrentFocusInputInterferenceEpoch` gate establish the final production-gate provenance.
-`47d90ed`/`d138624` are intermediate pre-atomic steps. Behavior/security documentation through
-`6e5d262` records that contract, and Release 1.0 build 7 passes 300/300 tests, strict SwiftLint,
-and Debug and Release builds. Installed Release verification remains pending.
+fixed-target safety. Build 7 UAT then proved that immediate response-admission closure at Fn-up
+discarded valid tail packets and the action-2 final. The current correction makes release a capture
+boundary followed by recorder-barrier drain, recoverable replay, and authoritative terminal
+reconciliation, with 30-second operation watchdogs and a 60-second post-barrier budget. Release 1.0
+build 8 passes 316/316 tests, strict SwiftLint, and Debug and Release builds. Installed Release
+credential-bearing and cross-application verification remains pending.
 
 General-availability closure remains intentionally separate: the owner will self-test the installed
 Release with real Feishu credentials and the live target-application matrix above. Until the
