@@ -428,6 +428,33 @@ final class CurrentFocusAppendSessionTests: XCTestCase {
         XCTAssertEqual(context.poster.callCount, 1)
     }
 
+    func test_armReturnsBaselineEpochAtomicallyWithoutAbsorbingBoundaryInput() {
+        let context = makeContext(
+            inputMonitorInitialEpoch: 41,
+            injectPhysicalInputAtArmBoundary: true
+        )
+
+        XCTAssertEqual(
+            context.inputMonitor.failClosedArmWithEpochCallCount,
+            1,
+            "the arm operation must return the baseline captured inside the installation gate"
+        )
+        XCTAssertEqual(context.inputMonitor.rawInterferenceEpoch, 42)
+
+        let outcome = context.session.applyOpaqueHypothesis(
+            "must remain queued",
+            generation: generation,
+            source: .livePacket
+        )
+
+        XCTAssertEqual(outcome, .deliveryUncertain)
+        XCTAssertEqual(
+            context.poster.callCount,
+            0,
+            "input after arm completion must not be absorbed by a later baseline read"
+        )
+    }
+
     func test_preDispatchPhysicalKeyOrMouseEpochDriftSuppressesTransactionWithoutMainActorCallback() {
         for input in [TestPreDispatchInputKind.physicalKeyDown, .physicalLeftMouseDown] {
             let context = makeContext(inputMonitorInitialEpoch: 23)
@@ -489,6 +516,101 @@ final class CurrentFocusAppendSessionTests: XCTestCase {
         )
         XCTAssertEqual(context.poster.replacementRequests, [])
         XCTAssertEqual(outcome, .deliveryUncertain)
+    }
+
+    func test_sharedInterferenceGateHoldsPhysicalAdvanceAcrossCompleteSyntheticPair() {
+        let context = makeContext(inputMonitorInitialEpoch: 51)
+        XCTAssertEqual(
+            context.session.applyOpaqueHypothesis(
+                "abcdef",
+                generation: generation,
+                source: .livePacket
+            ),
+            .insertedFirst
+        )
+        context.poster.resetTransactionTracking()
+        let trace = ThreadSafeRaceTrace()
+        context.poster.raceTrace = trace
+        context.poster.afterEpochValidationBeforeFirstSyntheticPost = {
+            context.inputMonitor.beginPhysicalAdvanceDuringPosting(trace: trace)
+        }
+
+        let outcome = context.session.applyOpaqueHypothesis(
+            "uvwxyz",
+            generation: generation,
+            source: .livePacket
+        )
+        context.inputMonitor.waitForPendingPhysicalAdvance()
+
+        XCTAssertEqual(context.poster.atomicGuardedReplacementCallCount, 1)
+        XCTAssertEqual(context.poster.guardedReplacementCallCount, 0)
+        XCTAssertEqual(
+            trace.values,
+            ["synthetic-down", "synthetic-up", "physical-epoch-advance"],
+            "physical HID delivery must wait until the complete synthetic down/up pair leaves the gate"
+        )
+        XCTAssertEqual(context.poster.destructiveBackspaceCount, 1)
+        XCTAssertEqual(context.poster.insertionPairCount, 0)
+        XCTAssertEqual(outcome, .deliveryUncertain)
+    }
+
+    func test_tapDisabledEventsSynchronouslyAdvanceLossOfObservabilityEpochWithExemptions() {
+        let epoch = CurrentFocusInputInterferenceEpoch()
+        let event = CGEvent(
+            keyboardEventSource: nil,
+            virtualKey: 0,
+            keyDown: true
+        )!
+        let taggedEvent = event.copy()!
+        taggedEvent.setIntegerValueField(
+            .eventSourceUserData,
+            value: FeishuSpeechSyntheticEventTag.value
+        )
+        let fnEvent = CGEvent(
+            keyboardEventSource: nil,
+            virtualKey: 63,
+            keyDown: true
+        )!
+
+        epoch.observePreDispatch(type: .keyDown, event: taggedEvent)
+        epoch.observePreDispatch(type: .flagsChanged, event: fnEvent)
+        XCTAssertEqual(epoch.value, 0)
+
+        epoch.observePreDispatch(type: .tapDisabledByTimeout, event: event)
+        XCTAssertEqual(
+            epoch.value,
+            1,
+            "tap timeout must synchronously mark loss of observability"
+        )
+        epoch.observePreDispatch(type: .tapDisabledByUserInput, event: event)
+        XCTAssertEqual(
+            epoch.value,
+            2,
+            "tap user-input disable must synchronously mark loss of observability"
+        )
+    }
+
+    func test_tapDisabledEpochDriftSuppressesActiveSessionBeforeRecoveryCallbacks() {
+        for input in [
+            TestPreDispatchInputKind.tapDisabledByTimeout,
+            .tapDisabledByUserInput
+        ] {
+            let context = makeContext(inputMonitorInitialEpoch: 61)
+            context.inputMonitor.receivePreDispatchCGEventTap(
+                input,
+                deliverAppKitGlobalMonitorCallback: false
+            )
+
+            XCTAssertEqual(
+                context.session.applyOpaqueHypothesis(
+                    "late replacement",
+                    generation: generation,
+                    source: .livePacket
+                ),
+                .deliveryUncertain
+            )
+            XCTAssertEqual(context.poster.callCount, 0)
+        }
     }
 
     func test_workspaceInputMonitorObservesSameAppPhysicalKeyboardSynchronously() {
@@ -981,7 +1103,8 @@ final class CurrentFocusAppendSessionTests: XCTestCase {
         secureInputStates: [Bool]? = nil,
         posterResults: [FinalTextCurrentFocusPostResult] = [],
         inputMonitorArmFailure: TestInputMonitorArmFailure? = nil,
-        inputMonitorInitialEpoch: UInt64 = 0
+        inputMonitorInitialEpoch: UInt64 = 0,
+        injectPhysicalInputAtArmBoundary: Bool = false
     ) -> TestContext {
         let processProvider = FakeAppendFrontmostProcessProvider(
             processIdentifiers: processIdentifiers ?? Array(repeating: boundProcessIdentifier, count: 30)
@@ -993,7 +1116,8 @@ final class CurrentFocusAppendSessionTests: XCTestCase {
         let activationMonitor = FakeActivationMonitor()
         let inputMonitor = FakeInputMonitor(
             armFailure: inputMonitorArmFailure,
-            initialInterferenceEpoch: inputMonitorInitialEpoch
+            initialInterferenceEpoch: inputMonitorInitialEpoch,
+            injectPhysicalInputAtArmBoundary: injectPhysicalInputAtArmBoundary
         )
         let session = CurrentFocusAppendSession(
             generation: generation,
@@ -1062,12 +1186,108 @@ private enum TestPreDispatchInputKind: String {
     case physicalLeftMouseDown
     case taggedSyntheticKeyDown
     case fnFlagsChanged
+    case tapDisabledByTimeout
+    case tapDisabledByUserInput
 }
 
 private struct ReplacementRequest: Equatable {
     let deleteCharacterCount: Int
     let insertText: String
     let processIdentifier: pid_t
+}
+
+private final class ThreadSafeRaceTrace: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [String] = []
+
+    var values: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+
+    func append(_ value: String) {
+        lock.lock()
+        storage.append(value)
+        lock.unlock()
+    }
+}
+
+private final class TestAtomicInterferenceGate: @unchecked Sendable {
+    private let gateLock = NSLock()
+    private let stateLock = NSLock()
+    private var rawEpoch: UInt64
+    private var isHeld = false
+    private var pendingCompletion: DispatchSemaphore?
+
+    init(initialEpoch: UInt64) {
+        rawEpoch = initialEpoch
+    }
+
+    var value: UInt64 {
+        gateLock.lock()
+        defer { gateLock.unlock() }
+        return rawEpoch
+    }
+
+    func advance() {
+        gateLock.lock()
+        rawEpoch &+= 1
+        gateLock.unlock()
+    }
+
+    func performIfUnchanged(expectedEpoch: UInt64, _ operation: () -> Void) -> Bool {
+        gateLock.lock()
+        guard rawEpoch == expectedEpoch else {
+            gateLock.unlock()
+            return false
+        }
+        setHeld(true)
+        operation()
+        setHeld(false)
+        gateLock.unlock()
+        waitForPendingAdvance()
+        return true
+    }
+
+    func beginPhysicalAdvance(trace: ThreadSafeRaceTrace) {
+        let attempted = DispatchSemaphore(value: 0)
+        let completed = DispatchSemaphore(value: 0)
+        stateLock.lock()
+        pendingCompletion = completed
+        let held = isHeld
+        stateLock.unlock()
+
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            attempted.signal()
+            gateLock.lock()
+            rawEpoch &+= 1
+            trace.append("physical-epoch-advance")
+            gateLock.unlock()
+            completed.signal()
+        }
+        attempted.wait()
+        if !held {
+            completed.wait()
+            stateLock.lock()
+            pendingCompletion = nil
+            stateLock.unlock()
+        }
+    }
+
+    func waitForPendingAdvance() {
+        stateLock.lock()
+        let completion = pendingCompletion
+        pendingCompletion = nil
+        stateLock.unlock()
+        completion?.wait()
+    }
+
+    private func setHeld(_ held: Bool) {
+        stateLock.lock()
+        isHeld = held
+        stateLock.unlock()
+    }
 }
 
 @MainActor
@@ -1077,8 +1297,12 @@ private final class FakeUnicodeEventPoster: FinalTextCurrentFocusEventPosting {
     private(set) var destinationProcessIdentifiers: [pid_t] = []
     private(set) var replacementRequests: [ReplacementRequest] = []
     private(set) var guardedReplacementCallCount = 0
+    private(set) var atomicGuardedReplacementCallCount = 0
     private(set) var destructiveBackspaceCount = 0
+    private(set) var insertionPairCount = 0
     var afterFirstGuardedBackspace: (() -> Void)?
+    var afterEpochValidationBeforeFirstSyntheticPost: (() -> Void)?
+    var raceTrace: ThreadSafeRaceTrace?
 
     var callCount: Int { requestedTexts.count }
 
@@ -1130,12 +1354,59 @@ private final class FakeUnicodeEventPoster: FinalTextCurrentFocusEventPosting {
         guardedReplacementCallCount += 1
         for _ in 0..<deleteCharacterCount {
             guard whileInterferenceEpochIsUnchanged() else { return .deliveryFailed }
+            if destructiveBackspaceCount == 0 {
+                afterEpochValidationBeforeFirstSyntheticPost?()
+            }
+            raceTrace?.append("synthetic-down")
+            raceTrace?.append("synthetic-up")
             destructiveBackspaceCount += 1
             if destructiveBackspaceCount == 1 {
                 afterFirstGuardedBackspace?()
             }
         }
         guard whileInterferenceEpochIsUnchanged() else { return .deliveryFailed }
+        if !insertText.isEmpty {
+            insertionPairCount += 1
+        }
+        requestedTexts.append(insertText)
+        destinationProcessIdentifiers.append(processIdentifier)
+        replacementRequests.append(
+            ReplacementRequest(
+                deleteCharacterCount: deleteCharacterCount,
+                insertText: insertText,
+                processIdentifier: processIdentifier
+            )
+        )
+        guard !results.isEmpty else { return .posted }
+        return results.removeFirst()
+    }
+
+    func postReplacement(
+        deleteCharacterCount: Int,
+        insertText: String,
+        to processIdentifier: pid_t,
+        postCompleteSyntheticPairIfInterferenceEpochIsUnchanged: ((_ postPair: () -> Void) -> Bool)
+    ) -> FinalTextCurrentFocusPostResult {
+        atomicGuardedReplacementCallCount += 1
+        for _ in 0..<deleteCharacterCount {
+            let posted = postCompleteSyntheticPairIfInterferenceEpochIsUnchanged {
+                if destructiveBackspaceCount == 0 {
+                    afterEpochValidationBeforeFirstSyntheticPost?()
+                }
+                raceTrace?.append("synthetic-down")
+                raceTrace?.append("synthetic-up")
+                destructiveBackspaceCount += 1
+            }
+            guard posted else { return .deliveryFailed }
+        }
+        if !insertText.isEmpty {
+            let posted = postCompleteSyntheticPairIfInterferenceEpochIsUnchanged {
+                raceTrace?.append("synthetic-down")
+                raceTrace?.append("synthetic-up")
+                insertionPairCount += 1
+            }
+            guard posted else { return .deliveryFailed }
+        }
         requestedTexts.append(insertText)
         destinationProcessIdentifiers.append(processIdentifier)
         replacementRequests.append(
@@ -1154,7 +1425,9 @@ private final class FakeUnicodeEventPoster: FinalTextCurrentFocusEventPosting {
         destinationProcessIdentifiers = []
         replacementRequests = []
         guardedReplacementCallCount = 0
+        atomicGuardedReplacementCallCount = 0
         destructiveBackspaceCount = 0
+        insertionPairCount = 0
     }
 }
 
@@ -1214,25 +1487,36 @@ private final class FakeActivationMonitor: CurrentFocusActivationMonitoring {
 @MainActor
 private final class FakeInputMonitor: CurrentFocusInputMonitoring {
     private let armFailure: TestInputMonitorArmFailure?
+    private let atomicGate: TestAtomicInterferenceGate
+    private let injectPhysicalInputAtArmBoundary: Bool
     private var handler: (@MainActor () -> Void)?
+    private var advanceEpochOnNextSeparateRead = false
     private(set) var startCallCount = 0
     private(set) var failClosedArmCallCount = 0
+    private(set) var failClosedArmWithEpochCallCount = 0
     private(set) var stopCallCount = 0
     private(set) var isCompletelyArmed = false
     private(set) var interferenceEpochReadCount = 0
-    private(set) var rawInterferenceEpoch: UInt64
 
     init(
         armFailure: TestInputMonitorArmFailure? = nil,
-        initialInterferenceEpoch: UInt64 = 0
+        initialInterferenceEpoch: UInt64 = 0,
+        injectPhysicalInputAtArmBoundary: Bool = false
     ) {
         self.armFailure = armFailure
-        rawInterferenceEpoch = initialInterferenceEpoch
+        atomicGate = TestAtomicInterferenceGate(initialEpoch: initialInterferenceEpoch)
+        self.injectPhysicalInputAtArmBoundary = injectPhysicalInputAtArmBoundary
     }
+
+    var rawInterferenceEpoch: UInt64 { atomicGate.value }
 
     var interferenceEpoch: UInt64 {
         interferenceEpochReadCount += 1
-        return rawInterferenceEpoch
+        if advanceEpochOnNextSeparateRead {
+            advanceEpochOnNextSeparateRead = false
+            atomicGate.advance()
+        }
+        return atomicGate.value
     }
 
     func startMonitoring(_ handler: @escaping @MainActor () -> Void) {
@@ -1248,8 +1532,30 @@ private final class FakeInputMonitor: CurrentFocusInputMonitoring {
         isCompletelyArmed = armFailure == nil
         if isCompletelyArmed {
             self.handler = handler
+            advanceEpochOnNextSeparateRead = injectPhysicalInputAtArmBoundary
         }
         return isCompletelyArmed
+    }
+
+    func armMonitoringFailClosedWithEpoch(
+        _ handler: @escaping @MainActor () -> Void
+    ) -> UInt64? {
+        failClosedArmWithEpochCallCount += 1
+        guard armFailure == nil else { return nil }
+        isCompletelyArmed = true
+        self.handler = handler
+        let armedEpoch = atomicGate.value
+        if injectPhysicalInputAtArmBoundary {
+            atomicGate.advance()
+        }
+        return armedEpoch
+    }
+
+    func postCompleteSyntheticPairIfInterferenceEpochIsUnchanged(
+        expectedEpoch: UInt64,
+        _ postPair: () -> Void
+    ) -> Bool {
+        atomicGate.performIfUnchanged(expectedEpoch: expectedEpoch, postPair)
     }
 
     func stopMonitoring() {
@@ -1267,13 +1573,22 @@ private final class FakeInputMonitor: CurrentFocusInputMonitoring {
         deliverAppKitGlobalMonitorCallback: Bool = true
     ) {
         switch input {
-        case .physicalKeyDown, .physicalLeftMouseDown:
-            rawInterferenceEpoch &+= 1
+        case .physicalKeyDown, .physicalLeftMouseDown,
+             .tapDisabledByTimeout, .tapDisabledByUserInput:
+            atomicGate.advance()
             if deliverAppKitGlobalMonitorCallback {
                 handler?()
             }
         case .taggedSyntheticKeyDown, .fnFlagsChanged:
             break
         }
+    }
+
+    func beginPhysicalAdvanceDuringPosting(trace: ThreadSafeRaceTrace) {
+        atomicGate.beginPhysicalAdvance(trace: trace)
+    }
+
+    func waitForPendingPhysicalAdvance() {
+        atomicGate.waitForPendingAdvance()
     }
 }
