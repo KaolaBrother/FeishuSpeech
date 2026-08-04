@@ -495,11 +495,10 @@ final class CurrentFocusAppendSessionTests: XCTestCase {
             .insertedFirst
         )
         context.poster.resetTransactionTracking()
-        context.poster.afterFirstGuardedBackspace = {
-            context.inputMonitor.receivePreDispatchCGEventTap(
-                .physicalKeyDown,
-                deliverAppKitGlobalMonitorCallback: false
-            )
+        let trace = ThreadSafeRaceTrace()
+        context.poster.raceTrace = trace
+        context.poster.afterEpochValidationBeforeFirstSyntheticPost = {
+            context.inputMonitor.beginPhysicalAdvanceDuringPosting(trace: trace)
         }
 
         let outcome = context.session.applyOpaqueHypothesis(
@@ -507,13 +506,20 @@ final class CurrentFocusAppendSessionTests: XCTestCase {
             generation: generation,
             source: .livePacket
         )
+        context.inputMonitor.waitForPendingPhysicalAdvance()
 
-        XCTAssertEqual(context.poster.guardedReplacementCallCount, 1)
+        XCTAssertEqual(context.poster.atomicGuardedReplacementCallCount, 1)
+        XCTAssertEqual(
+            trace.values,
+            ["synthetic-down", "synthetic-up", "physical-epoch-advance"],
+            "the first complete Backspace pair may finish under the gate before epoch drift"
+        )
         XCTAssertEqual(
             context.poster.destructiveBackspaceCount,
             1,
             "epoch drift after the first pair must prevent every later Backspace pair"
         )
+        XCTAssertEqual(context.poster.insertionPairCount, 0)
         XCTAssertEqual(context.poster.replacementRequests, [])
         XCTAssertEqual(outcome, .deliveryUncertain)
     }
@@ -543,7 +549,6 @@ final class CurrentFocusAppendSessionTests: XCTestCase {
         context.inputMonitor.waitForPendingPhysicalAdvance()
 
         XCTAssertEqual(context.poster.atomicGuardedReplacementCallCount, 1)
-        XCTAssertEqual(context.poster.guardedReplacementCallCount, 0)
         XCTAssertEqual(
             trace.values,
             ["synthetic-down", "synthetic-up", "physical-epoch-advance"],
@@ -1296,11 +1301,9 @@ private final class FakeUnicodeEventPoster: FinalTextCurrentFocusEventPosting {
     private(set) var requestedTexts: [String] = []
     private(set) var destinationProcessIdentifiers: [pid_t] = []
     private(set) var replacementRequests: [ReplacementRequest] = []
-    private(set) var guardedReplacementCallCount = 0
     private(set) var atomicGuardedReplacementCallCount = 0
     private(set) var destructiveBackspaceCount = 0
     private(set) var insertionPairCount = 0
-    var afterFirstGuardedBackspace: (() -> Void)?
     var afterEpochValidationBeforeFirstSyntheticPost: (() -> Void)?
     var raceTrace: ThreadSafeRaceTrace?
 
@@ -1351,34 +1354,12 @@ private final class FakeUnicodeEventPoster: FinalTextCurrentFocusEventPosting {
         to processIdentifier: pid_t,
         whileInterferenceEpochIsUnchanged: () -> Bool
     ) -> FinalTextCurrentFocusPostResult {
-        guardedReplacementCallCount += 1
-        for _ in 0..<deleteCharacterCount {
-            guard whileInterferenceEpochIsUnchanged() else { return .deliveryFailed }
-            if destructiveBackspaceCount == 0 {
-                afterEpochValidationBeforeFirstSyntheticPost?()
-            }
-            raceTrace?.append("synthetic-down")
-            raceTrace?.append("synthetic-up")
-            destructiveBackspaceCount += 1
-            if destructiveBackspaceCount == 1 {
-                afterFirstGuardedBackspace?()
-            }
-        }
         guard whileInterferenceEpochIsUnchanged() else { return .deliveryFailed }
-        if !insertText.isEmpty {
-            insertionPairCount += 1
-        }
-        requestedTexts.append(insertText)
-        destinationProcessIdentifiers.append(processIdentifier)
-        replacementRequests.append(
-            ReplacementRequest(
-                deleteCharacterCount: deleteCharacterCount,
-                insertText: insertText,
-                processIdentifier: processIdentifier
-            )
+        return postReplacement(
+            deleteCharacterCount: deleteCharacterCount,
+            insertText: insertText,
+            to: processIdentifier
         )
-        guard !results.isEmpty else { return .posted }
-        return results.removeFirst()
     }
 
     func postReplacement(
@@ -1424,7 +1405,6 @@ private final class FakeUnicodeEventPoster: FinalTextCurrentFocusEventPosting {
         requestedTexts = []
         destinationProcessIdentifiers = []
         replacementRequests = []
-        guardedReplacementCallCount = 0
         atomicGuardedReplacementCallCount = 0
         destructiveBackspaceCount = 0
         insertionPairCount = 0
