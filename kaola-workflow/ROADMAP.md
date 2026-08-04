@@ -7,7 +7,7 @@ This file mirrors active unfinished work. GitHub issues are the source of truth 
 
 | Issue | Title | Status | Workflow Project | Next Step |
 |-------|-------|--------|------------------|-----------|
-| #26 | enhancement: implement cursor-bound streaming Feishu transcription | open | — | Run kaola-workflow-next for issue #26 |
+| none | No active work | — | — | — |
 
 ## Rules
 

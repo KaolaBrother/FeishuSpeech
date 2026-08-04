@@ -91,3 +91,10 @@ archived_paths:
 - kaola-workflow/archive/issue-26/output-disabled-red-evidence.md
 - kaola-workflow/archive/issue-26/security-review-multipartial.md
 - kaola-workflow/archive/issue-26/workflow-state.md
+
+## Post-UAT Closure — 2026-08-04
+
+- Release 1.0 build 8 now delivers issue #26's cursor-bound, status-only streaming transcription at the original target.
+- Issue #27 and D-27-01 supersede this archive's historical concatenation, no-replay, and immediate-release-seal policies with opaque snapshot replacement and bounded post-release drain.
+- The owner completed real-credential testing, accepted the current behavior, and explicitly agreed that issue #26 can end.
+- GitHub issue #26 was closed and its active roadmap source was removed. This closure does not claim universal compatibility across every application in the original UAT matrix.
