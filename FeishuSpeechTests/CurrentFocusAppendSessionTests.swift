@@ -1048,32 +1048,73 @@ final class CurrentFocusAppendSessionTests: XCTestCase {
         XCTAssertFalse(context.inputMonitor.isCompletelyArmed)
     }
 
-    func test_finalizeNeverPostsAReleaseTimeExtension() {
+    func test_finalizeCommitsAuthoritativeExtensionAsSuffixBeforeClosingOwner() {
         let context = makeContext()
         _ = context.session.applyOpaqueHypothesis("base", generation: generation, source: .livePacket)
+        context.poster.resetTransactionTracking()
 
-        _ = context.session.finalize(
+        let outcome = context.session.finalize(
             finalText: "base final",
-            lastAcceptedText: "base final",
+            lastAcceptedText: "base",
             generation: generation
         )
-        assertPosted(["base"], by: context.poster)
+
+        XCTAssertEqual(outcome, .suffixCommitted)
+        XCTAssertEqual(
+            context.poster.replacementRequests,
+            [
+                ReplacementRequest(
+                    deleteCharacterCount: 0,
+                    insertText: " final",
+                    processIdentifier: boundProcessIdentifier
+                )
+            ]
+        )
     }
 
-    func test_finalizeRevisionOrShorteningPreservesEmittedTextWithoutRecoveryOutput() {
-        for finalText in ["revise", "vis"] {
+    func test_finalizeRevisionOrShorteningReconcilesOwnedTailExactly() {
+        let cases = [
+            SnapshotReplacementCase(
+                previous: "visible",
+                next: "revise",
+                expectedDeleteCharacterCount: 7,
+                expectedInsertText: "revise"
+            ),
+            SnapshotReplacementCase(
+                previous: "visible",
+                next: "vis",
+                expectedDeleteCharacterCount: 4,
+                expectedInsertText: ""
+            )
+        ]
+
+        for testCase in cases {
             let context = makeContext()
-            _ = context.session.applyOpaqueHypothesis("visible", generation: generation, source: .livePacket)
+            _ = context.session.applyOpaqueHypothesis(
+                testCase.previous,
+                generation: generation,
+                source: .livePacket
+            )
+            context.poster.resetTransactionTracking()
 
             XCTAssertEqual(
                 context.session.finalize(
-                    finalText: finalText,
-                    lastAcceptedText: "visible",
+                    finalText: testCase.next,
+                    lastAcceptedText: testCase.previous,
                     generation: generation
                 ),
-                .preservedDivergence
+                .exactCommitted
             )
-            assertPosted(["visible"], by: context.poster)
+            XCTAssertEqual(
+                context.poster.replacementRequests,
+                [
+                    ReplacementRequest(
+                        deleteCharacterCount: testCase.expectedDeleteCharacterCount,
+                        insertText: testCase.expectedInsertText,
+                        processIdentifier: boundProcessIdentifier
+                    )
+                ]
+            )
         }
     }
 
