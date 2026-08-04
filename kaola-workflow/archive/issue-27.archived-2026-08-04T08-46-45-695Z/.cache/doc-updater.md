@@ -8,4 +8,3 @@ verdict: PASS
 - Real-credential and cross-application UAT remains explicitly pending.
 - No code, tests, project configuration, workflow records, or installed bundle entered the documentation commit.
 - `git diff --check`, local Markdown-link validation, and stale-contract contradiction sweep passed.
-

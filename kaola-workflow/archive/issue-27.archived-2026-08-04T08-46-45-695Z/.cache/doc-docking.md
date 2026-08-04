@@ -7,4 +7,3 @@ verdict: DOCKED
 - Fixed-target, Secure Input, physical-interference, unsafe-control, stale-generation, and privacy boundaries remain documented.
 - No environment, dependency, schema, setup, or public API surface changed; `.env.example`, conventions, older decisions, CLAUDE.md, and AGENTS.md require no update.
 - No UAT success was inferred from automated validation.
-
