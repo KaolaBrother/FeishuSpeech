@@ -147,7 +147,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         XCTAssertFalse(visibleFeedback(context.viewModel).contains("PRIVATE_TRANSCRIPT"))
     }
 
-    func test_unboundFallbackDeliversNonEmptyFinalToCurrentFocusExactlyOnce() async {
+    func test_unboundFallbackWithoutContinuousOwnerNeverUsesReleaseTimeFinalOutput() async {
         let context = makeContext(
             capability: .accessibilityUnavailable,
             packetEvents: [.partial("PRIVATE_PARTIAL")],
@@ -170,13 +170,14 @@ final class StreamingMainViewModelTests: XCTestCase {
         context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
         await waitUntil { await context.session.finishCallCount == 1 }
 
-        XCTAssertEqual(context.output.currentFocusInsertedTexts, ["PRIVATE_FINAL"])
+        XCTAssertEqual(context.output.currentFocusInsertedTexts, [])
+        XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
         XCTAssertEqual(context.output.insertedTexts, [])
         XCTAssertEqual(context.output.copiedTexts, [])
         XCTAssertEqual(context.recorder.stopStreamingCallCount, 1)
     }
 
-    func test_unboundCurrentFocusDeliveryFailureAttemptsOnceThenCopiesOnceWithFixedFeedback() async {
+    func test_unboundCurrentFocusReleaseNeverAttemptsDeliveryOrCopies() async {
         let transcript = "PRIVATE_UNBOUND_FINAL"
         let context = makeContext(
             capability: .accessibilityUnavailable,
@@ -195,18 +196,18 @@ final class StreamingMainViewModelTests: XCTestCase {
         context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
         await waitUntil { context.viewModel.status == .idle }
 
-        XCTAssertEqual(context.output.currentFocusAttemptedTexts, [transcript])
+        XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
         XCTAssertEqual(context.output.currentFocusInsertedTexts, [])
-        XCTAssertEqual(context.output.copiedTexts, [transcript])
+        XCTAssertEqual(context.output.copiedTexts, [])
         XCTAssertEqual(context.output.syntheticInputCallCount, 0)
-        XCTAssertEqual(context.overlayPresenter.lastCompletionFeedback, .manualRecoveryCopied)
+        XCTAssertNil(context.overlayPresenter.lastCompletionFeedback)
         XCTAssertFalse(
             context.overlayPresenter.visibleStatus?.text.contains(transcript) == true,
             "recovery feedback must remain fixed and transcript-free"
         )
     }
 
-    func test_unboundCurrentFocusSecurityRejectionDoesNotCopyOrPostSyntheticInput() async {
+    func test_unboundReleaseDoesNotReachSecurityRejectedOneShotOrCopy() async {
         let transcript = "PRIVATE_SECURE_FINAL"
         let context = makeContext(
             capability: .accessibilityUnavailable,
@@ -220,14 +221,14 @@ final class StreamingMainViewModelTests: XCTestCase {
         context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
         await waitUntil { context.viewModel.status == .idle }
 
-        XCTAssertEqual(context.output.currentFocusAttemptedTexts, [transcript])
+        XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
         XCTAssertEqual(context.output.currentFocusInsertedTexts, [])
         XCTAssertEqual(context.output.copiedTexts, [])
         XCTAssertEqual(context.output.syntheticInputCallCount, 0)
         XCTAssertNotEqual(context.overlayPresenter.lastCompletionFeedback, .manualRecoveryCopied)
     }
 
-    func test_liveModeReplacesPartialAndFinalOnCapturedElementOnly() async throws {
+    func test_liveModeOffersHeldFrontierOnCapturedElementAndReleaseOnlyCloses() async throws {
         let context = makeContext(
             capability: .live,
             packetEvents: [.partial("PRIVATE_PARTIAL")],
@@ -243,7 +244,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
         await waitUntil { await context.session.finishCallCount == 1 }
 
-        XCTAssertEqual(context.accessibility.setSelectedTextCalls, ["PRIVATE_PARTIAL", "PRIVATE_FINAL"])
+        XCTAssertEqual(context.accessibility.setSelectedTextCalls, ["PRIVATE_PARTIAL"])
         XCTAssertEqual(context.accessibility.captureCount, 1)
         XCTAssertEqual(context.output.insertedTexts, [])
         XCTAssertEqual(context.output.copiedTexts, [])
@@ -309,7 +310,8 @@ final class StreamingMainViewModelTests: XCTestCase {
         await waitUntil { await context.transport.finishCallCount == 1 }
 
         XCTAssertEqual(context.appendSession.finalizeCallCount, 1)
-        XCTAssertEqual(context.appendSession.finalTexts, ["PRIVATE_PARTIAL"])
+        XCTAssertEqual(context.appendSession.finalTexts, [nil])
+        XCTAssertEqual(context.appendSession.lastAcceptedTexts, ["PRIVATE_PARTIAL"])
         XCTAssertEqual(context.output.insertedTexts, [])
         XCTAssertEqual(context.output.copiedTexts, [])
         XCTAssertEqual(context.accessibility.setSelectedTextCalls, [])
@@ -343,7 +345,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         await context.viewModel.resetService()
     }
 
-    func test_finalOnlyActionCapableControlCharactersDowngradeToCopyOnly() async {
+    func test_finalOnlyActionCapableControlCharactersNeverOutputOrCopyAtRelease() async {
         let unsafeFinals = [
             "safe text\r",
             "safe text\n",
@@ -366,15 +368,12 @@ final class StreamingMainViewModelTests: XCTestCase {
 
             XCTAssertEqual(context.output.insertedTexts, [])
             XCTAssertEqual(context.output.syntheticInputCallCount, 0)
-            XCTAssertEqual(
-                context.output.copiedTexts,
-                [unsafeFinal],
-                "action-capable control characters must require manual recovery"
-            )
+            XCTAssertEqual(context.output.copiedTexts, [])
+            XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
         }
     }
 
-    func test_finalOnlyDeliveryRechecksCapturedDestinationAfterSafePlainTextInsertion() async {
+    func test_finalOnlyReleaseDoesNotAttemptInsertionOrDestinationRecheck() async {
         let context = makeContext(
             capability: .finalOnly,
             packetEvents: [.partial("safe partial")],
@@ -389,26 +388,15 @@ final class StreamingMainViewModelTests: XCTestCase {
         context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
         await waitUntil { context.viewModel.status == .idle }
 
-        XCTAssertEqual(
-            context.output.insertedTexts,
-            ["safe plain final"],
-            "D-25-01 retains automatic fallback for safe plain text"
-        )
-        XCTAssertEqual(context.output.destinationProcessIdentifiers, [42])
-        XCTAssertEqual(
-            context.output.copiedTexts,
-            ["safe plain final"],
-            "an uncertain post-delivery destination must retain manual recovery"
-        )
-        XCTAssertGreaterThanOrEqual(
-            context.accessibility.frontmostProcessQueryCount,
-            2,
-            "the destination must be rechecked after the delivery attempt"
-        )
-        XCTAssertGreaterThanOrEqual(context.accessibility.focusedElementQueryCount, 2)
+        XCTAssertEqual(context.output.insertedTexts, [])
+        XCTAssertEqual(context.output.destinationProcessIdentifiers, [])
+        XCTAssertEqual(context.output.copiedTexts, [])
+        XCTAssertEqual(context.output.syntheticInputCallCount, 0)
+        XCTAssertEqual(context.accessibility.frontmostProcessQueryCount, 0)
+        XCTAssertEqual(context.accessibility.focusedElementQueryCount, 0)
     }
 
-    func test_finalOnlySecurityRecheckFailsClosedBeforeAnyOutput() async {
+    func test_finalOnlySecurityChangesDoNotReopenReleaseOutput() async {
         enum SecurityChange {
             case secure
             case unverifiable
@@ -473,6 +461,52 @@ final class StreamingMainViewModelTests: XCTestCase {
         XCTAssertEqual(ordinary.output.copiedTexts, [])
     }
 
+    func test_autoInsertFalseUsableHeldResponseThenNonemptyActionTwoCompletesWithoutOutputOrFeedback() async {
+        let context = makeContext(
+            capability: .live,
+            autoInsert: false,
+            packetEvents: [.partial("USABLE_HELD_RESPONSE")],
+            finishEvent: .final("NONEMPTY_ACTION_TWO")
+        )
+        let surface = RenderedStatusSurface(viewModel: context.viewModel)
+        let identity = StreamingSessionIdentity(generation: 408)
+
+        await runOnePacketInteraction(context, identity: identity)
+        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        await waitUntil { context.viewModel.activeSessionIdentityForTesting == nil }
+
+        let providerCallCount = await context.provider.makeSessionCallCount
+        let sendCallCount = await context.session.sendCallCount
+        let finishCallCount = await context.session.finishCallCount
+        let cancelCallCount = await context.session.cancelCallCount
+        XCTAssertEqual(providerCallCount, 1)
+        XCTAssertEqual(sendCallCount, 1)
+        XCTAssertEqual(finishCallCount, 1)
+        XCTAssertEqual(cancelCallCount, 0)
+        XCTAssertEqual(context.recorder.startStreamingCallCount, 1)
+        XCTAssertEqual(context.recorder.stopStreamingCallCount, 1)
+        XCTAssertEqual(context.viewModel.status, .idle)
+
+        context.viewModel.handleStreamingEventForTesting(.partial("LATE_PARTIAL"), identity: identity)
+        context.viewModel.handleStreamingEventForTesting(.final("LATE_FINAL"), identity: identity)
+        await settle()
+
+        XCTAssertEqual(context.accessibility.setSelectedTextCalls, [])
+        XCTAssertEqual(context.accessibility.rangeText, "")
+        XCTAssertEqual(context.output.insertedTexts, [])
+        XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
+        XCTAssertEqual(context.output.currentFocusInsertedTexts, [])
+        XCTAssertEqual(context.output.copiedTexts, [])
+        XCTAssertEqual(context.output.syntheticInputCallCount, 0)
+        XCTAssertEqual(context.overlayPresenter.completionFeedbacks, [])
+        XCTAssertNil(context.overlayPresenter.lastCompletionFeedback)
+        XCTAssertNil(context.viewModel.overlayMessage)
+        XCTAssertFalse(surface.states.contains(where: isError))
+        XCTAssertFalse(surface.states.contains(.emptyFinalPreservedPartial))
+        XCTAssertFalse(surface.states.contains(.provisionalOutputPreserved))
+        XCTAssertFalse(surface.states.contains(.manualRecoveryCopied))
+    }
+
     func test_releaseAndDurationCapRaceStopsAndFinishesExactlyOnce() async {
         let context = makeContext(
             capability: .finalOnly,
@@ -491,7 +525,8 @@ final class StreamingMainViewModelTests: XCTestCase {
         XCTAssertEqual(context.recorder.stopStreamingCallCount, 1)
         let finishCallCount = await context.session.finishCallCount
         XCTAssertEqual(finishCallCount, 1)
-        XCTAssertEqual(context.output.insertedTexts, ["final"])
+        XCTAssertEqual(context.output.insertedTexts, [])
+        XCTAssertEqual(context.output.syntheticInputCallCount, 0)
     }
 
     func test_emptyFinalAndStreamFailurePreserveVerifiedPartial() async {
@@ -522,7 +557,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         }
     }
 
-    func test_staleCopyAndEmptyFinalPublishTranscriptFreeFeedbackOnRenderedStatusSurface() async {
+    func test_staleReleaseAndEmptyFinalNeverCopyAndKeepFeedbackTranscriptFree() async {
         let stale = makeContext(
             capability: .finalOnly,
             packetEvents: [.partial("PRIVATE_STALE_PARTIAL")],
@@ -535,11 +570,9 @@ final class StreamingMainViewModelTests: XCTestCase {
         stale.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: staleIdentity))
         await waitUntil { stale.viewModel.status == .idle }
 
-        XCTAssertEqual(stale.output.copiedTexts, ["PRIVATE_STALE_FINAL"])
-        assertContainsFixedFeedback(
-            staleSurface,
-            excludingTranscript: "PRIVATE_STALE_FINAL"
-        )
+        XCTAssertEqual(stale.output.copiedTexts, [])
+        XCTAssertEqual(stale.overlayPresenter.completionFeedbacks, [])
+        XCTAssertFalse(staleSurface.states.contains(where: isError))
 
         let empty = makeContext(
             capability: .live,
@@ -554,13 +587,14 @@ final class StreamingMainViewModelTests: XCTestCase {
         await waitUntil { empty.viewModel.status == .idle }
 
         XCTAssertEqual(empty.accessibility.rangeText, "PRIVATE_VISIBLE_PARTIAL")
-        assertContainsFixedFeedback(
-            emptySurface,
-            excludingTranscript: "PRIVATE_VISIBLE_PARTIAL"
+        XCTAssertFalse(
+            emptySurface.states.contains { $0.text.contains("PRIVATE_VISIBLE_PARTIAL") },
+            "release-only finalization must not expose the held frontier in feedback"
         )
+        XCTAssertNil(empty.overlayPresenter.lastCompletionFeedback)
     }
 
-    func test_completionFeedbackRemainsActuallyPresentedForBoundedReadableIntervalWhileStateReturnsIdle() async throws {
+    func test_noOwnerCompletionFeedbackIsBoundedWhileHeldOwnerNeedsNoReleaseFeedback() async throws {
         let stale = makeContext(
             capability: .finalOnly,
             packetEvents: [.partial("PRIVATE_STALE_PARTIAL")],
@@ -572,11 +606,9 @@ final class StreamingMainViewModelTests: XCTestCase {
         stale.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: staleIdentity))
         await waitUntil { stale.viewModel.status == .idle }
 
-        try assertActuallyPresentedCompletionFeedback(
-            stale.overlayPresenter,
-            expected: .manualRecoveryCopied,
-            excludingTranscript: "PRIVATE_STALE_FINAL"
-        )
+        XCTAssertEqual(stale.overlayPresenter.completionFeedbacks, [])
+        XCTAssertNil(stale.overlayPresenter.lastCompletionFeedback)
+        XCTAssertNil(stale.overlayPresenter.visibleStatus)
 
         let empty = makeContext(
             capability: .live,
@@ -589,11 +621,9 @@ final class StreamingMainViewModelTests: XCTestCase {
         empty.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: emptyIdentity))
         await waitUntil { empty.viewModel.status == .idle }
 
-        try assertActuallyPresentedCompletionFeedback(
-            empty.overlayPresenter,
-            expected: .emptyFinalPreservedPartial,
-            excludingTranscript: "PRIVATE_VISIBLE_PARTIAL"
-        )
+        XCTAssertNil(empty.overlayPresenter.lastCompletionFeedback)
+        XCTAssertNil(empty.overlayPresenter.visibleStatus)
+        XCTAssertFalse(visibleFeedback(empty.viewModel).contains("PRIVATE_VISIBLE_PARTIAL"))
     }
 
     func test_resetSleepAndWakeInvalidateGenerationBeforeRecorderAndTransportCleanup() async {
@@ -908,8 +938,12 @@ final class StreamingMainViewModelTests: XCTestCase {
         XCTAssertEqual(replacementPacketFirstBytes, [0x11, 0x22, 0x33])
         XCTAssertEqual(
             context.accessibility.setSelectedTextCalls,
-            ["first frontier", "catch-up frontier", "live frontier"],
-            "replay must suppress historical intermediate output and publish only its frontier"
+            [
+                "first frontier",
+                "first frontiercatch-up frontier",
+                "first frontiercatch-up frontierlive frontier"
+            ],
+            "replay must suppress historical indices and extend the held frontier only for newly owned indices"
         )
         XCTAssertEqual(context.viewModel.activeSessionIdentityForTesting, identity)
         XCTAssertEqual(context.recorder.startStreamingCallCount, 1)
@@ -1007,6 +1041,67 @@ final class StreamingMainViewModelTests: XCTestCase {
         XCTAssertLessThanOrEqual(context.overlayPresenter.completionFeedbacks.count, 1)
     }
 
+    func test_autoInsertFalseUsableHeldResponseThenRecoverableFailureReleasedDuringBackoffCompletesNormally() async {
+        let first = RetryCoordinatorStreamingSession(
+            packetEvents: [.partial("USABLE_HELD_RESPONSE"), .failed(.network)]
+        )
+        let forbiddenSuccessor = RetryCoordinatorStreamingSession(packetEvents: [.partial("LATE")])
+        let sleeper = ControlledCoordinatorRetrySleeper()
+        let context = makeRetryContext(
+            capability: .live,
+            autoInsert: false,
+            sessions: [first, forbiddenSuccessor],
+            sleeper: sleeper
+        )
+        let surface = RenderedStatusSurface(viewModel: context.viewModel)
+        let identity = StreamingSessionIdentity(generation: 409)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await context.provider.makeSessionCallCount == 1 }
+        context.recorder.emit(Data(repeating: 0xB1, count: 6_400))
+        await waitUntil { await first.sendCallCount == 1 }
+        context.recorder.emit(Data(repeating: 0xB2, count: 6_400))
+        await waitUntil { await sleeper.callCount == 1 }
+
+        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        await sleeper.releaseNext()
+        await waitUntil { context.viewModel.activeSessionIdentityForTesting == nil }
+
+        context.viewModel.handleStreamingEventForTesting(.partial("LATE_PARTIAL"), identity: identity)
+        context.viewModel.handleStreamingEventForTesting(.final("LATE_FINAL"), identity: identity)
+        await settle()
+
+        let providerCallCount = await context.provider.makeSessionCallCount
+        let firstSendCallCount = await first.sendCallCount
+        let firstFinishCallCount = await first.finishCallCount
+        let firstCancelCallCount = await first.cancelCallCount
+        let forbiddenSendCallCount = await forbiddenSuccessor.sendCallCount
+        let retryCallCount = await sleeper.callCount
+        let retryDelays = await sleeper.delays
+        XCTAssertEqual(providerCallCount, 1)
+        XCTAssertEqual(firstSendCallCount, 2)
+        XCTAssertEqual(firstFinishCallCount, 0)
+        XCTAssertEqual(firstCancelCallCount, 1)
+        XCTAssertEqual(forbiddenSendCallCount, 0)
+        XCTAssertEqual(retryCallCount, 1)
+        XCTAssertEqual(retryDelays, [250_000_000])
+        XCTAssertEqual(context.recorder.startStreamingCallCount, 1)
+        XCTAssertEqual(context.recorder.stopStreamingCallCount, 1)
+        XCTAssertEqual(context.viewModel.status, .idle)
+        XCTAssertFalse(surface.states.contains(where: isError))
+
+        XCTAssertEqual(context.accessibility.setSelectedTextCalls, [])
+        XCTAssertEqual(context.accessibility.rangeText, "")
+        XCTAssertEqual(context.output.insertedTexts, [])
+        XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
+        XCTAssertEqual(context.output.currentFocusInsertedTexts, [])
+        XCTAssertEqual(context.output.copiedTexts, [])
+        XCTAssertEqual(context.output.syntheticInputCallCount, 0)
+        XCTAssertEqual(context.overlayPresenter.completionFeedbacks, [])
+        XCTAssertNil(context.overlayPresenter.lastCompletionFeedback)
+        XCTAssertNil(context.viewModel.overlayMessage)
+    }
+
     func test_retryAdmissionIsCancelledByResetSecurityAndLifecycleInvalidation() async {
         enum Invalidation: CaseIterable {
             case reset
@@ -1057,7 +1152,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         }
     }
 
-    func test_unboundFirstPartialRebindsOnceAndReplacesOwnedRangeContinuously() async {
+    func test_unboundFirstPartialRebindsOnceAndGrowsOwnedRangeContinuously() async {
         let context = makeContext(
             capability: .accessibilityUnavailable,
             rebindCapability: .live,
@@ -1080,14 +1175,21 @@ final class StreamingMainViewModelTests: XCTestCase {
         XCTAssertEqual(context.accessibility.captureCount, 2)
         XCTAssertEqual(
             context.accessibility.setSelectedTextCalls,
-            ["a longer provisional value", "short", "revised frontier"]
+            [
+                "a longer provisional value",
+                "a longer provisional valueshort",
+                "a longer provisional valueshortrevised frontier"
+            ]
         )
-        XCTAssertEqual(context.accessibility.rangeText, "revised frontier")
+        XCTAssertEqual(context.accessibility.rangeText, "a longer provisional valueshortrevised frontier")
 
         context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
         await waitUntil { await context.session.finishCallCount == 1 }
 
-        XCTAssertEqual(context.accessibility.setSelectedTextCalls.last, "final frontier")
+        XCTAssertEqual(
+            context.accessibility.setSelectedTextCalls.last,
+            "a longer provisional valueshortrevised frontier"
+        )
         XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
         XCTAssertEqual(context.output.currentFocusInsertedTexts, [])
     }
@@ -1122,7 +1224,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         XCTAssertEqual(disabled.output.currentFocusAttemptedTexts, [])
     }
 
-    func test_trulyUnboundModePublishesMonotonicPartialsBeforeRelease() async {
+    func test_trulyUnboundModeConcatenatesEveryLivePacketResponseBeforeRelease() async {
         let context = makeAppendContext(
             autoInsert: true,
             packetEvents: [
@@ -1139,7 +1241,10 @@ final class StreamingMainViewModelTests: XCTestCase {
         context.recorder.emit(Data(repeating: 0x81, count: 19_200))
         await waitUntil { await context.transport.sendCallCount == 3 }
 
-        XCTAssertEqual(context.appendSession.appliedTexts, ["first", "first extension", "first extension"])
+        XCTAssertEqual(
+            context.appendSession.appliedTexts,
+            ["first", "firstfirst extension", "firstfirst extensionfirst extension"]
+        )
         XCTAssertEqual(context.appendSession.appliedSources, ["live", "live", "live"])
         XCTAssertEqual(context.appendFactory.makeSessionCallCount, 1)
         XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
@@ -1152,6 +1257,237 @@ final class StreamingMainViewModelTests: XCTestCase {
         XCTAssertEqual(context.appendSession.finalizeCallCount, 1)
         XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
         XCTAssertEqual(context.output.copiedTexts, [])
+    }
+
+    func test_disjointLivePacketResponsesBuildOneOrderedFrontierWhileFnRemainsHeld() async {
+        let context = makeProductionCapturedAppendContext(
+            route: CoordinatorFinalOnlyRoute(
+                capability: .finalOnly,
+                rebindCapability: nil,
+                generation: 401
+            ),
+            packetEvents: [
+                .partial("one"),
+                .partial("two"),
+                .partial("three")
+            ],
+            finishEvent: .cancelled
+        )
+        let identity = StreamingSessionIdentity(generation: 401)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await context.provider.makeSessionCallCount == 1 }
+        context.recorder.emit(Data(repeating: 0xB1, count: 19_200))
+        await waitUntil { await context.transport.sendCallCount == 3 }
+
+        XCTAssertEqual(
+            context.unicodePoster.requestedTexts,
+            ["one", "two", "three"],
+            "three distinct live journal indices must each advance output once in response order"
+        )
+        XCTAssertEqual(
+            context.unicodePoster.destinationProcessIdentifiers,
+            [42, 42, 42],
+            "response assembly must retain the captured PID for every suffix"
+        )
+        XCTAssertEqual(context.recorder.stopStreamingCallCount, 0, "all advances must occur during the hold")
+        XCTAssertEqual(context.output.syntheticInputCallCount, 0)
+        XCTAssertEqual(context.output.copiedTexts, [])
+
+        await context.viewModel.resetService()
+    }
+
+    func test_equalTextOnDistinctLivePacketIndicesIsOwnedTwice() async {
+        let context = makeAppendContext(
+            autoInsert: true,
+            packetEvents: [.partial("same"), .partial("same")],
+            finishEvent: .cancelled
+        )
+        let identity = StreamingSessionIdentity(generation: 402)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await context.provider.makeSessionCallCount == 1 }
+        context.recorder.emit(Data(repeating: 0xB2, count: 12_800))
+        await waitUntil { await context.transport.sendCallCount == 2 }
+
+        XCTAssertEqual(
+            context.appendSession.appliedTexts,
+            ["same", "samesame"],
+            "string equality is not response identity; each new journal index extends the local frontier"
+        )
+        XCTAssertEqual(context.appendSession.appliedSources, ["live", "live"])
+
+        await context.viewModel.resetService()
+    }
+
+    func test_retryOwnsOnlyThePreviouslyFailedJournalIndexAndNeverReownsHistory() async {
+        let first = RetryCoordinatorStreamingSession(
+            packetEvents: [.partial("same"), .failed(.network)]
+        )
+        let replacement = RetryCoordinatorStreamingSession(
+            packetEvents: [
+                .partial("changed historical replay"),
+                .partial("same"),
+                .failed(.network)
+            ]
+        )
+        let secondReplacement = RetryCoordinatorStreamingSession(
+            packetEvents: [
+                .partial("second historical replay"),
+                .partial("changed already-owned replay frontier"),
+                .partial("tail")
+            ]
+        )
+        let sleeper = ControlledCoordinatorRetrySleeper()
+        let context = makeAppendRetryContext(
+            sessions: [first, replacement, secondReplacement],
+            sleeper: sleeper
+        )
+        let identity = StreamingSessionIdentity(generation: 403)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await context.provider.makeSessionCallCount == 1 }
+        context.recorder.emit(Data(repeating: 0xB3, count: 12_800))
+        await waitUntil { await sleeper.callCount == 1 }
+
+        XCTAssertEqual(context.appendSession.appliedTexts, ["same"])
+
+        await sleeper.releaseNext()
+        await waitUntil { await replacement.sendCallCount == 2 }
+
+        XCTAssertEqual(
+            context.appendSession.appliedTexts,
+            ["same", "samesame"],
+            "historical index 0 must remain owned while the formerly failed index 1 is admitted exactly once"
+        )
+        XCTAssertEqual(context.appendSession.appliedSources, ["live", "replay"])
+
+        context.recorder.emit(Data(repeating: 0xB4, count: 6_400))
+        await waitUntil { await sleeper.callCount == 2 }
+        await sleeper.releaseNext()
+        await waitUntil { await secondReplacement.sendCallCount == 3 }
+        XCTAssertEqual(context.appendSession.appliedTexts, ["same", "samesame", "samesametail"])
+        XCTAssertEqual(
+            context.appendSession.appliedSources,
+            ["live", "replay", "replay"],
+            "an index first owned during replay must become historical on every later replay"
+        )
+
+        await context.viewModel.resetService()
+    }
+
+    func test_liveAXOwnerReceivesGrowingFrontiersForDisjointPacketResponses() async {
+        let context = makeContext(
+            capability: .live,
+            packetEvents: [.partial("one"), .partial("two"), .partial("three")],
+            finishEvent: .cancelled
+        )
+        let identity = StreamingSessionIdentity(generation: 404)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await context.provider.makeSessionCallCount == 1 }
+        context.recorder.emit(Data(repeating: 0xB5, count: 19_200))
+        await waitUntil { await context.session.sendCallCount == 3 }
+
+        XCTAssertEqual(
+            context.accessibility.setSelectedTextCalls,
+            ["one", "onetwo", "onetwothree"],
+            "the exact captured AX range must receive the coordinator's locally growing frontier"
+        )
+        XCTAssertEqual(context.output.syntheticInputCallCount, 0)
+        XCTAssertEqual(context.output.copiedTexts, [])
+
+        await context.viewModel.resetService()
+    }
+
+    func test_ineligibleEventsNeverAdvanceOrReserveTheResponseFrontier() async {
+        let unsafe = "unsafe\u{001B}"
+        let context = makeProductionCapturedAppendContext(
+            route: CoordinatorFinalOnlyRoute(
+                capability: .finalOnly,
+                rebindCapability: nil,
+                generation: 405
+            ),
+            packetEvents: [.partial(" \n "), .partial(unsafe), .partial("safe")],
+            finishEvent: .cancelled
+        )
+        let identity = StreamingSessionIdentity(generation: 405)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await context.provider.makeSessionCallCount == 1 }
+        context.recorder.emit(Data(repeating: 0xB6, count: 19_200))
+        await waitUntil { await context.transport.sendCallCount == 3 }
+
+        XCTAssertEqual(
+            context.unicodePoster.requestedTexts,
+            ["safe"],
+            "contentless and unsafe packet responses must not advance or contaminate the assembled frontier"
+        )
+
+        context.viewModel.handleStreamingEventForTesting(
+            .partial("stale"),
+            identity: StreamingSessionIdentity(generation: 9_405)
+        )
+        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        context.viewModel.handleStreamingEventForTesting(.partial("sealed"), identity: identity)
+        context.viewModel.handleStreamingEventForTesting(.final("late final"), identity: identity)
+        await waitUntil { context.viewModel.status == .idle }
+
+        XCTAssertEqual(context.unicodePoster.requestedTexts, ["safe"])
+        XCTAssertEqual(context.unicodePoster.destinationProcessIdentifiers, [42])
+        XCTAssertEqual(context.output.syntheticInputCallCount, 0)
+        XCTAssertEqual(context.output.copiedTexts, [])
+    }
+
+    func test_releaseActionTwoCannotCreateFirstOutputOrAppendToOwnedFrontier() async {
+        let scenarios = [
+            ReleaseAdmissionScenario(
+                generation: 406,
+                partial: " \n ",
+                final: "terminal first output",
+                expected: []
+            ),
+            ReleaseAdmissionScenario(
+                generation: 407,
+                partial: "seed",
+                final: "seed terminal suffix",
+                expected: ["seed"]
+            )
+        ]
+
+        for scenario in scenarios {
+            let context = makeProductionCapturedAppendContext(
+                route: CoordinatorFinalOnlyRoute(
+                    capability: .finalOnly,
+                    rebindCapability: nil,
+                    generation: scenario.generation
+                ),
+                packetEvents: [.partial(scenario.partial)],
+                finishEvent: .final(scenario.final)
+            )
+            let identity = StreamingSessionIdentity(generation: scenario.generation)
+
+            context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+            await waitUntil { await context.provider.makeSessionCallCount == 1 }
+            context.recorder.emit(Data(repeating: 0xB7, count: 6_400))
+            await waitUntil { await context.transport.sendCallCount == 1 }
+            context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+            context.viewModel.handleStreamingEventForTesting(.partial("late packet"), identity: identity)
+            context.viewModel.handleStreamingEventForTesting(.final("late final"), identity: identity)
+            await waitUntil { context.viewModel.status == .idle }
+
+            XCTAssertEqual(
+                context.unicodePoster.requestedTexts,
+                scenario.expected,
+                "release must only close the existing owner; action 2 and late events cannot acquire output ownership"
+            )
+            XCTAssertEqual(
+                context.unicodePoster.destinationProcessIdentifiers,
+                Array(repeating: pid_t(42), count: scenario.expected.count)
+            )
+            XCTAssertEqual(context.output.syntheticInputCallCount, 0)
+            XCTAssertEqual(context.output.copiedTexts, [])
+        }
     }
 
     func test_unboundRetryKeepsAppendOwnershipAndPublishesOnlyReplayFrontier() async {
@@ -1180,7 +1516,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         await waitUntil { await replacement.sendCallCount == 2 }
 
         XCTAssertEqual(context.appendFactory.makeSessionCallCount, 1)
-        XCTAssertEqual(context.appendSession.appliedTexts, ["prefix", "prefix extension"])
+        XCTAssertEqual(context.appendSession.appliedTexts, ["prefix", "prefixprefix extension"])
         XCTAssertEqual(context.appendSession.appliedSources, ["live", "replay"])
         XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
         XCTAssertEqual(context.output.copiedTexts, [])
@@ -1216,7 +1552,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         XCTAssertEqual(context.appendFactory.makeSessionCallCount, 1)
         XCTAssertEqual(
             context.appendSession.appliedTexts,
-            ["captured prefix", "captured prefix extension"]
+            ["captured prefix", "captured prefixcaptured prefix extension"]
         )
         XCTAssertEqual(context.appendSession.appliedSources, ["live", "replay"])
         XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
@@ -1241,7 +1577,8 @@ final class StreamingMainViewModelTests: XCTestCase {
             await waitUntil { await context.transport.finishCallCount == 1 }
 
             XCTAssertEqual(context.appendSession.finalizeCallCount, 1)
-            XCTAssertEqual(context.appendSession.finalTexts, [finalText])
+            XCTAssertEqual(context.appendSession.finalTexts, [nil])
+            XCTAssertEqual(context.appendSession.lastAcceptedTexts, ["attempted realtime"])
             XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
             XCTAssertEqual(context.output.insertedTexts, [])
             XCTAssertEqual(context.output.copiedTexts, [])
@@ -1333,12 +1670,12 @@ final class StreamingMainViewModelTests: XCTestCase {
         let finalProviderCallCount = await context.provider.makeSessionCallCount
         XCTAssertEqual(finalCancelCallCount, 1)
         XCTAssertEqual(finalProviderCallCount, 2, "release closes retry admission permanently")
-        XCTAssertEqual(context.output.insertedTexts, ["journal frontier"])
+        XCTAssertEqual(context.output.insertedTexts, [])
         XCTAssertFalse(surface.states.contains(where: isError))
         await context.viewModel.resetService()
     }
 
-    func test_recoverableFinishReturnOrThrowAfterSealCancelsOnceAndPreservesPartial() async {
+    func test_recoverableFinishAfterSealCancelsOnceWithoutReleaseTimeFallback() async {
         for (offset, finishOutcome) in [
             ReviewPacketOutcome.event(.failed(.network)),
             .failure(.network)
@@ -1365,13 +1702,14 @@ final class StreamingMainViewModelTests: XCTestCase {
             await waitUntil { await session.sendCallCount == 1 }
             context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
             await waitUntil { await session.finishCallCount == 1 }
-            await waitUntil { context.viewModel.status == .idle }
+            await waitUntil { context.viewModel.activeSessionIdentityForTesting == nil }
 
             let cancelCallCount = await session.cancelCallCount
             let sleeperCallCount = await sleeper.callCount
             XCTAssertEqual(cancelCallCount, 1)
             XCTAssertEqual(sleeperCallCount, 0)
-            XCTAssertEqual(context.output.insertedTexts, ["last usable partial"])
+            XCTAssertEqual(context.output.insertedTexts, [])
+            XCTAssertEqual(context.viewModel.status, .idle)
             XCTAssertNil(context.viewModel.activeSessionIdentityForTesting)
         }
     }
@@ -1448,7 +1786,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         await context.viewModel.resetService()
     }
 
-    func test_appendFactoryMissRoutesRetainedValueThroughCurrentFocusAfterRecoverableFinishFailure() async {
+    func test_appendFactoryMissNeverRoutesRetainedValueAfterRelease() async {
         let retainedValue = "retained unbound value"
         let session = ReviewControllableStreamingSession(
             packetOutcomes: [.event(.partial(retainedValue))],
@@ -1478,10 +1816,10 @@ final class StreamingMainViewModelTests: XCTestCase {
         context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
         await waitUntil { context.viewModel.activeSessionIdentityForTesting == nil }
 
-        XCTAssertEqual(context.output.currentFocusAttemptedTexts, [retainedValue])
-        XCTAssertEqual(context.output.currentFocusInsertedTexts, [retainedValue])
+        XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
+        XCTAssertEqual(context.output.currentFocusInsertedTexts, [])
         XCTAssertEqual(context.output.copiedTexts, [])
-        XCTAssertEqual(context.output.syntheticInputCallCount, 1)
+        XCTAssertEqual(context.output.syntheticInputCallCount, 0)
         XCTAssertFalse(surface.states.contains(where: isError))
     }
 
@@ -1843,7 +2181,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         XCTAssertEqual(context.viewModel.status, .idle)
     }
 
-    func test_contentlessUpdatesRetainLastNonemptyValueForFinalOnlyRecovery() async {
+    func test_contentlessUpdatesNeverEnableFinalOnlyReleaseFallback() async {
         let session = ReviewControllableStreamingSession(
             packetOutcomes: [
                 .event(.partial("last usable value")),
@@ -1864,13 +2202,14 @@ final class StreamingMainViewModelTests: XCTestCase {
         await waitUntil { await session.isHoldingSend }
         context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
         await session.releaseHeldIfNeeded()
-        await waitUntil { context.viewModel.status == .idle }
+        await waitUntil { context.viewModel.activeSessionIdentityForTesting == nil }
 
-        XCTAssertEqual(context.output.insertedTexts, ["last usable value"])
+        XCTAssertEqual(context.output.insertedTexts, [])
         XCTAssertEqual(context.output.copiedTexts, [])
+        XCTAssertEqual(context.viewModel.status, .idle)
     }
 
-    func test_emptyFinalRetainsLastNonemptyValueForFinalOnlyAndAppendRecovery() async {
+    func test_emptyFinalNeverCreatesFinalOnlyOutputAndClosesAppendOwnerWithHeldFrontier() async {
         let finalOnly = makeContext(
             capability: .finalOnly,
             packetEvents: [.partial("last usable final-only"), .partial(" \n ")],
@@ -1884,7 +2223,8 @@ final class StreamingMainViewModelTests: XCTestCase {
         finalOnly.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: finalOnlyIdentity))
         await waitUntil { finalOnly.viewModel.status == .idle }
 
-        XCTAssertEqual(finalOnly.output.insertedTexts, ["last usable final-only"])
+        XCTAssertEqual(finalOnly.output.insertedTexts, [])
+        XCTAssertEqual(finalOnly.output.copiedTexts, [])
 
         let append = makeAppendContext(
             autoInsert: true,
@@ -1964,13 +2304,14 @@ final class StreamingMainViewModelTests: XCTestCase {
         await waitUntil { context.viewModel.status == .idle }
 
         XCTAssertEqual(context.appendSession.finalizeCallCount, 1)
-        XCTAssertEqual(context.appendSession.finalTexts, ["provisional suffix"])
+        XCTAssertEqual(context.appendSession.finalTexts, [nil])
+        XCTAssertEqual(context.appendSession.lastAcceptedTexts, ["provisional"])
         XCTAssertEqual(context.output.insertedTexts, [])
         XCTAssertEqual(context.output.copiedTexts, [])
-        XCTAssertEqual(context.output.syntheticInputCallCount, 0, "release must only seal/append the suffix")
+        XCTAssertEqual(context.output.syntheticInputCallCount, 0, "release must only close the existing owner")
     }
 
-    func test_initialAndReboundFinalOnlyUnsafeZeroPostCopiesOnceWithFixedFeedback() async {
+    func test_initialAndReboundFinalOnlyUnsafeResponseNeverPostsOrCopies() async {
         let unsafeText = "PRIVATE_UNSAFE\u{001B}"
         let routes: [CoordinatorFinalOnlyRoute] = [
             CoordinatorFinalOnlyRoute(capability: .finalOnly, rebindCapability: nil, generation: 302),
@@ -1981,7 +2322,7 @@ final class StreamingMainViewModelTests: XCTestCase {
             )
         ]
 
-        for route in routes {
+        for (routeIndex, route) in routes.enumerated() {
             let context = makeAppendContext(
                 capability: route.capability,
                 autoInsert: true,
@@ -1998,7 +2339,7 @@ final class StreamingMainViewModelTests: XCTestCase {
             context.recorder.emit(Data(repeating: 0xA7, count: 6_400))
             await waitUntil { await context.transport.sendCallCount == 1 }
 
-            XCTAssertEqual(context.appendSession.appliedTexts, [unsafeText])
+            XCTAssertEqual(context.appendSession.appliedTexts, [])
             XCTAssertEqual(context.appendSession.postAttemptCount, 0)
             XCTAssertEqual(context.output.syntheticInputCallCount, 0)
             XCTAssertEqual(context.output.copiedTexts, [])
@@ -2006,18 +2347,22 @@ final class StreamingMainViewModelTests: XCTestCase {
             context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
             await waitUntil { context.viewModel.status == .idle }
 
-            XCTAssertEqual(context.appendSession.finalizeCallCount, 1)
-            XCTAssertEqual(context.output.copiedTexts, [unsafeText])
+            XCTAssertEqual(
+                context.appendSession.finalizeCallCount,
+                routeIndex == 0 ? 1 : 0,
+                "an unsafe first response cannot arm a rebound owner, while an initially captured owner only closes"
+            )
+            XCTAssertEqual(context.output.copiedTexts, [])
             XCTAssertEqual(context.output.syntheticInputCallCount, 0)
             XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
-            XCTAssertEqual(context.overlayPresenter.completionFeedbacks, [.manualRecoveryCopied])
+            XCTAssertEqual(context.overlayPresenter.completionFeedbacks, [])
             XCTAssertFalse(
                 context.overlayPresenter.completionFeedbacks.first?.text.contains(unsafeText) == true
             )
         }
     }
 
-    func test_productionInitialAndReboundUnsafeZeroPostStableCapturedTargetCopiesExactlyOnce() async {
+    func test_productionInitialAndReboundUnsafeResponseNeverPostsOrCopies() async {
         let unsafeText = "PRIVATE_PRODUCTION_UNSAFE\u{001B}"
         let routes = productionCapturedRoutes(startingGeneration: 311)
 
@@ -2041,10 +2386,10 @@ final class StreamingMainViewModelTests: XCTestCase {
             await waitUntil { context.viewModel.status == .idle }
 
             XCTAssertEqual(context.unicodePoster.requestedTexts, [])
-            XCTAssertEqual(context.output.copiedTexts, [unsafeText])
+            XCTAssertEqual(context.output.copiedTexts, [])
             XCTAssertEqual(context.output.syntheticInputCallCount, 0)
             XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
-            XCTAssertEqual(context.overlayPresenter.completionFeedbacks, [.manualRecoveryCopied])
+            XCTAssertEqual(context.overlayPresenter.completionFeedbacks, [])
         }
     }
 
@@ -2134,7 +2479,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         }
     }
 
-    func test_initialAndReboundFinalOnlyFactoryMissKeepsOneShotFallbackUntilRelease() async {
+    func test_initialAndReboundFinalOnlyFactoryMissNeverFallsBackAtRelease() async {
         let routes: [CoordinatorFinalOnlyRoute] = [
             CoordinatorFinalOnlyRoute(capability: .finalOnly, rebindCapability: nil, generation: 306),
             CoordinatorFinalOnlyRoute(
@@ -2166,8 +2511,8 @@ final class StreamingMainViewModelTests: XCTestCase {
             context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
             await waitUntil { context.viewModel.status == .idle }
 
-            XCTAssertEqual(context.output.insertedTexts, ["retained final"])
-            XCTAssertEqual(context.output.syntheticInputCallCount, 1)
+            XCTAssertEqual(context.output.insertedTexts, [])
+            XCTAssertEqual(context.output.syntheticInputCallCount, 0)
             XCTAssertEqual(context.output.copiedTexts, [])
         }
     }
@@ -2196,7 +2541,8 @@ final class StreamingMainViewModelTests: XCTestCase {
 
         XCTAssertEqual(context.appendSession.appliedTexts, ["visible"])
         XCTAssertEqual(context.appendSession.finalizeCallCount, 1)
-        XCTAssertEqual(context.appendSession.finalTexts, ["visible final"])
+        XCTAssertEqual(context.appendSession.finalTexts, [nil])
+        XCTAssertEqual(context.appendSession.lastAcceptedTexts, ["visible"])
         XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
         XCTAssertEqual(context.output.insertedTexts, [])
         XCTAssertEqual(context.output.copiedTexts, [])
@@ -2290,7 +2636,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         }
     }
 
-    func test_appendNoUsableTextAfterSealedRecoveryPublishesOneFixedStreamError() async {
+    func test_appendNoUsableTerminalTextAfterSealedRecoveryClosesExistingOwner() async {
         let transcript = "PRIVATE_NO_USABLE"
         let context = makeAppendContext(
             autoInsert: true,
@@ -2309,8 +2655,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         await waitUntil { context.viewModel.activeSessionIdentityForTesting == nil }
 
         let errorStates = surface.states.filter(isError)
-        XCTAssertEqual(errorStates.count, 1)
-        XCTAssertFalse(errorStates.first?.text.contains(transcript) == true)
+        XCTAssertEqual(errorStates.count, 0)
         XCTAssertEqual(context.overlayPresenter.completionFeedbacks.count, 0)
         XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
         XCTAssertEqual(context.output.insertedTexts, [])
@@ -2370,6 +2715,7 @@ final class StreamingMainViewModelTests: XCTestCase {
 
     private func makeRetryContext(
         capability: CoordinatorAccessibilityClient.Capability,
+        autoInsert: Bool = true,
         factoryErrors: [FeishuAPIService.APIError] = [],
         sessions: [any SpeechStreamingSession],
         sleeper: ControlledCoordinatorRetrySleeper
@@ -2387,7 +2733,7 @@ final class StreamingMainViewModelTests: XCTestCase {
             settings: AppSettings(
                 appId: "configured-app",
                 appSecret: "configured-secret",
-                autoInsert: true,
+                autoInsert: autoInsert,
                 playSound: false
             ),
             hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
@@ -2778,6 +3124,13 @@ private struct CoordinatorFinalOnlyRoute {
     let capability: CoordinatorAccessibilityClient.Capability
     let rebindCapability: CoordinatorAccessibilityClient.Capability?
     let generation: UInt64
+}
+
+private struct ReleaseAdmissionScenario {
+    let generation: UInt64
+    let partial: String
+    let final: String
+    let expected: [String]
 }
 
 private enum ProductionCapturedDriftScenario: String, CaseIterable {

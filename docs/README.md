@@ -2,9 +2,9 @@
 
 - [Architecture](architecture.md)
 - [API](api.md)
-- [Cursor-bound streaming speech implementation and design](streaming-speech-design.md) — issue #26 已实现本地韧性重试、回放与按键期间连续输出；安装版 owner UAT 仍待继续
+- [Cursor-bound streaming speech implementation and design](streaming-speech-design.md) — issue #26 已实现 journal-indexed held frontier、精确一次回放所有权与 release-only sealing；安装版 Release owner UAT 仍待继续
 - [Conventions](conventions.md)
 - [Decisions](decisions/)
-  - [D-25-01: Cursor-bound streaming speech contract](decisions/D-25-01.md)
-  - [D-26-01: Resilient Fn hold and guarded continuous current-focus output](decisions/D-26-01.md)
+  - [D-25-01: Cursor-bound streaming speech contract](decisions/D-25-01.md) — 历史合同；冲突处由 D-26-01 取代
+  - [D-26-01: Journal-indexed held-response output](decisions/D-26-01.md) — 当前 issue #26 输出合同
 - [Changelog](../CHANGELOG.md)

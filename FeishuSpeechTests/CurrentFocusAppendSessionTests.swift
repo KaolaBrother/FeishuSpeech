@@ -69,6 +69,38 @@ final class CurrentFocusAppendSessionTests: XCTestCase {
         )
     }
 
+    func test_coordinatorAssembledGrowingFrontiersPostOnlyEachNewUTF16Suffix() {
+        let context = makeContext()
+        let firstScalar = "one"
+        let secondScalar = "👩🏽‍💻"
+        let thirdScalar = "שלום"
+        let frontiers = [
+            firstScalar,
+            firstScalar + secondScalar,
+            firstScalar + secondScalar + thirdScalar
+        ]
+
+        let outcomes = frontiers.map { frontier in
+            context.session.applyOpaqueHypothesis(
+                frontier,
+                generation: generation,
+                source: .livePacket
+            )
+        }
+
+        XCTAssertEqual(outcomes, [.insertedFirst, .appendedSuffix, .appendedSuffix])
+        assertPosted([firstScalar, secondScalar, thirdScalar], by: context.poster)
+        XCTAssertTrue(
+            context.poster.requestedTexts.joined().utf16.elementsEqual(frontiers.last?.utf16 ?? "".utf16),
+            "the production append owner must receive a locally monotonic frontier and post only new UTF-16 units"
+        )
+        XCTAssertEqual(
+            context.poster.destinationProcessIdentifiers,
+            Array(repeating: boundProcessIdentifier, count: 3),
+            "assembling responses must not weaken the fixed-PID boundary"
+        )
+    }
+
     func test_shorterRevisedAndCanonicallyEquivalentValuesAreSuppressedButLaterExactExtensionAppends() {
         let context = makeContext()
         let decomposed = "cafe\u{301}"

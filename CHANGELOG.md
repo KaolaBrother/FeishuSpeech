@@ -3,11 +3,11 @@
 ## [Unreleased]
 
 ### Added
-- 新增按键内韧性流式会话：可恢复的网络/超时/部分 HTTP 和业务码 `10024` 失败会在 Fn 仍按住时以 250 ms 起步、4 s 封顶的指数退避创建新串行会话；同一录音/入口持续捕获，已录分片通过有序日志从头回放，追上前沿时只发布最新回放假设（issue #26）
-- 无法取得可验证 AX 范围时也支持按键期间的尽力输出：初始捕获或首 partial 重绑定得到的 final-only 目标绑定原 PID 与精确 AX 元素；完全无 AX 目标时绑定当时前台 PID。两者都立即接收 Fn 按住期间的每个可用 partial，只输出首值和严格递增的 UTF-16 后缀；release 只封口/完成，不再触发首次输出（issue #26）
+- 新增按键内韧性流式会话：可恢复的网络/超时/部分 HTTP 和业务码 `10024` 失败会在 Fn 仍按住时以 250 ms 起步、4 s 封顶的指数退避创建新串行会话；同一录音/入口持续捕获，已录分片通过有序 journal 从头回放，已拥有的历史 index 不重复输出（issue #26）
+- 新增 generation-scoped 响应输出 ledger：每个符合条件的 journal packet index 只拥有一次原始标量，并按响应顺序拼接为增长的 UTF-16 frontier。相同、不相交和修订值都会作为不同 index 的本地输出策略拼接，不代表已证明飞书供应商语义（issue #26）
 - 按住 Fn 0.3 秒后进入光标绑定的飞书流式识别：每次交互由唯一 generation 共同拥有录音、精确字节上限且可感知消费进度的音频入口、严格串行的 Feishu session，以及绑定原始 `AXUIElement` 的文字会话；松开 Fn 或达到 60 秒进入 sealing 并只完成一次（issue #26）
-- 支持可验证的实时范围替换和受限 final-only 回退：暂定结果始终整体替换应用拥有的范围；final-only 目标优先升级为按键期间的捕获目标 append owner。仅当连续 writer 无法创建且未发生暂定投递时保留 release-time 一次性输出；仅零投递的捕获 owner 遇到不安全控制字符且原 PID/精确 AX 元素/Secure Input 最终验证通过时，才 copy-only 一次（issue #26）
-- 新增流式音频、录音封口、飞书 action/sequence/cancel/token、光标范围、安全输出、generation 生命周期和完成提示的自动化覆盖；本轮新增的失败流终止、重试/回放/松开竞态、异常终止即时撤权、旧录音屏障、按键级 1,920,000-byte 预算、同 PID UTF-16 后缀与 final-only 按键内输出均纳入完整套件，当前记录为 263 通过、0 失败、0 跳过（issue #26）
+- 已捕获 final-only 和无 AX 目标均在 Fn held 期间接收本地增长 frontier；重放不再重新拥有历史 index，但先前失败的 index 可在首次成功响应时拥有一次（issue #26）
+- 本地不启动应用生命周期的完整 XCTest bundle 记录为 272/272 通过；覆盖响应所有权、回放、release 准入、PID/AX/Secure Input/不确定投递和无重发边界（issue #26）
 - 热键监控状态现在可被观察：新增 `MonitoringState`（`.stopped` / `.active` / `.failed`），菜单栏可实时反映 Event Tap 是否正常运行（issue #5）
 - 安全输入检测：终端、1Password 等程序启用安全键盘时，菜单栏显示橙色提示"安全输入已启用，热键暂不可用"（issue #10）
 - 新增 `FeishuAPIServiceTests` 单元测试目标，覆盖直连 HTTP 解析、token 过期时间和取消重试路径（issues #11/#12/#21）
@@ -15,11 +15,14 @@
 - 新增 `MainViewModelTests` 覆盖 `MonitoringState` 失败映射、恢复清除和 cleanup 订阅释放路径（issues #22/#23/#24）
 
 ### Fixed
+- 修复 build 5 的“只输出一个词”下游停滞：实机日志已证明最新一次 hold 在 13.55 秒内完成 66 个 HTTP-200 transaction，因此本地不再用原始响应字符串的相等/前缀关系决定响应身份，而是以 journal index 所有权拼接 held frontier（issue #26）
+- release 现在在录音、会话排空之前同步关闭响应 ledger 与重试准入。`action=2`、在途包和晚到 partial/final 均不能创建、追加、改写或复制文本；旧的 release-time 一次性/final-only/Cmd+V/手动剪贴板回退已移除（issue #26）
+- 识别可用性与输出资格分离：`autoInsert=false`、不安全文本或无 owner 时，可用 held 识别不再被误报为空结果/流式失败，同时仍保持零输出与零复制（issue #26）
 - 修复 final-only 目标把所有 partial 延迟到 Fn release 的路由：初始与首 partial 重绑定的 final-only 现在会立即建立绑定 PID 的连续 owner，并在每次 mutation 前后复核 live Secure Input、捕获 token 的安全状态、原 PID 与 `CFEqual` 精确 AX 元素。Unicode 输出使用同一 `.privateState` source，先完整构造相同 UTF-16 payload/空 flags 的 key-down 与 key-up，再做最终 Secure Input 采样并相邻 `CGEventPostToPid`；任一构造失败零投递，任一投递尝试或不确定性都永久禁止完整重发、Cmd+V、其他目标或剪贴板回退。完成反馈改为中性、无 transcript 的“不确定/无可用 final”提示（issue #26）
-- 修复“首次识别后持续显示流式失败”的客户端策略：已接受音频的失败会话现在在未成功完成 `action=2` 时尽力发送一次 `action=3`，然后由协调器决定是否使用新会话重试。可恢复失败在 Fn 按住期间不再发布错误状态或系统通知；松开 Fn 会先关闭新重试准入，再完成当前尝试或保留最后可用文本（issue #26）
+- 修复“首次识别后持续显示流式失败”的客户端策略：已接受音频的失败会话现在在未成功完成 `action=2` 时尽力发送一次 `action=3`，然后由协调器决定是否使用新会话重试。可恢复失败在 Fn 按住期间不再发布错误状态或系统通知；松开 Fn 先关闭新重试和响应输出准入，再完成当前尝试（issue #26）
 - 实机证据已将后续失败收窄到 HTTP 200 内的飞书业务码 `10024`：它先出现在一个已接受两包的会话，又出现在新会话的首包。当前飞书公开文档和官方 SDK 未定义 `10024`，因此本地将它列为可恢复是产品韧性策略，不是对限流、包频率、并发配额或未结束流的官方解释（issue #26）
 - 修复真实凭据 UAT 中首个 `action=1` 已获 HTTP 200 后仍立即失败的问题：客户端不再要求 code-zero 响应回显匹配的 `stream_id` / `sequence_id`，也不再把缺少 `data` 视为畸形响应；解析现与 KaolaTerminal 已跑通实现一致，优先接受 `recognition_text`、兼容 `text`，无文本时产生空 partial。非零飞书业务码和无法解码的 JSON 仍使当前传输会话失败；协调器随后根据类型决定在同一 Fn 按键内重试或终止。请求侧 stream identity、action/sequence、首次 token 刷新、generation 安全和隐私诊断边界保持不变（issue #26）
-- 根据首轮 UAT 取消过严的 Accessibility 启动门控：无法捕获或确认 AX 光标/焦点不再阻塞录音和流式识别。当时增加的松开后一次性 current-focus 输出已被本轮的首 partial AX 重绑定与同 PID UTF-16 后缀输出取代；已捕获但不支持范围替换的目标也优先改用绑定原 PID/精确 AX 元素的连续输出，仅在安全 writer 创建失败且尚无暂定投递时保留 final-only 一次性路径。安全拒绝仍不输入、不复制，`autoInsert=false` 仍为零输出（issue #26）
+- 根据首轮 UAT 取消过严的 Accessibility 启动门控：无法捕获或确认 AX 光标/焦点不再阻塞录音和流式识别。已捕获但不支持范围替换的目标使用绑定原 PID/精确 AX 元素的连续 owner，无 AX 目标使用同 PID owner；所有 release-time final-only/一次性/Cmd+V/剪贴板回退已移除。安全拒绝仍不输入、不复制，`autoInsert=false` 仍为零输出（issue #26）
 - 修复第二轮 UAT 中终止性 provider/流式失败反复回灌同一热键错误、导致浮窗隐藏动画永远无法完成的问题：失败会先使 generation 失效并隐藏浮窗，再且仅再清理一次；相同 `HotKeyService` 错误不再重复发布。租户 token 认证失败只显示固定提示“认证失败，请检查应用凭据”，不暴露凭据、识别文本或飞书后端详情（issue #26）
 - 睡眠/唤醒、手动重置、权限变化、录音/网络失败和进程清理现在先使流式 generation 与光标所有权失效，再终止入口、录音、网络任务和计时器；迟到事件不能恢复旧会话或写入新的焦点（issue #26）
 - 音频入口按实际排队和待组包字节精确计数，消费后立即复用容量；停止录音会越过真实音频回调队列屏障后再决定是否保留尾包，溢出显式失败而不丢包或乱序（issue #26）
@@ -63,9 +66,9 @@
 - 移除测试中引用已删除 `.armed` 状态的用例
 
 ### Verification pending
-- 最新安装版 UAT 已证明 token 获取成功，且一个会话的前两个 HTTP-200 音频包被接受；第三个包与随后的新会话返回未定义的业务码 `10024`。新增的失败流 `action=3`、新会话重试/回放、松开 Fn 终止重试，以及按键期间的 AX/同 PID 输出尚未完成安装版 owner UAT，不声明真实端到端成功。
+- 最新 build-5 安装版 UAT 已证明一次 13.55 秒 hold 内有 66 个 HTTP-200 transaction，但可见输出在一个词后停滞；这将故障收窄到传输之后，不能证明响应内容形态或目标接受。新的 journal-index ledger、重放一次所有权、release 禁止输出与隐私安全 receipt 仍需安装版 Release owner UAT，不声明真实端到端成功。
 - `CGEventPostToPid` 没有目标控件接受确认；本地 `.posted` 仅证明完整 PID-bound key-down/key-up pair 已提交，不能证明目标显示了 Unicode 文本。当前修正仍须安装版 owner UAT，若无可见输出应报告 PARTIAL，不能通过全局 HID、重复事件、破坏性编辑或不确定后的剪贴板回退扩展行为。
-- 真实飞书凭据下的后续 action、终止请求空音频编码、`recognition_text` / `text` 实际形态、首次 token 刷新同序列重试、partial/final 语义、PCM/tail 兼容性和慢网行为仍需安装版 Release UAT；这些本地策略不作为飞书保证。
+- 真实飞书凭据下的后续 action、终止请求空音频编码、`recognition_text` / `text` 实际形态、首次 token 刷新同序列重试、PCM/tail 兼容性和慢网行为仍需安装版 Release UAT。飞书和 KaolaTerminal 只暴露不透明的响应标量；累积/delta/revision 关系仍未验证，不把本地拼接策略宣称为供应商保证。
 - TextEdit/原生控件、浏览器、Electron、终端和富文本编辑器的 Accessibility 范围、焦点干扰、Unicode 与 undo 行为仍需跨应用实机 UAT；当前不声明广泛兼容性。
 
 ## [0.3.0] - 2025

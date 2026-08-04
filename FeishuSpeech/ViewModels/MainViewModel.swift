@@ -25,9 +25,102 @@ extension HotKeyService: HotKeyWakeRecovering {}
 
 @MainActor
 class MainViewModel: ObservableObject {
-    private enum AppendManualRecoveryEligibility {
-        case unavailable
-        case capturedZeroPost
+    private struct ResponseOutputLedger {
+        enum ClaimResult {
+            case owned(frontier: String, frontierUTF16Count: Int, rawUTF16Count: Int, shape: String)
+            case historical(frontierUTF16Count: Int, rawUTF16Count: Int, shape: String)
+            case staleGeneration
+            case sealed
+        }
+
+        private(set) var generation: UInt64?
+        private(set) var frontier: String = ""
+        private(set) var isAdmissionOpen = false
+
+        private var frontierUTF16: [UInt16] = []
+        private var ownedPacketIndices = Set<Int>()
+        private var previousEligibleRawUTF16: [UInt16]?
+
+        mutating func begin(generation: UInt64) {
+            self.generation = generation
+            frontier = ""
+            frontierUTF16.removeAll(keepingCapacity: true)
+            ownedPacketIndices.removeAll(keepingCapacity: true)
+            previousEligibleRawUTF16 = nil
+            isAdmissionOpen = true
+        }
+
+        mutating func closeAdmission() {
+            isAdmissionOpen = false
+        }
+
+        mutating func reset() {
+            generation = nil
+            frontier = ""
+            frontierUTF16.removeAll(keepingCapacity: true)
+            ownedPacketIndices.removeAll(keepingCapacity: true)
+            previousEligibleRawUTF16 = nil
+            isAdmissionOpen = false
+        }
+
+        mutating func claim(
+            text: String,
+            packetIndex: Int,
+            generation: UInt64
+        ) -> ClaimResult {
+            guard generation == self.generation else { return .staleGeneration }
+            guard isAdmissionOpen else { return .sealed }
+
+            let rawUTF16 = Array(text.utf16)
+            let shape = responseShape(rawUTF16)
+            guard ownedPacketIndices.insert(packetIndex).inserted else {
+                return .historical(
+                    frontierUTF16Count: frontierUTF16.count,
+                    rawUTF16Count: rawUTF16.count,
+                    shape: shape
+                )
+            }
+
+            frontierUTF16.append(contentsOf: rawUTF16)
+            frontier = String(decoding: frontierUTF16, as: UTF16.self)
+            previousEligibleRawUTF16 = rawUTF16
+            return .owned(
+                frontier: frontier,
+                frontierUTF16Count: frontierUTF16.count,
+                rawUTF16Count: rawUTF16.count,
+                shape: shape
+            )
+        }
+
+        private func responseShape(_ rawUTF16: [UInt16]) -> String {
+            guard let previousEligibleRawUTF16 else { return "first" }
+            if rawUTF16 == previousEligibleRawUTF16 { return "exactDuplicate" }
+            if rawUTF16.starts(with: previousEligibleRawUTF16) { return "prefixExtension" }
+            if previousEligibleRawUTF16.starts(with: rawUTF16) { return "shorter" }
+            return "divergent"
+        }
+    }
+
+    private struct ResponseReceiptContext {
+        let identity: StreamingSessionIdentity
+        let packetIndex: Int?
+        let source: CurrentFocusHypothesisSource
+        let eventKind: String
+        let rawUTF16Count: Int
+    }
+
+    private struct ResponseReceipt {
+        let context: ResponseReceiptContext
+        let eligibility: String
+        let frontierUTF16Count: Int
+        let ownership: String
+        let shape: String
+        let outputOutcome: String
+    }
+
+    private enum ResponseEligibility {
+        case eligible(packetIndex: Int)
+        case ineligible(reason: String)
     }
 
     private enum StreamingAttemptPhase {
@@ -59,7 +152,6 @@ class MainViewModel: ObservableObject {
     private let audioRecorder: AudioRecorder
     private let streamingProvider: any SpeechStreamingSessionProviding
     private let accessibilityClient: AccessibilityClient
-    private let finalTextOutput: FinalTextOutput
     private let overlayPresenter: RecordingOverlayPresenting
     private let currentFocusAppendSessionFactory: (any CurrentFocusProvisionalOutputSessionFactory)?
     private let streamingRetryDelay: @Sendable (Int) -> UInt64
@@ -76,14 +168,11 @@ class MainViewModel: ObservableObject {
     private var activeIngress: ByteBoundedAudioIngress?
     private var activeStreamingSession: (any SpeechStreamingSession)?
     private var cursorSession: CursorTextSession?
-    private var finalOnlyDestination: CursorDestinationToken?
     private var usesCurrentFocusFinalOutput = false
-    private var deliveredCurrentFocusFinal = false
-    private var latestFinalOnlyValue: String?
     private var currentFocusAppendSession: (any CurrentFocusProvisionalOutputSession)?
-    private var appendManualRecoveryEligibility = AppendManualRecoveryEligibility.unavailable
     private var attemptedFirstPartialRebind = false
     private var packetJournal: [Data] = []
+    private var responseOutputLedger = ResponseOutputLedger()
     private var retryOrdinal = 0
     private var currentAttemptCancellationTask: Task<Void, Never>?
     private var retryAdmissionOpen = false
@@ -96,6 +185,7 @@ class MainViewModel: ObservableObject {
     private var nextRecorderBarrierIdentifier: UInt64 = 0
     private var sealStarted = false
     private var acceptedPacket = false
+    private var hasUsableHeldRecognition = false
     private var stopSoundPlayed = false
     private var isCompletionFeedbackPresented = false
 
@@ -121,7 +211,6 @@ class MainViewModel: ObservableObject {
         self.hotKeyWakeRecovering = hotKeyWakeRecovering ?? HotKeyService.shared
         self.streamingProvider = streamingProvider ?? FeishuAPIService.shared
         self.accessibilityClient = accessibilityClient ?? MacAccessibilityClient()
-        self.finalTextOutput = finalTextOutput ?? SystemFinalTextOutput()
         self.overlayPresenter = overlayPresenter ?? OverlayWindowController.shared
         if let currentFocusAppendSessionFactory {
             self.currentFocusAppendSessionFactory = currentFocusAppendSessionFactory
@@ -299,10 +388,11 @@ class MainViewModel: ObservableObject {
         overlayMessage = nil
         sealStarted = false
         acceptedPacket = false
+        hasUsableHeldRecognition = false
         stopSoundPlayed = false
         attemptedFirstPartialRebind = false
-        appendManualRecoveryEligibility = .unavailable
         packetJournal.removeAll(keepingCapacity: true)
+        responseOutputLedger.begin(generation: identity.generation)
         retryOrdinal = 0
         currentAttemptCancellationTask = nil
         retryAdmissionOpen = true
@@ -388,7 +478,6 @@ class MainViewModel: ObservableObject {
             newCursorSession.invalidate()
             cursorSession = nil
             if settings.autoInsert {
-                finalOnlyDestination = token
                 if armCapturedCurrentFocusAppendSession(
                     identity: StreamingSessionIdentity(generation: token.generation),
                     destination: token
@@ -408,7 +497,6 @@ class MainViewModel: ObservableObject {
         newCursorSession.invalidate()
         cursorSession = nil
         usesCurrentFocusFinalOutput = settings.autoInsert
-        deliveredCurrentFocusFinal = false
         status = .streaming
         logger.info("Accessibility destination unavailable; using current-focus final output")
     }
@@ -558,13 +646,19 @@ class MainViewModel: ObservableObject {
         while let packet = try await iterator.next() {
             guard isActive(identity), !Task.isCancelled else { return true }
             packetJournal.append(packet)
+            let packetIndex = packetJournal.index(before: packetJournal.endIndex)
             let event = try await session.sendAudioPacket(packet)
             guard isActive(identity), !Task.isCancelled else { return true }
             acceptedPacket = true
             if case .failed(let failure) = event {
                 throw failure
             }
-            if handleStreamingEvent(event, identity: identity, isTerminal: false) {
+            if handleStreamingEvent(
+                event,
+                identity: identity,
+                isTerminal: false,
+                packetIndex: packetIndex
+            ) {
                 return true
             }
         }
@@ -576,9 +670,8 @@ class MainViewModel: ObservableObject {
         identity: StreamingSessionIdentity
     ) async throws {
         guard !packetJournal.isEmpty else { return }
-        var catchUpEvent: StreamingRecognitionEvent?
 
-        for packet in packetJournal {
+        for (packetIndex, packet) in packetJournal.enumerated() {
             guard isActive(identity), !Task.isCancelled, !sealStarted else {
                 throw CancellationError()
             }
@@ -587,23 +680,14 @@ class MainViewModel: ObservableObject {
                 throw failure
             }
             acceptedPacket = true
-            if isUsableHypothesis(event) {
-                catchUpEvent = event
-            }
+            _ = handleStreamingEvent(
+                event,
+                identity: identity,
+                isTerminal: false,
+                source: .replayCatchUp,
+                packetIndex: packetIndex
+            )
         }
-
-        guard let catchUpEvent,
-              isActive(identity),
-              !Task.isCancelled,
-              !sealStarted else {
-            return
-        }
-        _ = handleStreamingEvent(
-            catchUpEvent,
-            identity: identity,
-            isTerminal: false,
-            source: .replayCatchUp
-        )
     }
 
     private func finishConsumedAudio(
@@ -723,7 +807,7 @@ class MainViewModel: ObservableObject {
 
     private func completeAfterRecoverableRelease(identity: StreamingSessionIdentity) async {
         guard await awaitSealingBarrier(identity: identity) else { return }
-        guard let retainedText = retainedStreamingHypothesis else {
+        guard hasUsableHeldRecognition else {
             if !acceptedPacket, retryOrdinal == 0 {
                 // Releasing while the very first transport is still being created is
                 // an ordinary user cancellation, not a failed recognition attempt.
@@ -736,74 +820,13 @@ class MainViewModel: ObservableObject {
             }
             return
         }
-
-        if let currentFocusAppendSession {
-            await completeAppendRecovery(
-                currentFocusAppendSession,
-                retainedText: retainedText,
-                identity: identity
-            )
-            return
-        }
-
-        routeRetainedRecoveryOutput(retainedText)
+        guard finalizeExistingOutputOwner(identity: identity).mayCompleteNormally else { return }
         await completeNormally(identity: identity)
-    }
-
-    private var retainedStreamingHypothesis: String? {
-        guard let latestFinalOnlyValue, !isContentless(latestFinalOnlyValue) else {
-            return nil
-        }
-        return latestFinalOnlyValue
-    }
-
-    private func completeAppendRecovery(
-        _ appendSession: any CurrentFocusProvisionalOutputSession,
-        retainedText: String,
-        identity: StreamingSessionIdentity
-    ) async {
-        let outcome = appendSession.finalize(
-            finalText: nil,
-            lastAcceptedText: retainedText,
-            generation: identity.generation
-        )
-        switch outcome {
-        case .exactCommitted, .suffixCommitted, .staleGeneration:
-            await completeNormally(identity: identity)
-        case .preservedDivergence, .preservedDestinationLoss, .deliveryUncertain:
-            publishCompletionFeedback(.provisionalOutputPreserved)
-            await completeNormally(identity: identity)
-        case .preservedSecurityRejection:
-            await terminateAbnormally(
-                message: streamingSecurityErrorMessage,
-                reportsError: true
-            )
-        case .noUsableText:
-            if recoverUnsafeCapturedTextIfEligible() {
-                await completeNormally(identity: identity)
-            } else {
-                await terminateAbnormally(
-                    message: streamingFailureErrorMessage,
-                    reportsError: true
-                )
-            }
-        }
-    }
-
-    private func routeRetainedRecoveryOutput(_ retainedText: String) {
-        if let destination = finalOnlyDestination {
-            routeFinalOnly(retainedText, destination: destination)
-        } else if usesCurrentFocusFinalOutput {
-            routeCurrentFocusFinal(retainedText)
-        } else if cursorSession != nil, settings.autoInsert {
-            publishCompletionFeedback(.provisionalOutputPreserved)
-        }
     }
 
     private func interpretAppendFinalOutcome(
         _ outcome: CurrentFocusAppendFinalOutcome,
-        identity: StreamingSessionIdentity,
-        followsSealedRecoverableFailure: Bool
+        identity: StreamingSessionIdentity
     ) -> Bool {
         switch outcome {
         case .exactCommitted, .suffixCommitted, .staleGeneration:
@@ -818,15 +841,7 @@ class MainViewModel: ObservableObject {
             )
             return false
         case .noUsableText:
-            if recoverUnsafeCapturedTextIfEligible() {
-                return true
-            }
-            guard followsSealedRecoverableFailure else { return true }
-            scheduleStreamingTermination(
-                identity: identity,
-                message: streamingFailureErrorMessage
-            )
-            return false
+            return true
         }
     }
 
@@ -884,20 +899,28 @@ class MainViewModel: ObservableObject {
         _ event: StreamingRecognitionEvent,
         identity: StreamingSessionIdentity,
         isTerminal: Bool,
-        source: CurrentFocusHypothesisSource = .livePacket
+        source: CurrentFocusHypothesisSource = .livePacket,
+        packetIndex: Int? = nil
     ) -> Bool {
         guard isActive(identity) else { return true }
 
         switch event {
         case .partial(let text):
-            return handlePartial(text, identity: identity, source: source)
+            return handlePacketResponse(
+                text,
+                eventKind: "partial",
+                identity: identity,
+                source: source,
+                packetIndex: packetIndex
+            )
 
         case .final(let text):
             return handleFinal(
                 text,
                 identity: identity,
                 isTerminal: isTerminal,
-                source: source
+                source: source,
+                packetIndex: packetIndex
             )
 
         case .failed:
@@ -918,56 +941,165 @@ class MainViewModel: ObservableObject {
         }
     }
 
-    private func handlePartial(
+    private func handlePacketResponse(
         _ text: String,
+        eventKind: String,
         identity: StreamingSessionIdentity,
-        source: CurrentFocusHypothesisSource
+        source: CurrentFocusHypothesisSource,
+        packetIndex: Int?
     ) -> Bool {
-        guard !isContentless(text) else { return false }
-        latestFinalOnlyValue = text
-        guard !sealStarted else { return false }
-        guard settings.autoInsert else { return false }
-        guard prepareContinuousOutputIfNeeded(identity: identity) else { return true }
-        if let cursorSession {
-            try? cursorSession.handle(.partial(text), generation: identity.generation)
-        } else if let currentFocusAppendSession {
-            let outcome = currentFocusAppendSession.applyOpaqueHypothesis(
-                text,
-                generation: identity.generation,
-                source: source
-            )
-            return interpretAppendApplyOutcome(outcome, identity: identity)
+        let context = ResponseReceiptContext(
+            identity: identity,
+            packetIndex: packetIndex,
+            source: source,
+            eventKind: eventKind,
+            rawUTF16Count: text.utf16.count
+        )
+        recordHeldRecognitionIfEligible(text, packetIndex: context.packetIndex)
+        let eligiblePacketIndex: Int
+        switch classifyResponse(text, context: context) {
+        case .eligible(let packetIndex):
+            eligiblePacketIndex = packetIndex
+        case .ineligible(let reason):
+            logIneligibleResponse(context, eligibility: reason)
+            return false
         }
-        return false
+        guard prepareContinuousOutputIfNeeded(identity: identity) else { return true }
+        guard cursorSession != nil || currentFocusAppendSession != nil else {
+            logIneligibleResponse(context, eligibility: "noContinuousOwner")
+            return false
+        }
+
+        switch responseOutputLedger.claim(
+            text: text,
+            packetIndex: eligiblePacketIndex,
+            generation: identity.generation
+        ) {
+        case .owned(let frontier, let frontierUTF16Count, let ownedRawUTF16Count, let shape):
+            let outputOutcome: String
+            var shouldStop = false
+            if let cursorSession {
+                try? cursorSession.handle(.partial(frontier), generation: identity.generation)
+                outputOutcome = "cursorOffered"
+            } else if let currentFocusAppendSession {
+                let outcome = currentFocusAppendSession.applyOpaqueHypothesis(
+                    frontier,
+                    generation: identity.generation,
+                    source: source
+                )
+                outputOutcome = String(describing: outcome)
+                shouldStop = interpretAppendApplyOutcome(outcome, identity: identity)
+            } else {
+                outputOutcome = "ownerUnavailable"
+            }
+            logResponseReceipt(ResponseReceipt(
+                context: ResponseReceiptContext(
+                    identity: context.identity,
+                    packetIndex: context.packetIndex,
+                    source: context.source,
+                    eventKind: context.eventKind,
+                    rawUTF16Count: ownedRawUTF16Count
+                ),
+                eligibility: "eligible",
+                frontierUTF16Count: frontierUTF16Count,
+                ownership: "ownedResponse",
+                shape: shape,
+                outputOutcome: outputOutcome
+            ))
+            return shouldStop
+
+        case .historical(let frontierUTF16Count, let historicalRawUTF16Count, let shape):
+            logResponseReceipt(ResponseReceipt(
+                context: ResponseReceiptContext(
+                    identity: context.identity,
+                    packetIndex: context.packetIndex,
+                    source: context.source,
+                    eventKind: context.eventKind,
+                    rawUTF16Count: historicalRawUTF16Count
+                ),
+                eligibility: "eligible",
+                frontierUTF16Count: frontierUTF16Count,
+                ownership: "historicalReplaySuppressed",
+                shape: shape,
+                outputOutcome: "notOffered"
+            ))
+            return false
+
+        case .staleGeneration:
+            logIneligibleResponse(context, eligibility: "staleGeneration")
+            return false
+
+        case .sealed:
+            logIneligibleResponse(context, eligibility: "sealed")
+            return false
+        }
+    }
+
+    private func recordHeldRecognitionIfEligible(_ text: String, packetIndex: Int?) {
+        guard packetIndex != nil,
+              !sealStarted,
+              responseOutputLedger.isAdmissionOpen,
+              !isContentless(text) else {
+            return
+        }
+        hasUsableHeldRecognition = true
+    }
+
+    private func classifyResponse(
+        _ text: String,
+        context: ResponseReceiptContext
+    ) -> ResponseEligibility {
+        guard !sealStarted, responseOutputLedger.isAdmissionOpen else {
+            return .ineligible(reason: "sealed")
+        }
+        guard !isContentless(text) else { return .ineligible(reason: "contentless") }
+        guard TextInputSimulator.isSafeForAutomaticPaste(text) else {
+            return .ineligible(reason: "unsafeText")
+        }
+        guard settings.autoInsert else { return .ineligible(reason: "outputDisabled") }
+        guard let packetIndex = context.packetIndex else {
+            return .ineligible(reason: "missingJournalIndex")
+        }
+        return .eligible(packetIndex: packetIndex)
     }
 
     private func handleFinal(
         _ text: String,
         identity: StreamingSessionIdentity,
         isTerminal: Bool,
-        source: CurrentFocusHypothesisSource
+        source: CurrentFocusHypothesisSource,
+        packetIndex: Int?
     ) -> Bool {
-        let contentless = isContentless(text)
-        if !contentless {
-            latestFinalOnlyValue = text
-        }
-        guard isTerminal || !sealStarted else { return false }
-        var mayCompleteNormally = true
-        if settings.autoInsert {
-            mayCompleteNormally = deliverFinal(
+        guard isTerminal else {
+            return handlePacketResponse(
                 text,
-                contentless: contentless,
+                eventKind: "final",
                 identity: identity,
-                isTerminal: isTerminal,
-                source: source
+                source: source,
+                packetIndex: packetIndex
             )
         }
-        guard mayCompleteNormally else { return true }
-        if contentless {
+
+        let finalization = finalizeExistingOutputOwner(identity: identity)
+        logResponseReceipt(ResponseReceipt(
+            context: ResponseReceiptContext(
+                identity: identity,
+                packetIndex: nil,
+                source: source,
+                eventKind: "terminal",
+                rawUTF16Count: text.utf16.count
+            ),
+            eligibility: "terminalNotAdmitted",
+            frontierUTF16Count: responseOutputLedger.frontier.utf16.count,
+            ownership: "notOwned",
+            shape: "unclassified",
+            outputOutcome: finalization.outcome
+        ))
+        guard finalization.mayCompleteNormally else { return true }
+        if !hasUsableHeldRecognition {
             overlayMessage = "未识别到内容"
         }
-        guard isTerminal else { return false }
-        if contentless, !isCompletionFeedbackPresented {
+        if !hasUsableHeldRecognition, !isCompletionFeedbackPresented {
             publishCompletionFeedback(.emptyFinalPreservedPartial)
         }
         Task { @MainActor [weak self] in
@@ -976,48 +1108,62 @@ class MainViewModel: ObservableObject {
         return true
     }
 
-    private func deliverFinal(
-        _ text: String,
-        contentless: Bool,
-        identity: StreamingSessionIdentity,
-        isTerminal: Bool,
-        source: CurrentFocusHypothesisSource
-    ) -> Bool {
+    private func finalizeExistingOutputOwner(
+        identity: StreamingSessionIdentity
+    ) -> (mayCompleteNormally: Bool, outcome: String) {
+        let frontier = responseOutputLedger.frontier
         if let cursorSession {
             try? cursorSession.handle(
-                .final(contentless ? "" : text),
+                .final(frontier),
                 generation: identity.generation
             )
-        } else if let currentFocusAppendSession {
-            if isTerminal {
-                let outcome = currentFocusAppendSession.finalize(
-                    finalText: text,
-                    lastAcceptedText: latestFinalOnlyValue,
-                    generation: identity.generation
-                )
-                return interpretAppendFinalOutcome(
-                    outcome,
-                    identity: identity,
-                    followsSealedRecoverableFailure: false
-                )
-            } else if !contentless {
-                let outcome = currentFocusAppendSession.applyOpaqueHypothesis(
-                    text,
-                    generation: identity.generation,
-                    source: source
-                )
-                return !interpretAppendApplyOutcome(outcome, identity: identity)
-            }
-        } else if let destination = finalOnlyDestination,
-                  let candidate = contentless ? latestFinalOnlyValue : Optional(text),
-                  !isContentless(candidate) {
-            routeFinalOnly(candidate, destination: destination)
-        } else if usesCurrentFocusFinalOutput,
-                  let candidate = contentless ? latestFinalOnlyValue : Optional(text),
-                  !isContentless(candidate) {
-            routeCurrentFocusFinal(candidate)
+            return (true, "cursorFinalizeOffered")
         }
-        return true
+        guard let currentFocusAppendSession else { return (true, "noOwner") }
+        let outcome = currentFocusAppendSession.finalize(
+            finalText: nil,
+            lastAcceptedText: frontier.isEmpty ? nil : frontier,
+            generation: identity.generation
+        )
+        return (
+            interpretAppendFinalOutcome(outcome, identity: identity),
+            String(describing: outcome)
+        )
+    }
+
+    private func logIneligibleResponse(_ context: ResponseReceiptContext, eligibility: String) {
+        logResponseReceipt(ResponseReceipt(
+            context: context,
+            eligibility: eligibility,
+            frontierUTF16Count: responseOutputLedger.frontier.utf16.count,
+            ownership: "notOwned",
+            shape: "unclassified",
+            outputOutcome: eligibility == "sealed" ? "sealedSuppressed" : "notOffered"
+        ))
+    }
+
+    private func logResponseReceipt(_ receipt: ResponseReceipt) {
+        let sourceName: String
+        switch receipt.context.source {
+        case .livePacket:
+            sourceName = receipt.context.eventKind == "terminal" ? "terminal" : "live"
+        case .replayCatchUp:
+            sourceName = "replay"
+        }
+        let packetIndexValue = receipt.context.packetIndex ?? -1
+        logger.info(
+            """
+            Streaming response receipt generation=\(receipt.context.identity.generation, privacy: .public) \
+            attempt=\(self.retryOrdinal, privacy: .public) \
+            packetIndex=\(packetIndexValue, privacy: .public) \
+            source=\(sourceName, privacy: .public) event=\(receipt.context.eventKind, privacy: .public) \
+            eligibility=\(receipt.eligibility, privacy: .public) \
+            rawUTF16=\(receipt.context.rawUTF16Count, privacy: .public) \
+            frontierUTF16=\(receipt.frontierUTF16Count, privacy: .public) \
+            shape=\(receipt.shape, privacy: .public) ownership=\(receipt.ownership, privacy: .public) \
+            output=\(receipt.outputOutcome, privacy: .public)
+            """
+        )
     }
 
     private func prepareContinuousOutputIfNeeded(identity: StreamingSessionIdentity) -> Bool {
@@ -1049,7 +1195,6 @@ class MainViewModel: ObservableObject {
             logger.info("Bound an AX cursor destination on the first streaming hypothesis")
         case .finalOnly(let token):
             reboundSession.invalidate()
-            finalOnlyDestination = token
             usesCurrentFocusFinalOutput = false
             if armCapturedCurrentFocusAppendSession(identity: identity, destination: token) {
                 status = .streaming
@@ -1079,11 +1224,10 @@ class MainViewModel: ObservableObject {
         guard let appendSession = currentFocusAppendSessionFactory?.makeSession(
             generation: identity.generation
         ) else {
-            logger.info("Continuous current-focus output is unavailable; retaining final-only fallback")
+            logger.info("Continuous current-focus output is unavailable; no response output owner was armed")
             return
         }
         currentFocusAppendSession = appendSession
-        appendManualRecoveryEligibility = .unavailable
         usesCurrentFocusFinalOutput = false
         logger.info("Armed continuous current-focus append output")
     }
@@ -1100,11 +1244,10 @@ class MainViewModel: ObservableObject {
                 return self.validateFinalOnlyDestination(destination)
             }
         ) else {
-            logger.info("Captured continuous output is unavailable; retaining final-only fallback")
+            logger.info("Captured continuous output is unavailable; no response output owner was armed")
             return false
         }
         currentFocusAppendSession = appendSession
-        appendManualRecoveryEligibility = .capturedZeroPost
         usesCurrentFocusFinalOutput = false
         logger.info("Armed captured continuous append output")
         return true
@@ -1114,13 +1257,6 @@ class MainViewModel: ObservableObject {
         _ outcome: CurrentFocusAppendOutcome,
         identity: StreamingSessionIdentity
     ) -> Bool {
-        switch outcome {
-        case .contentless, .unsafeTextSuppressed:
-            break
-        case .insertedFirst, .appendedSuffix, .duplicate, .revisionSuppressed,
-             .destinationChanged, .securityRejected, .deliveryUncertain, .staleGeneration:
-            appendManualRecoveryEligibility = .unavailable
-        }
         switch outcome {
         case .securityRejected:
             scheduleStreamingTermination(
@@ -1135,22 +1271,6 @@ class MainViewModel: ObservableObject {
         }
     }
 
-    private func recoverUnsafeCapturedTextIfEligible() -> Bool {
-        guard appendManualRecoveryEligibility == .capturedZeroPost,
-              let retainedText = latestFinalOnlyValue,
-              !isContentless(retainedText),
-              !TextInputSimulator.isSafeForAutomaticPaste(retainedText) else {
-            return false
-        }
-        appendManualRecoveryEligibility = .unavailable
-        guard let destination = finalOnlyDestination,
-              validateFinalOnlyDestination(destination) == .valid else {
-            return false
-        }
-        copyForManualRecovery(retainedText)
-        return true
-    }
-
     private func scheduleStreamingTermination(
         identity: StreamingSessionIdentity,
         message: String
@@ -1163,69 +1283,21 @@ class MainViewModel: ObservableObject {
         }
     }
 
-    private func routeCurrentFocusFinal(_ text: String) {
-        guard settings.autoInsert,
-              !deliveredCurrentFocusFinal,
-              !permissionManager.secureInputEnabled,
-              !isContentless(text) else {
-            return
-        }
-        guard TextInputSimulator.isSafeForAutomaticPaste(text) else {
-            deliveredCurrentFocusFinal = true
-            copyForManualRecovery(text)
-            return
-        }
-
-        deliveredCurrentFocusFinal = true
-        switch finalTextOutput.insertAtCurrentFocusOnce(text) {
-        case .inserted, .securityRejected:
-            break
-        case .deliveryFailed, .destinationInvalid:
-            copyForManualRecovery(text)
-        }
-    }
-
     private func handleTerminalEvent(
         _ event: StreamingRecognitionEvent,
         identity: StreamingSessionIdentity,
         message: String?,
         reportsError: Bool
     ) -> Bool {
-        if let cursorSession {
+        if sealStarted {
+            guard finalizeExistingOutputOwner(identity: identity).mayCompleteNormally else { return true }
+        } else if let cursorSession {
             try? cursorSession.handle(event, generation: identity.generation)
         }
         Task { @MainActor [weak self] in
             await self?.terminateAbnormally(message: message, reportsError: reportsError)
         }
         return true
-    }
-
-    private func routeFinalOnly(_ text: String, destination: CursorDestinationToken) {
-        guard currentSecurityIsSafe(for: destination) else { return }
-        guard settings.autoInsert, !isContentless(text) else { return }
-        guard TextInputSimulator.isSafeForAutomaticPaste(text) else {
-            copyForManualRecovery(text)
-            return
-        }
-
-        var validationCount = 0
-        var outputPreflight: CurrentFocusBoundDestinationValidation?
-        let result = finalTextOutput.insertOnce(
-            text,
-            destination: destination
-        ) { [self] in
-            validationCount += 1
-            let validation = validateFinalOnlyDestination(destination)
-            if validationCount == 1 {
-                outputPreflight = validation
-            }
-            return validation == .valid
-        }
-        handleFinalTextInsertionResult(
-            result,
-            text: text,
-            outputPreflight: outputPreflight
-        )
     }
 
     private func currentSecurityIsSafe(for destination: CursorDestinationToken) -> Bool {
@@ -1257,27 +1329,12 @@ class MainViewModel: ObservableObject {
         }
     }
 
-    private func handleFinalTextInsertionResult(
-        _ result: FinalTextInsertionResult,
-        text: String,
-        outputPreflight: CurrentFocusBoundDestinationValidation?
-    ) {
-        guard result != .inserted, outputPreflight != .securityRejected else {
-            return
-        }
-        copyForManualRecovery(text)
-    }
-
-    private func copyForManualRecovery(_ text: String) {
-        finalTextOutput.copyForManualRecovery(text)
-        publishCompletionFeedback(.manualRecoveryCopied)
-    }
-
     private func beginSealing(identity: StreamingSessionIdentity) {
         guard isActive(identity), !sealStarted else { return }
         let interruptedPhase = streamingAttemptPhase
         let interruptedSession = activeStreamingSession
         sealStarted = true
+        responseOutputLedger.closeAdmission()
         closeRetryAdmission()
         stopMaxDurationTimer()
         status = .sealing
@@ -1348,18 +1405,16 @@ class MainViewModel: ObservableObject {
         sealingTask = nil
         activeIngress = nil
         activeStreamingSession = nil
-        finalOnlyDestination = nil
         usesCurrentFocusFinalOutput = false
-        deliveredCurrentFocusFinal = false
-        latestFinalOnlyValue = nil
         attemptedFirstPartialRebind = false
-        appendManualRecoveryEligibility = .unavailable
         packetJournal.removeAll(keepingCapacity: true)
+        responseOutputLedger.reset()
         retryOrdinal = 0
         currentAttemptCancellationTask = nil
         streamingAttemptPhase = .idle
         sealStarted = false
         acceptedPacket = false
+        hasUsableHeldRecognition = false
         stopSoundPlayed = false
         stopMaxDurationTimer()
         if !preservesCompletionFeedback {
@@ -1428,13 +1483,10 @@ class MainViewModel: ObservableObject {
     private func clearInteractionReferences() {
         activeIngress = nil
         activeStreamingSession = nil
-        finalOnlyDestination = nil
         usesCurrentFocusFinalOutput = false
-        deliveredCurrentFocusFinal = false
-        latestFinalOnlyValue = nil
         attemptedFirstPartialRebind = false
-        appendManualRecoveryEligibility = .unavailable
         packetJournal.removeAll(keepingCapacity: true)
+        responseOutputLedger.reset()
         retryOrdinal = 0
         retryAdmissionOpen = false
         streamingAttemptPhase = .idle
@@ -1442,6 +1494,7 @@ class MainViewModel: ObservableObject {
         retrySleepTask = nil
         sealStarted = false
         acceptedPacket = false
+        hasUsableHeldRecognition = false
         stopSoundPlayed = false
     }
 
@@ -1451,15 +1504,6 @@ class MainViewModel: ObservableObject {
 
     private func isContentless(_ text: String) -> Bool {
         text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    private func isUsableHypothesis(_ event: StreamingRecognitionEvent) -> Bool {
-        switch event {
-        case .partial(let text), .final(let text):
-            return !isContentless(text)
-        case .failed, .cancelled:
-            return false
-        }
     }
 
     private func closeRetryAdmission() {

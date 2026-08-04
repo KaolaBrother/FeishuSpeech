@@ -24,7 +24,7 @@ journal, but never fall back to whole-file recognition.
 
 The streaming provider must obtain a tenant token before it constructs a session or sends any
 request to `stream_recognize`. A tenant-token business rejection therefore means that the
-streaming endpoint was not reached. The latest recorded installed-Release UAT passed this boundary,
+streaming endpoint was not reached. An earlier installed-Release UAT passed this boundary,
 accepted two HTTP-200 audio packets, and then received HTTP 200 with business code `10024` for
 `action=0, sequence_id=2`. Three later fresh sessions received the same business code on
 `action=1, sequence_id=0`. This proves transport reachability and separates the failure from the
@@ -45,9 +45,10 @@ sanitized diagnostic: it does not publish `RecordingState.error`, call `HotKeySe
 hide/re-show the overlay, copy text, or post a system notification. A non-recoverable failure still
 invalidates the active generation, hides the overlay, and tears the interaction down once.
 
-Owner UAT must still verify the new failed-stream abort, fresh-session replay, release boundary,
-continuous output, successful finalization, and remaining runtime contract. The observed accepted
-packets and `10024` failures do not close that gate.
+Newer build-5 evidence recorded 66 HTTP-200 transactions over 13.55 seconds while visible output
+stopped after one word. This proves continued transport but not the scalar contents, coordinator
+ownership outcomes, or target acceptance. Owner UAT must still verify the repaired replay, release,
+continuous-output, and remaining runtime contract.
 
 ## Streaming recognition contract (issues #25/#26)
 
@@ -110,10 +111,11 @@ remains replayable. On a recoverable failure it cancels/aborts the failed sessio
 cancellable exponential backoff, creates a fresh stream, and serially replays the journal from
 index zero without re-chunking, combining, dropping, or parallelizing packets.
 
-Historical replay responses do not churn the target. While catching up, the coordinator retains
-only the latest accepted replay hypothesis; when it reaches the journal frontier it offers that
-single opaque value, then resumes live packet delivery. Audio captured during abort, backoff, and
-replay continues through the same ingress. There is no `file_recognize` fallback.
+Historical replay responses do not churn the target. The coordinator uses each journal packet's
+stable index as output identity: an already-owned index is suppressed on every replay, while a
+previously failed unowned index may be claimed once when replay first succeeds. Audio captured
+during abort, backoff, and replay continues through the same ingress. There is no
+`file_recognize` fallback.
 
 The retry policy is hold-wide and has no attempt-count limit independent of the 60-second hold cap.
 Its base delays are 250 ms, 500 ms, 1 s, 2 s, then 4 s; injected jitter is clamped to 0.8–1.2 and
@@ -135,19 +137,22 @@ transport reconnect or retarget.
 Fn release and the 60-second cap set sealing before any suspension point and close admission to a
 new session. Pending delay and session-creation tasks are actively cancelled. A live attempt may
 drain the sealed ingress and finish once; a replaying replacement is cancelled once and production
-typed cancellation is treated as sealed control flow, not a new failure. Every early fallback waits
+typed cancellation is treated as sealed control flow, not a new failure. Every early exit waits
 for the old recorder's stop/barrier task before returning idle, so a successor cannot inherit or be
-closed by stale ingress/resource cleanup. A recoverable failure after sealing routes the latest
-usable value through its selected output capability; no usable hypothesis produces one fixed stream
-error. Reset, sleep/wake, permission/security loss, capture failure, and cleanup invalidate
+closed by stale ingress/resource cleanup. A recoverable failure after sealing cannot claim or route
+response text. If no usable held recognition was ever observed, it produces one fixed stream error;
+otherwise completion does not invent an output or empty-result error. Reset, sleep/wake,
+permission/security loss, capture failure, and cleanup invalidate
 generation and output authority and cancel the current transport immediately, making late callbacks
 inert. When recorder shutdown is already in flight, its barrier remains independently retained: it
 blocks successor admission and final idle/error publication, but never delays authority revocation
 or transport cancellation.
 
-Feishu does not define the semantic shape of intermediate `recognition_text`. Every partial is
-therefore the complete opaque replacement state, never an appendable delta. A non-empty action-2
-response is the final authority.
+Feishu and KaolaTerminal expose one opaque response scalar and do not verify whether successive
+values are cumulative, delta, disjoint, or revisable. FeishuSpeech therefore applies a local policy:
+each eligible journal index owns its raw scalar once and concatenates it to a growing UTF-16 held
+frontier. Equal, disjoint, shorter, and revised values on distinct indices all advance that frontier.
+Action 2 is not output authority and cannot mutate the frontier after release.
 
 Response decoding follows KaolaTerminal's credential-bearing, proven streaming implementation:
 after valid JSON and `code == 0`, response `stream_id` and `sequence_id` echoes are ignored;
@@ -160,8 +165,8 @@ public diagnostics.
 
 The public Feishu contract confirms the endpoint, fields, action meanings, Base64 PCM, and a
 100–200 ms fragment recommendation. Lowercase-only IDs, exact packet/tail sizes, empty strings for
-terminal audio, same-sequence first-token retry, strict serialization/idempotence, and opaque
-replacement/final authority are FeishuSpeech policies rather than vendor guarantees. They remain
+terminal audio, same-sequence first-token retry, strict serialization/idempotence, and
+journal-index concatenation are FeishuSpeech policies rather than vendor guarantees. They remain
 behind credential-bearing UAT.
 
 ### Internal cursor-writer interface
@@ -183,19 +188,17 @@ events write nothing.
 When a non-secure destination was captured but cannot support live range replacement, the initial
 `.finalOnly` result arms a continuous append owner bound to the captured PID and exact
 `AXUIElement`. A first-partial rebind that returns `.finalOnly` does the same and offers that
-triggering partial immediately. Thus every non-contentless hypothesis received before sealing is
-routed to the selected owner while Fn remains held; release is only the seal/finalize boundary.
-Only if the append factory cannot create this owner before any provisional attempt does the older
-release-time, process-targeted Cmd+V final-only route remain available.
+triggering partial immediately. Thus every eligible packet response received before sealing can
+claim its index once and extend the frontier offered to the selected owner while Fn remains held.
+Release only closes that existing owner and cannot create output.
 
 When AX destination capture or confirmation is unavailable, the first non-contentless hypothesis
 causes one more `CursorTextSession.begin()` attempt. If that yields live AX capability, normal
 verified range replacement takes ownership. If it remains unavailable,
-`CurrentFocusAppendSession` binds the then-frontmost PID and provides best-effort continuous output
-for the hold: it posts the first safe value as direct Unicode input, then posts only the unseen
-UTF-16 suffix when every later hypothesis starts exactly with the already emitted UTF-16 units.
-Duplicates are no-ops; revisions, shortenings, unsafe control characters, and contentless values
-are suppressed by that same owner rather than deferred to release.
+`CurrentFocusAppendSession` binds the then-frontmost PID and receives the coordinator's locally
+monotonic frontier. It posts only the frontier's unseen UTF-16 suffix. Raw scalar equality,
+disjointness, shortening, or revision does not suppress a distinct eligible packet index; unsafe
+and contentless values remain ineligible.
 
 Every append mutation samples live Secure Input and the bound frontmost PID twice before and once
 after posting. A captured append additionally validates the token's current security, original PID,
@@ -212,21 +215,26 @@ submitted: CoreGraphics provides no target-control acceptance acknowledgement.
 
 After any provisional delivery attempt, destination/security loss, or uncertainty, no full-text
 resend, one-shot current-focus insertion, Cmd+V, alternate target, or clipboard recovery is allowed.
-The only manual-copy path retained for a captured append owner requires proof of zero poster
-attempts, an unsafe control-bearing retained value, and one final successful live validation of
-Secure Input, the captured token, original PID, and exact AX element. It closes eligibility before
-validation and can copy at most once.
+Release-time one-shot/final-only insertion and manual-copy recovery are removed even when no output
+owner was created or no post was attempted.
 
 The unbound append path uses no pasteboard, Backspace, selection, deletion, or cursor navigation.
 Because it has no AX range, it cannot observe a caret move within the same process; text may
-therefore reach a different caret in that process. This residual risk is explicit and is why
-divergent hypotheses are preserved rather than rewritten. At release, an exact or strictly
-extending final may append one last suffix; a divergent/shorter final preserves output state but
-the UI uses neutral wording because target acceptance is not acknowledged.
+therefore reach a different caret in that process. This residual risk is explicit. The local sink
+frontier is never destructively rewritten. At release, response/retry admission is already closed:
+action-2 and late packet/final values cannot append or replace text.
 
 `autoInsert=false` keeps recognition active but discards cursor-writing capability and produces no
-target or pasteboard mutation. Secure targets and Secure Event Input still fail closed before
+target or pasteboard mutation. Usable held recognition is tracked independently, so disabled,
+unsafe, or ownerless output is not misreported as an empty result or stream error. Secure targets
+and Secure Event Input still fail closed before
 audio/network work when affirmatively detected.
+
+The coordinator's response receipt is transcript-free. It records only generation, attempt and
+journal index, source/event kind, eligibility, ownership and output outcome, coarse raw-response
+shape, and raw/frontier UTF-16 lengths. It does not contain or hash text and does not record audio,
+credentials/tokens, stream IDs, raw response bodies/messages, PID, AX identity/value, application
+or window names, or clipboard payloads. Shape is diagnostic only and never determines ownership.
 
 These are verified local routing and event-construction contracts, not an end-to-end acceptance
 claim. Installed owner UAT must still observe visible held output on the real target. A submitted
@@ -324,10 +332,9 @@ cancelled work into additional network attempts.
 `FeishuSpeechTests` is wired into the Xcode project. Issue #26 adds automated coverage for exact
 audio ingress accounting, recorder sealing barriers, streaming action/sequence/token/cancel races,
 cursor replacement, captured and unbound output, lifecycle generation, settings, and fixed
-completion feedback. Focused green suites now cover typed numeric failures and exact-once failed
-stream abort (24/24), retry policy and coordinator state (6/6), retry/replay/release plus
-continuous-output integration (34/34), and current-focus UTF-16 suffix output (16/16). A fresh full
-suite/build receipt belongs to final release validation rather than this API contract.
+completion feedback. Direct lifecycle-free execution of the complete XCTest bundle reports 272/272
+passing. It covers packet-index ownership, replay exact-once behavior, release suppression,
+recognition/output separation, fixed destination/security boundaries, and transcript-free receipts.
 
 `AudioRecorderRecoveryTests.swift` remains excluded from the test target because it is a recorded
 pre-existing AudioRecorder-owned blocker outside the #11/#12/#21 API recovery bundle.
