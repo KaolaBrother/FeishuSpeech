@@ -88,3 +88,10 @@ None swept. Every correctness/security finding R1-R9 was reproduced, fixed, inde
 - Notarization and Developer ID distribution signing were not part of this local Release.
 
 ## Status: ARCHIVED AFTER FINAL GIT GATE
+
+## Sink Findings
+
+post_rebase_tests: skipped
+
+archived_paths:
+- kaola-workflow/archive/issue-27/finalization-summary.md
