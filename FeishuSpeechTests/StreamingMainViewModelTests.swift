@@ -1610,30 +1610,46 @@ final class StreamingMainViewModelTests: XCTestCase {
         await context.viewModel.resetService()
     }
 
-    func test_multilineLFSnapshotReachesKeyboardOutput() async {
-        let snapshot = "first line\nsecond line"
+    func test_multilineLFSnapshotNeverReachesKeyboardAndLaterSafeSnapshotReconcilesFromPriorOutput() async {
+        let initialSnapshot = "safe base"
+        let multilineSnapshot = "safe base\npassive line"
+        let laterSafeSnapshot = "safe revised"
         let context = makeProductionCapturedAppendContext(
             route: CoordinatorFinalOnlyRoute(
                 capability: .finalOnly,
                 rebindCapability: nil,
                 generation: 421
             ),
-            packetEvents: [.partial(snapshot)],
+            packetEvents: [
+                .partial(initialSnapshot),
+                .partial(multilineSnapshot),
+                .partial(laterSafeSnapshot)
+            ],
             finishEvent: .cancelled
         )
         let identity = StreamingSessionIdentity(generation: 421)
 
         context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
         await waitUntil { await context.provider.makeSessionCallCount == 1 }
-        context.recorder.emit(Data(repeating: 0xBC, count: 6_400))
+        context.recorder.emit(Data(repeating: 0xBC, count: 19_200))
 
         await waitUntil {
-            context.unicodePoster.replacementRequests.count == 1
+            await context.transport.sendCallCount == 3
         }
 
         XCTAssertEqual(
-            context.unicodePoster.replacementRequests.map(\.insertText),
-            [snapshot]
+            context.unicodePoster.replacementRequests,
+            [
+                CoordinatorReplacementRequest(
+                    deleteCharacterCount: 0,
+                    insertText: initialSnapshot
+                ),
+                CoordinatorReplacementRequest(
+                    deleteCharacterCount: 4,
+                    insertText: "revised"
+                )
+            ],
+            "LF must emit zero keyboard events and must not replace the previously emitted snapshot"
         )
         await context.viewModel.resetService()
     }

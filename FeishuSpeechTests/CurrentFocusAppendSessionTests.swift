@@ -401,6 +401,96 @@ final class CurrentFocusAppendSessionTests: XCTestCase {
         }
     }
 
+    func test_armedInputMonitorCapturesBaselineEpochAndExemptsTaggedSyntheticAndFnEvents() {
+        let context = makeContext(inputMonitorInitialEpoch: 17)
+
+        XCTAssertEqual(
+            context.inputMonitor.interferenceEpochReadCount,
+            1,
+            "arming must capture the pre-dispatch interference baseline"
+        )
+        context.inputMonitor.receivePreDispatchCGEventTap(.taggedSyntheticKeyDown)
+        context.inputMonitor.receivePreDispatchCGEventTap(.fnFlagsChanged)
+
+        let outcome = context.session.applyOpaqueHypothesis(
+            "safe snapshot",
+            generation: generation,
+            source: .livePacket
+        )
+
+        XCTAssertEqual(context.inputMonitor.rawInterferenceEpoch, 17)
+        XCTAssertGreaterThanOrEqual(
+            context.inputMonitor.interferenceEpochReadCount,
+            2,
+            "the epoch must be sampled again immediately before output"
+        )
+        XCTAssertEqual(outcome, .insertedFirst)
+        XCTAssertEqual(context.poster.callCount, 1)
+    }
+
+    func test_preDispatchPhysicalKeyOrMouseEpochDriftSuppressesTransactionWithoutMainActorCallback() {
+        for input in [TestPreDispatchInputKind.physicalKeyDown, .physicalLeftMouseDown] {
+            let context = makeContext(inputMonitorInitialEpoch: 23)
+            context.inputMonitor.receivePreDispatchCGEventTap(
+                input,
+                deliverAppKitGlobalMonitorCallback: false
+            )
+
+            let outcome = context.session.applyOpaqueHypothesis(
+                "queued snapshot",
+                generation: generation,
+                source: .livePacket
+            )
+
+            XCTAssertEqual(
+                outcome,
+                .deliveryUncertain,
+                "\(input) epoch drift must fail closed before destructive output"
+            )
+            XCTAssertEqual(
+                context.poster.callCount,
+                0,
+                "\(input) must suppress the queued transaction before AppKit callback delivery"
+            )
+            XCTAssertGreaterThanOrEqual(context.inputMonitor.interferenceEpochReadCount, 2)
+            XCTAssertEqual(context.inputMonitor.rawInterferenceEpoch, 24)
+        }
+    }
+
+    func test_epochDriftDuringMultiBackspaceReplacementStopsLaterDestructiveEvents() {
+        let context = makeContext(inputMonitorInitialEpoch: 31)
+        XCTAssertEqual(
+            context.session.applyOpaqueHypothesis(
+                "abcdef",
+                generation: generation,
+                source: .livePacket
+            ),
+            .insertedFirst
+        )
+        context.poster.resetTransactionTracking()
+        context.poster.afterFirstGuardedBackspace = {
+            context.inputMonitor.receivePreDispatchCGEventTap(
+                .physicalKeyDown,
+                deliverAppKitGlobalMonitorCallback: false
+            )
+        }
+
+        let outcome = context.session.applyOpaqueHypothesis(
+            "uvwxyz",
+            generation: generation,
+            source: .livePacket
+        )
+
+        XCTAssertEqual(context.poster.guardedReplacementCallCount, 1)
+        XCTAssertEqual(
+            context.poster.destructiveBackspaceCount,
+            1,
+            "epoch drift after the first pair must prevent every later Backspace pair"
+        )
+        XCTAssertEqual(context.poster.replacementRequests, [])
+        XCTAssertEqual(outcome, .deliveryUncertain)
+    }
+
     func test_workspaceInputMonitorObservesSameAppPhysicalKeyboardSynchronously() {
         let monitor = WorkspaceCurrentFocusInputMonitor()
         var suspensionCount = 0
@@ -890,7 +980,8 @@ final class CurrentFocusAppendSessionTests: XCTestCase {
         processIdentifiers: [pid_t?]? = nil,
         secureInputStates: [Bool]? = nil,
         posterResults: [FinalTextCurrentFocusPostResult] = [],
-        inputMonitorArmFailure: TestInputMonitorArmFailure? = nil
+        inputMonitorArmFailure: TestInputMonitorArmFailure? = nil,
+        inputMonitorInitialEpoch: UInt64 = 0
     ) -> TestContext {
         let processProvider = FakeAppendFrontmostProcessProvider(
             processIdentifiers: processIdentifiers ?? Array(repeating: boundProcessIdentifier, count: 30)
@@ -900,7 +991,10 @@ final class CurrentFocusAppendSessionTests: XCTestCase {
         )
         let poster = FakeUnicodeEventPoster(results: posterResults)
         let activationMonitor = FakeActivationMonitor()
-        let inputMonitor = FakeInputMonitor(armFailure: inputMonitorArmFailure)
+        let inputMonitor = FakeInputMonitor(
+            armFailure: inputMonitorArmFailure,
+            initialInterferenceEpoch: inputMonitorInitialEpoch
+        )
         let session = CurrentFocusAppendSession(
             generation: generation,
             boundProcessIdentifier: boundProcessIdentifier,
@@ -963,6 +1057,13 @@ private enum TestInputMonitorArmFailure: String {
     case global
 }
 
+private enum TestPreDispatchInputKind: String {
+    case physicalKeyDown
+    case physicalLeftMouseDown
+    case taggedSyntheticKeyDown
+    case fnFlagsChanged
+}
+
 private struct ReplacementRequest: Equatable {
     let deleteCharacterCount: Int
     let insertText: String
@@ -975,6 +1076,9 @@ private final class FakeUnicodeEventPoster: FinalTextCurrentFocusEventPosting {
     private(set) var requestedTexts: [String] = []
     private(set) var destinationProcessIdentifiers: [pid_t] = []
     private(set) var replacementRequests: [ReplacementRequest] = []
+    private(set) var guardedReplacementCallCount = 0
+    private(set) var destructiveBackspaceCount = 0
+    var afterFirstGuardedBackspace: (() -> Void)?
 
     var callCount: Int { requestedTexts.count }
 
@@ -1015,6 +1119,42 @@ private final class FakeUnicodeEventPoster: FinalTextCurrentFocusEventPosting {
         )
         guard !results.isEmpty else { return .posted }
         return results.removeFirst()
+    }
+
+    func postReplacement(
+        deleteCharacterCount: Int,
+        insertText: String,
+        to processIdentifier: pid_t,
+        whileInterferenceEpochIsUnchanged: () -> Bool
+    ) -> FinalTextCurrentFocusPostResult {
+        guardedReplacementCallCount += 1
+        for _ in 0..<deleteCharacterCount {
+            guard whileInterferenceEpochIsUnchanged() else { return .deliveryFailed }
+            destructiveBackspaceCount += 1
+            if destructiveBackspaceCount == 1 {
+                afterFirstGuardedBackspace?()
+            }
+        }
+        guard whileInterferenceEpochIsUnchanged() else { return .deliveryFailed }
+        requestedTexts.append(insertText)
+        destinationProcessIdentifiers.append(processIdentifier)
+        replacementRequests.append(
+            ReplacementRequest(
+                deleteCharacterCount: deleteCharacterCount,
+                insertText: insertText,
+                processIdentifier: processIdentifier
+            )
+        )
+        guard !results.isEmpty else { return .posted }
+        return results.removeFirst()
+    }
+
+    func resetTransactionTracking() {
+        requestedTexts = []
+        destinationProcessIdentifiers = []
+        replacementRequests = []
+        guardedReplacementCallCount = 0
+        destructiveBackspaceCount = 0
     }
 }
 
@@ -1079,9 +1219,20 @@ private final class FakeInputMonitor: CurrentFocusInputMonitoring {
     private(set) var failClosedArmCallCount = 0
     private(set) var stopCallCount = 0
     private(set) var isCompletelyArmed = false
+    private(set) var interferenceEpochReadCount = 0
+    private(set) var rawInterferenceEpoch: UInt64
 
-    init(armFailure: TestInputMonitorArmFailure? = nil) {
+    init(
+        armFailure: TestInputMonitorArmFailure? = nil,
+        initialInterferenceEpoch: UInt64 = 0
+    ) {
         self.armFailure = armFailure
+        rawInterferenceEpoch = initialInterferenceEpoch
+    }
+
+    var interferenceEpoch: UInt64 {
+        interferenceEpochReadCount += 1
+        return rawInterferenceEpoch
     }
 
     func startMonitoring(_ handler: @escaping @MainActor () -> Void) {
@@ -1109,5 +1260,20 @@ private final class FakeInputMonitor: CurrentFocusInputMonitoring {
 
     func receiveExternalInput() {
         handler?()
+    }
+
+    func receivePreDispatchCGEventTap(
+        _ input: TestPreDispatchInputKind,
+        deliverAppKitGlobalMonitorCallback: Bool = true
+    ) {
+        switch input {
+        case .physicalKeyDown, .physicalLeftMouseDown:
+            rawInterferenceEpoch &+= 1
+            if deliverAppKitGlobalMonitorCallback {
+                handler?()
+            }
+        case .taggedSyntheticKeyDown, .fnFlagsChanged:
+            break
+        }
     }
 }
