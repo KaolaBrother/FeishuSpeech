@@ -322,6 +322,27 @@ final class CurrentFocusAppendSessionTests: XCTestCase {
         XCTAssertEqual(context.activationMonitor.startCallCount, 1)
     }
 
+    func test_externalCaretAffectingInputPermanentlySuspendsReplacement() {
+        let context = makeContext()
+        _ = context.session.applyOpaqueHypothesis(
+            "owned text",
+            generation: generation,
+            source: .livePacket
+        )
+
+        context.inputMonitor.receiveExternalInput()
+        let later = context.session.applyOpaqueHypothesis(
+            "owned replacement",
+            generation: generation,
+            source: .livePacket
+        )
+
+        XCTAssertEqual(later, .deliveryUncertain)
+        XCTAssertEqual(context.poster.replacementRequests.count, 1)
+        XCTAssertEqual(context.inputMonitor.startCallCount, 1)
+        XCTAssertEqual(context.inputMonitor.stopCallCount, 1)
+    }
+
     func test_stableSamePIDAllowsOutputAndDocumentsUnobservableSameProcessCaretRisk() {
         let context = makeContext()
 
@@ -710,20 +731,23 @@ final class CurrentFocusAppendSessionTests: XCTestCase {
         )
         let poster = FakeUnicodeEventPoster(results: posterResults)
         let activationMonitor = FakeActivationMonitor()
+        let inputMonitor = FakeInputMonitor()
         let session = CurrentFocusAppendSession(
             generation: generation,
             boundProcessIdentifier: boundProcessIdentifier,
             eventPoster: poster,
             secureInputStateProvider: secureInputProvider,
             frontmostProcessProvider: processProvider,
-            activationMonitor: activationMonitor
+            activationMonitor: activationMonitor,
+            inputMonitor: inputMonitor
         )
         return TestContext(
             session: session,
             poster: poster,
             secureInputProvider: secureInputProvider,
             processProvider: processProvider,
-            activationMonitor: activationMonitor
+            activationMonitor: activationMonitor,
+            inputMonitor: inputMonitor
         )
     }
 }
@@ -735,6 +759,7 @@ private struct TestContext {
     let secureInputProvider: FakeAppendSecureInputStateProvider
     let processProvider: FakeAppendFrontmostProcessProvider
     let activationMonitor: FakeActivationMonitor
+    let inputMonitor: FakeInputMonitor
 }
 
 private struct SnapshotReplacementCase {
@@ -849,5 +874,26 @@ private final class FakeActivationMonitor: CurrentFocusActivationMonitoring {
 
     func activate(processIdentifier: pid_t) {
         handler?(processIdentifier)
+    }
+}
+
+@MainActor
+private final class FakeInputMonitor: CurrentFocusInputMonitoring {
+    private var handler: (@MainActor () -> Void)?
+    private(set) var startCallCount = 0
+    private(set) var stopCallCount = 0
+
+    func startMonitoring(_ handler: @escaping @MainActor () -> Void) {
+        startCallCount += 1
+        self.handler = handler
+    }
+
+    func stopMonitoring() {
+        stopCallCount += 1
+        handler = nil
+    }
+
+    func receiveExternalInput() {
+        handler?()
     }
 }

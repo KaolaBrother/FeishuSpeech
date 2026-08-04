@@ -228,7 +228,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         XCTAssertNotEqual(context.overlayPresenter.lastCompletionFeedback, .manualRecoveryCopied)
     }
 
-    func test_liveModeOffersHeldFrontierOnCapturedElementAndReleaseOnlyCloses() async throws {
+    func test_liveModeOffersHeldSnapshotOnCapturedElementAndReleaseOnlyCloses() async throws {
         let context = makeContext(
             capability: .live,
             packetEvents: [.partial("PRIVATE_PARTIAL")],
@@ -1259,7 +1259,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         XCTAssertEqual(context.output.copiedTexts, [])
     }
 
-    func test_disjointLivePacketResponsesBuildOneOrderedFrontierWhileFnRemainsHeld() async {
+    func test_disjointLivePacketResponsesOfferCompleteSnapshotsWhileFnRemainsHeld() async {
         let context = makeProductionCapturedAppendContext(
             route: CoordinatorFinalOnlyRoute(
                 capability: .finalOnly,
@@ -1281,9 +1281,13 @@ final class StreamingMainViewModelTests: XCTestCase {
         await waitUntil { await context.transport.sendCallCount == 3 }
 
         XCTAssertEqual(
-            context.unicodePoster.requestedTexts,
-            ["one", "two", "three"],
-            "three distinct live journal indices must each advance output once in response order"
+            context.unicodePoster.replacementRequests,
+            [
+                CoordinatorReplacementRequest(deleteCharacterCount: 0, insertText: "one"),
+                CoordinatorReplacementRequest(deleteCharacterCount: 3, insertText: "two"),
+                CoordinatorReplacementRequest(deleteCharacterCount: 2, insertText: "hree")
+            ],
+            "three complete live snapshots must reconcile in response order"
         )
         XCTAssertEqual(
             context.unicodePoster.destinationProcessIdentifiers,
@@ -1496,7 +1500,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         await context.viewModel.resetService()
     }
 
-    func test_ineligibleEventsNeverAdvanceOrReserveTheResponseFrontier() async {
+    func test_ineligibleEventsNeverAdvanceOrReserveTheLatestSnapshot() async {
         let unsafe = "unsafe\u{001B}"
         let context = makeProductionCapturedAppendContext(
             route: CoordinatorFinalOnlyRoute(
@@ -1535,7 +1539,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         XCTAssertEqual(context.output.copiedTexts, [])
     }
 
-    func test_releaseActionTwoCannotCreateFirstOutputOrAppendToOwnedFrontier() async {
+    func test_releaseActionTwoCannotCreateFirstOutputOrMutateOwnedSnapshot() async {
         let scenarios = [
             ReleaseAdmissionScenario(
                 generation: 406,
@@ -1586,7 +1590,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         }
     }
 
-    func test_unboundRetryKeepsAppendOwnershipAndPublishesOnlyReplayFrontier() async {
+    func test_unboundRetryKeepsOwnershipAndPublishesOnlyChangedReplaySnapshot() async {
         let first = RetryCoordinatorStreamingSession(
             packetEvents: [.partial("prefix"), .failed(.network)]
         )
@@ -1618,7 +1622,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         XCTAssertEqual(context.output.copiedTexts, [])
     }
 
-    func test_initialFinalOnlyRetryKeepsCapturedAppendOwnershipAtReplayFrontier() async {
+    func test_initialFinalOnlyRetryKeepsCapturedOwnershipAtChangedReplaySnapshot() async {
         let first = RetryCoordinatorStreamingSession(
             packetEvents: [.partial("captured prefix"), .failed(.network)]
         )
@@ -2305,7 +2309,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         XCTAssertEqual(context.viewModel.status, .idle)
     }
 
-    func test_emptyFinalNeverCreatesFinalOnlyOutputAndClosesAppendOwnerWithHeldFrontier() async {
+    func test_emptyFinalNeverCreatesFinalOnlyOutputAndClosesOwnerWithHeldSnapshot() async {
         let finalOnly = makeContext(
             capability: .finalOnly,
             packetEvents: [.partial("last usable final-only"), .partial(" \n ")],
@@ -4092,6 +4096,7 @@ private final class CoordinatorFinalTextOutput: FinalTextOutput {
 private final class CoordinatorProductionUnicodePoster: FinalTextCurrentFocusEventPosting {
     private(set) var requestedTexts: [String] = []
     private(set) var destinationProcessIdentifiers: [pid_t] = []
+    private(set) var replacementRequests: [CoordinatorReplacementRequest] = []
 
     func postUnicodeText(
         _ text: String,
@@ -4099,8 +4104,32 @@ private final class CoordinatorProductionUnicodePoster: FinalTextCurrentFocusEve
     ) -> FinalTextCurrentFocusPostResult {
         requestedTexts.append(text)
         destinationProcessIdentifiers.append(processIdentifier)
+        replacementRequests.append(
+            CoordinatorReplacementRequest(deleteCharacterCount: 0, insertText: text)
+        )
         return .posted
     }
+
+    func postReplacement(
+        deleteCharacterCount: Int,
+        insertText: String,
+        to processIdentifier: pid_t
+    ) -> FinalTextCurrentFocusPostResult {
+        requestedTexts.append(insertText)
+        destinationProcessIdentifiers.append(processIdentifier)
+        replacementRequests.append(
+            CoordinatorReplacementRequest(
+                deleteCharacterCount: deleteCharacterCount,
+                insertText: insertText
+            )
+        )
+        return .posted
+    }
+}
+
+private struct CoordinatorReplacementRequest: Equatable {
+    let deleteCharacterCount: Int
+    let insertText: String
 }
 
 @MainActor

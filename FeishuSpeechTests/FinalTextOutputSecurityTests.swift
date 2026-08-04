@@ -1,4 +1,5 @@
 import ApplicationServices
+import Carbon
 @testable import FeishuSpeech
 import Foundation
 import os.log
@@ -143,7 +144,16 @@ final class FinalTextOutputSecurityTests: XCTestCase {
         XCTAssertEqual(result, .posted)
         XCTAssertEqual(
             backend.operations,
-            ["source", "construct-down", "construct-up", "secure", "post-down-4242", "post-up-4242"]
+            [
+                "source",
+                "construct-down",
+                "construct-up",
+                "tag-down",
+                "tag-up",
+                "secure",
+                "post-down-4242",
+                "post-up-4242"
+            ]
         )
         XCTAssertEqual(backend.sourceStateIDs, [.privateState])
         XCTAssertEqual(backend.constructedEvents.map(\.phase), [.keyDown, .keyUp])
@@ -155,7 +165,144 @@ final class FinalTextOutputSecurityTests: XCTestCase {
         XCTAssertEqual(backend.constructedEvents.map(\.flags), [[], []])
         XCTAssertEqual(backend.postedEvents.map(\.phase), [.keyDown, .keyUp])
         XCTAssertEqual(backend.postedEvents.map(\.processIdentifier), [4242, 4242])
+        XCTAssertEqual(
+            backend.taggedUserData,
+            Array(repeating: FeishuSpeechSyntheticEventTag.value, count: 2)
+        )
         XCTAssertEqual(secureInput.queryCount, 1)
+    }
+
+    func test_systemReplacementPosterConstructsAndTagsEveryEventBeforeOrderedPosting() {
+        let trace = FakePosterOperationTrace()
+        let backend = FakeSystemUnicodeEventBackend(failure: nil, trace: trace)
+        let secureInput = FakeTracingSecureInputStateProvider(isEnabled: false, trace: trace)
+        let poster = SystemFinalTextCurrentFocusEventPoster(
+            backend: backend,
+            secureInputStateProvider: secureInput
+        )
+
+        let result = poster.postReplacement(
+            deleteCharacterCount: 2,
+            insertText: "r",
+            to: 4242
+        )
+
+        XCTAssertEqual(result, .posted)
+        XCTAssertEqual(backend.sourceStateIDs, [.privateState])
+        XCTAssertEqual(
+            backend.constructedEvents.map(\.phase),
+            [.keyDown, .keyUp, .keyDown, .keyUp, .keyDown, .keyUp]
+        )
+        XCTAssertEqual(
+            backend.constructedEvents.map(\.virtualKey),
+            [
+                CGKeyCode(kVK_Delete),
+                CGKeyCode(kVK_Delete),
+                CGKeyCode(kVK_Delete),
+                CGKeyCode(kVK_Delete),
+                nil,
+                nil
+            ]
+        )
+        XCTAssertEqual(
+            backend.constructedEvents.map(\.utf16),
+            [[], [], [], [], Array("r".utf16), Array("r".utf16)]
+        )
+        XCTAssertEqual(
+            backend.constructedEvents.map(\.sourceIdentity),
+            Array(repeating: backend.sourceIdentity, count: 6)
+        )
+        XCTAssertEqual(backend.constructedEvents.map(\.flags), Array(repeating: [], count: 6))
+        XCTAssertEqual(
+            backend.taggedUserData,
+            Array(repeating: FeishuSpeechSyntheticEventTag.value, count: 6)
+        )
+        XCTAssertEqual(
+            backend.postedEvents.map(\.virtualKey),
+            [
+                CGKeyCode(kVK_Delete),
+                CGKeyCode(kVK_Delete),
+                CGKeyCode(kVK_Delete),
+                CGKeyCode(kVK_Delete),
+                nil,
+                nil
+            ]
+        )
+        XCTAssertEqual(backend.postedEvents.map(\.processIdentifier), Array(repeating: 4242, count: 6))
+        let lastConstruction = backend.operations.lastIndex { $0.hasPrefix("construct-") }
+        let lastTag = backend.operations.lastIndex { $0.hasPrefix("tag-") }
+        let firstPost = backend.operations.firstIndex { $0.hasPrefix("post-") }
+        XCTAssertNotNil(lastConstruction)
+        XCTAssertNotNil(lastTag)
+        XCTAssertNotNil(firstPost)
+        if let lastConstruction, let lastTag, let firstPost {
+            XCTAssertLessThan(lastConstruction, firstPost)
+            XCTAssertLessThan(lastTag, firstPost)
+        }
+        XCTAssertEqual(secureInput.queryCount, 1)
+    }
+
+    func test_systemReplacementPosterDeleteOnlyPostsExactBackspacePairs() {
+        let backend = FakeSystemUnicodeEventBackend(failure: nil, trace: FakePosterOperationTrace())
+        let poster = SystemFinalTextCurrentFocusEventPoster(
+            backend: backend,
+            secureInputStateProvider: FakeSecureInputStateProvider(states: [false])
+        )
+
+        let result = poster.postReplacement(
+            deleteCharacterCount: 2,
+            insertText: "",
+            to: 5150
+        )
+
+        XCTAssertEqual(result, .posted)
+        XCTAssertEqual(
+            backend.postedEvents.map(\.phase),
+            [.keyDown, .keyUp, .keyDown, .keyUp]
+        )
+        XCTAssertEqual(
+            backend.postedEvents.map(\.virtualKey),
+            Array(repeating: CGKeyCode(kVK_Delete), count: 4)
+        )
+        XCTAssertEqual(backend.postedEvents.map(\.processIdentifier), Array(repeating: 5150, count: 4))
+    }
+
+    func test_systemReplacementPosterAnyConstructionFailurePostsNothing() {
+        for phase in [FinalTextUnicodeEventPhase.keyDown, .keyUp] {
+            let backend = FakeSystemUnicodeEventBackend(
+                failure: nil,
+                trace: FakePosterOperationTrace(),
+                keyboardFailurePhase: phase
+            )
+            let poster = SystemFinalTextCurrentFocusEventPoster(
+                backend: backend,
+                secureInputStateProvider: FakeSecureInputStateProvider(states: [false])
+            )
+
+            let result = poster.postReplacement(
+                deleteCharacterCount: 1,
+                insertText: "r",
+                to: 5150
+            )
+
+            XCTAssertEqual(result, .deliveryFailed, "phase: \(phase)")
+            XCTAssertEqual(backend.postedEvents, [], "phase: \(phase)")
+        }
+
+        let unicodeFailure = FakeSystemUnicodeEventBackend(
+            failure: .keyDown,
+            trace: FakePosterOperationTrace()
+        )
+        let poster = SystemFinalTextCurrentFocusEventPoster(
+            backend: unicodeFailure,
+            secureInputStateProvider: FakeSecureInputStateProvider(states: [false])
+        )
+
+        XCTAssertEqual(
+            poster.postReplacement(deleteCharacterCount: 1, insertText: "r", to: 5150),
+            .deliveryFailed
+        )
+        XCTAssertEqual(unicodeFailure.postedEvents, [])
     }
 
     func test_systemUnicodePosterConstructionFailuresPostNothing() {
@@ -211,7 +358,7 @@ final class FinalTextOutputSecurityTests: XCTestCase {
         XCTAssertEqual(secureInput.queryCount, 1)
         XCTAssertEqual(
             backend.operations,
-            ["source", "construct-down", "construct-up", "secure"]
+            ["source", "construct-down", "construct-up", "tag-down", "tag-up", "secure"]
         )
         XCTAssertEqual(backend.constructedEvents.map(\.phase), [.keyDown, .keyUp])
         XCTAssertEqual(backend.postedEvents, [])
@@ -379,19 +526,26 @@ private final class FakeSystemUnicodeEventBackend: FinalTextUnicodeEventBackend 
     }
 
     private let failure: Failure?
+    private let keyboardFailurePhase: FinalTextUnicodeEventPhase?
     private let source = FakeUnicodeEventSourceHandle()
     private let trace: FakePosterOperationTrace
     private(set) var sourceStateIDs: [CGEventSourceStateID] = []
     private(set) var constructedEvents: [FakeUnicodeEventHandle] = []
     private(set) var postedEvents: [FakePostedUnicodeEvent] = []
+    private(set) var taggedUserData: [Int64] = []
     var onConstructedEvent: ((FinalTextUnicodeEventPhase) -> Void)?
 
     var sourceIdentity: ObjectIdentifier { ObjectIdentifier(source) }
     var operations: [String] { trace.operations }
 
-    init(failure: Failure?, trace: FakePosterOperationTrace) {
+    init(
+        failure: Failure?,
+        trace: FakePosterOperationTrace,
+        keyboardFailurePhase: FinalTextUnicodeEventPhase? = nil
+    ) {
         self.failure = failure
         self.trace = trace
+        self.keyboardFailurePhase = keyboardFailurePhase
     }
 
     func makeEventSource(
@@ -415,11 +569,43 @@ private final class FakeSystemUnicodeEventBackend: FinalTextUnicodeEventBackend 
             phase: phase,
             sourceIdentity: ObjectIdentifier(source),
             utf16: utf16,
-            flags: flags
+            flags: flags,
+            virtualKey: nil
         )
         constructedEvents.append(event)
         onConstructedEvent?(phase)
         return event
+    }
+
+    func makeKeyboardEvent(
+        source: any FinalTextUnicodeEventSourceHandle,
+        phase: FinalTextUnicodeEventPhase,
+        virtualKey: CGKeyCode,
+        flags: CGEventFlags
+    ) -> (any FinalTextUnicodeEventHandle)? {
+        trace.record(phase == .keyDown ? "construct-delete-down" : "construct-delete-up")
+        if keyboardFailurePhase == phase { return nil }
+        let event = FakeUnicodeEventHandle(
+            phase: phase,
+            sourceIdentity: ObjectIdentifier(source),
+            utf16: [],
+            flags: flags,
+            virtualKey: virtualKey
+        )
+        constructedEvents.append(event)
+        return event
+    }
+
+    func setUserData(
+        _ userData: Int64,
+        for event: any FinalTextUnicodeEventHandle
+    ) {
+        guard let event = event as? FakeUnicodeEventHandle else {
+            XCTFail("poster tagged an event outside the injected backend")
+            return
+        }
+        trace.record(event.phase == .keyDown ? "tag-down" : "tag-up")
+        taggedUserData.append(userData)
     }
 
     func postUnicodeEvent(
@@ -431,9 +617,15 @@ private final class FakeSystemUnicodeEventBackend: FinalTextUnicodeEventBackend 
             return
         }
         let phaseName = event.phase == .keyDown ? "down" : "up"
-        trace.record("post-\(phaseName)-\(processIdentifier)")
+        let eventName = event.virtualKey == CGKeyCode(kVK_Delete) ? "delete-\(phaseName)" : phaseName
+        trace.record("post-\(eventName)-\(processIdentifier)")
         postedEvents.append(
-            FakePostedUnicodeEvent(phase: event.phase, processIdentifier: processIdentifier)
+            FakePostedUnicodeEvent(
+                phase: event.phase,
+                processIdentifier: processIdentifier,
+                virtualKey: event.virtualKey,
+                utf16: event.utf16
+            )
         )
     }
 }
@@ -447,23 +639,28 @@ private final class FakeUnicodeEventHandle: FinalTextUnicodeEventHandle {
     let sourceIdentity: ObjectIdentifier
     let utf16: [UInt16]
     let flags: CGEventFlags
+    let virtualKey: CGKeyCode?
 
     init(
         phase: FinalTextUnicodeEventPhase,
         sourceIdentity: ObjectIdentifier,
         utf16: [UInt16],
-        flags: CGEventFlags
+        flags: CGEventFlags,
+        virtualKey: CGKeyCode?
     ) {
         self.phase = phase
         self.sourceIdentity = sourceIdentity
         self.utf16 = utf16
         self.flags = flags
+        self.virtualKey = virtualKey
     }
 }
 
 private struct FakePostedUnicodeEvent: Equatable {
     let phase: FinalTextUnicodeEventPhase
     let processIdentifier: pid_t
+    let virtualKey: CGKeyCode?
+    let utf16: [UInt16]
 }
 
 @MainActor
