@@ -18,6 +18,12 @@ private let streamingIngressConfiguration = AudioIngressConfiguration(
 )
 
 private nonisolated final class StreamingOperationRaceGate: @unchecked Sendable {
+    enum SuccessClaim {
+        case won
+        case deadlineExpired
+        case lost
+    }
+
     private let lock = NSLock()
     private var isSettled = false
 
@@ -27,6 +33,21 @@ private nonisolated final class StreamingOperationRaceGate: @unchecked Sendable 
         guard !isSettled else { return false }
         isSettled = true
         return true
+    }
+
+    func claimSuccess(
+        deadline: ContinuousClock.Instant?,
+        now: @Sendable () -> ContinuousClock.Instant
+    ) -> SuccessClaim {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !isSettled else { return .lost }
+        if let deadline, now() >= deadline {
+            isSettled = true
+            return .deadlineExpired
+        }
+        isSettled = true
+        return .won
     }
 }
 
@@ -193,6 +214,12 @@ class MainViewModel: ObservableObject {
         case finishing
     }
 
+    private enum OutputPreservationState: Equatable {
+        case none
+        case committedSafe
+        case deliveryUncertain
+    }
+
     private enum SessionCreationOutcome {
         case ready(any SpeechStreamingSession, attemptIdentifier: UInt64)
         case retry
@@ -227,6 +254,7 @@ class MainViewModel: ObservableObject {
     private let overlayPresenter: RecordingOverlayPresenting
     private let currentFocusAppendSessionFactory: (any CurrentFocusProvisionalOutputSessionFactory)?
     private let streamingDrainPolicy: StreamingDrainPolicy
+    private let streamingMonotonicNow: @Sendable () -> ContinuousClock.Instant
     private let streamingRetryDelay: @Sendable (Int) -> UInt64
     private let streamingRetrySleeper: @Sendable (UInt64) async throws -> Void
     private let permissionManager = PermissionManager.shared
@@ -263,7 +291,7 @@ class MainViewModel: ObservableObject {
     private var postReleaseDrainDeadline: ContinuousClock.Instant?
     private var postReleaseDrainTask: Task<Void, Never>?
     private var acceptedPacket = false
-    private var hasUsableHeldRecognition = false
+    private var outputPreservationState = OutputPreservationState.none
     private var stopSoundPlayed = false
     private var isCompletionFeedbackPresented = false
 
@@ -281,6 +309,9 @@ class MainViewModel: ObservableObject {
         overlayPresenter: RecordingOverlayPresenting? = nil,
         currentFocusAppendSessionFactory: (any CurrentFocusProvisionalOutputSessionFactory)? = nil,
         streamingDrainPolicy: StreamingDrainPolicy = StreamingDrainPolicy(),
+        streamingMonotonicNow: @escaping @Sendable () -> ContinuousClock.Instant = {
+            ContinuousClock.now
+        },
         streamingRetryDelay: (@Sendable (Int) -> UInt64)? = nil,
         streamingRetrySleeper: (@Sendable (UInt64) async throws -> Void)? = nil
     ) {
@@ -292,6 +323,7 @@ class MainViewModel: ObservableObject {
         self.accessibilityClient = accessibilityClient ?? MacAccessibilityClient()
         self.overlayPresenter = overlayPresenter ?? OverlayWindowController.shared
         self.streamingDrainPolicy = streamingDrainPolicy
+        self.streamingMonotonicNow = streamingMonotonicNow
         if let currentFocusAppendSessionFactory {
             self.currentFocusAppendSessionFactory = currentFocusAppendSessionFactory
         } else if audioRecorder == nil,
@@ -471,7 +503,7 @@ class MainViewModel: ObservableObject {
         postReleaseDrainTask?.cancel()
         postReleaseDrainTask = nil
         acceptedPacket = false
-        hasUsableHeldRecognition = false
+        outputPreservationState = .none
         stopSoundPlayed = false
         attemptedFirstPartialRebind = false
         attemptedUnboundAppendArm = false
@@ -1029,15 +1061,20 @@ class MainViewModel: ObservableObject {
         admitSuccess: @escaping @MainActor (Value) -> AdmittedValue,
         body: @escaping @Sendable () async throws -> Value
     ) async -> WatchedOperationResult<AdmittedValue> {
+        let remainingBudget = remainingDrainNanoseconds()
+        guard remainingBudget != 0 else { return .failure(.timeout) }
         let timeoutNanoseconds = streamingDrainPolicy.operationTimeout(
-            remainingDrainNanoseconds: remainingDrainNanoseconds()
+            remainingDrainNanoseconds: remainingBudget
         )
         let gate = StreamingOperationRaceGate()
+        let monotonicNow = streamingMonotonicNow
         let (stream, continuation) = AsyncStream<WatchedOperationResult<AdmittedValue>>.makeStream()
         let task = Task<Value, Error>(priority: .high) {
             do {
                 let value = try await body()
-                guard gate.claimSettlement() else {
+                let deadline = self.postReleaseDrainDeadline
+                switch gate.claimSuccess(deadline: deadline, now: monotonicNow) {
+                case .lost:
                     await onLateSuccess(value)
                     logger.info(
                         """
@@ -1048,6 +1085,13 @@ class MainViewModel: ObservableObject {
                         """
                     )
                     return value
+                case .deadlineExpired:
+                    await onLateSuccess(value)
+                    continuation.yield(.failure(.timeout))
+                    continuation.finish()
+                    return value
+                case .won:
+                    break
                 }
                 let admittedValue = await admitSuccess(value)
                 continuation.yield(.success(admittedValue))
@@ -1074,10 +1118,21 @@ class MainViewModel: ObservableObject {
             }
         }
         var iterator = stream.makeAsyncIterator()
-        let result = await iterator.next() ?? .failure(.cancelled)
+        let result = await withTaskCancellationHandler {
+            await iterator.next()
+        } onCancel: {
+            if gate.claimSettlement() {
+                continuation.finish()
+            }
+            task.cancel()
+            timeout.cancel()
+        }
+        if case nil = result {
+            _ = gate.claimSettlement()
+        }
         task.cancel()
         timeout.cancel()
-        return result
+        return result ?? .failure(.cancelled)
     }
 
     private func streamFailure(for error: Error) -> StreamFailure {
@@ -1120,7 +1175,7 @@ class MainViewModel: ObservableObject {
 
     private func remainingDrainNanoseconds() -> UInt64? {
         guard let postReleaseDrainDeadline else { return nil }
-        let remaining = ContinuousClock.now.duration(to: postReleaseDrainDeadline)
+        let remaining = streamingMonotonicNow().duration(to: postReleaseDrainDeadline)
         guard remaining > .zero else { return 0 }
         let components = remaining.components
         let seconds = UInt64(max(components.seconds, 0))
@@ -1188,9 +1243,13 @@ class MainViewModel: ObservableObject {
         identity: StreamingSessionIdentity
     ) -> Bool {
         switch outcome {
-        case .exactCommitted, .suffixCommitted, .staleGeneration:
+        case .exactCommitted, .suffixCommitted:
+            outputPreservationState = .committedSafe
+            return true
+        case .staleGeneration:
             return true
         case .preservedDivergence, .preservedDestinationLoss, .deliveryUncertain:
+            outputPreservationState = .deliveryUncertain
             publishCompletionFeedback(.provisionalOutputPreserved)
             return true
         case .preservedSecurityRejection:
@@ -1317,7 +1376,6 @@ class MainViewModel: ObservableObject {
             eventKind: eventKind,
             rawUTF16Count: text.utf16.count
         )
-        recordUsableRecognitionIfEligible(text, packetIndex: context.packetIndex)
         guard reservePacketIndex(
             text: text,
             context: context,
@@ -1446,6 +1504,7 @@ class MainViewModel: ObservableObject {
     ) -> ChangedSnapshotOutput {
         if let cursorSession {
             try? cursorSession.handle(.partial(snapshot), generation: identity.generation)
+            recordCursorOutputState(cursorSession.state)
             return ChangedSnapshotOutput(
                 route: "verifiedAX",
                 outcome: "offered",
@@ -1469,15 +1528,6 @@ class MainViewModel: ObservableObject {
             outcome: String(describing: outcome),
             shouldStop: interpretAppendApplyOutcome(outcome, identity: identity)
         )
-    }
-
-    private func recordUsableRecognitionIfEligible(_ text: String, packetIndex: Int?) {
-        guard packetIndex != nil,
-              responseOutputLedger.isAdmissionOpen,
-              !isContentless(text) else {
-            return
-        }
-        hasUsableHeldRecognition = true
     }
 
     private func classifyPacketAdmission(
@@ -1549,7 +1599,6 @@ class MainViewModel: ObservableObject {
         } else {
             finalText = text
             terminalEligibility = "eligible"
-            hasUsableHeldRecognition = true
         }
         let metrics = finalText.map(responseOutputLedger.metrics(for:))
         let finalization = finalizeExistingOutputOwner(
@@ -1566,7 +1615,7 @@ class MainViewModel: ObservableObject {
             outputOutcome: finalization.outcome
         ))
         guard finalization.mayCompleteNormally else { return true }
-        if finalText == nil, !hasUsableHeldRecognition {
+        if finalText == nil, outputPreservationState == .none {
             overlayMessage = "未识别到内容"
         }
         if isContentless(text), !isCompletionFeedbackPresented {
@@ -1586,7 +1635,19 @@ class MainViewModel: ObservableObject {
         if let cursorSession {
             if let finalText {
                 try? cursorSession.handle(.final(finalText), generation: identity.generation)
-                return (true, "authoritativeFinalOffered")
+                switch cursorSession.state {
+                case .committed:
+                    outputPreservationState = .committedSafe
+                    return (true, "authoritativeFinalCommitted")
+                case .invalid:
+                    outputPreservationState = .deliveryUncertain
+                    publishCompletionFeedback(.provisionalOutputPreserved)
+                    return (true, "authoritativeFinalPreservedUncommitted")
+                default:
+                    outputPreservationState = .deliveryUncertain
+                    publishCompletionFeedback(.provisionalOutputPreserved)
+                    return (true, "authoritativeFinalUncommitted")
+                }
             }
             try? cursorSession.handle(.cancelled, generation: identity.generation)
             return (true, "cursorPreservedWithoutFinal")
@@ -1758,10 +1819,25 @@ class MainViewModel: ObservableObject {
                 message: streamingSecurityErrorMessage
             )
             return true
-        case .insertedFirst, .appendedSuffix, .duplicate, .revisionSuppressed,
-             .contentless, .unsafeTextSuppressed, .destinationChanged,
-             .deliveryUncertain, .staleGeneration:
+        case .insertedFirst, .appendedSuffix, .duplicate, .revisionSuppressed:
+            outputPreservationState = .committedSafe
             return false
+        case .deliveryUncertain:
+            outputPreservationState = .deliveryUncertain
+            return false
+        case .contentless, .unsafeTextSuppressed, .destinationChanged, .staleGeneration:
+            return false
+        }
+    }
+
+    private func recordCursorOutputState(_ state: CursorTextSessionState) {
+        switch state {
+        case .provisional, .committed, .preserved:
+            outputPreservationState = .committedSafe
+        case .invalid:
+            outputPreservationState = .deliveryUncertain
+        case .unavailable, .armed, .finalOnly:
+            break
         }
     }
 
@@ -1876,7 +1952,9 @@ class MainViewModel: ObservableObject {
     private func armPostReleaseDrainDeadlineIfNeeded(identity: StreamingSessionIdentity) {
         guard isActive(identity), captureClosed, postReleaseDrainDeadline == nil else { return }
         let timeout = streamingDrainPolicy.postReleaseDrainTimeoutNanoseconds
-        postReleaseDrainDeadline = ContinuousClock.now.advanced(by: .nanoseconds(Int64(timeout)))
+        postReleaseDrainDeadline = streamingMonotonicNow().advanced(
+            by: .nanoseconds(Int64(timeout))
+        )
         logStreamingLifecycle(
             identity: identity,
             attemptIdentifier: activeAttemptIdentifier ?? 0,
@@ -1894,7 +1972,7 @@ class MainViewModel: ObservableObject {
 
     private func expirePostReleaseDrain(identity: StreamingSessionIdentity) async {
         guard isActive(identity), captureClosed else { return }
-        let preservesUsableOutput = hasUsableHeldRecognition
+        let preservationState = outputPreservationState
         let session = activeStreamingSession
         let consumer = consumerTask
 
@@ -1918,9 +1996,12 @@ class MainViewModel: ObservableObject {
                 await session.cancel()
             }
         }
-        if preservesUsableOutput {
+        switch preservationState {
+        case .committedSafe:
             publishCompletionFeedback(.emptyFinalPreservedPartial)
-        } else {
+        case .deliveryUncertain:
+            publishCompletionFeedback(.provisionalOutputPreserved)
+        case .none:
             publishAbnormalTerminalState(
                 message: streamingFailureErrorMessage,
                 reportsError: true
@@ -1929,7 +2010,7 @@ class MainViewModel: ObservableObject {
         logger.warning(
             """
             Streaming drain expired generation=\(identity.generation, privacy: .public) \
-            preservedUsableOutput=\(preservesUsableOutput, privacy: .public)
+            preservation=\(String(describing: preservationState), privacy: .public)
             """
         )
     }
@@ -1966,7 +2047,7 @@ class MainViewModel: ObservableObject {
         streamingAttemptPhase = .idle
         captureClosed = false
         acceptedPacket = false
-        hasUsableHeldRecognition = false
+        outputPreservationState = .none
         stopSoundPlayed = false
         stopMaxDurationTimer()
         if !preservesCompletionFeedback {
@@ -2052,7 +2133,7 @@ class MainViewModel: ObservableObject {
         retrySleepTask = nil
         captureClosed = false
         acceptedPacket = false
-        hasUsableHeldRecognition = false
+        outputPreservationState = .none
         stopSoundPlayed = false
     }
 
