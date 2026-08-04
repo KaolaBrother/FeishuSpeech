@@ -30,6 +30,38 @@ nonisolated struct StreamingRetryPolicy: Sendable {
     }
 }
 
+nonisolated struct StreamingDrainPolicy: Equatable, Sendable {
+    let operationTimeoutNanoseconds: UInt64
+    let postReleaseDrainTimeoutNanoseconds: UInt64
+
+    init(
+        operationTimeoutNanoseconds: UInt64 = 30_000_000_000,
+        postReleaseDrainTimeoutNanoseconds: UInt64 = 60_000_000_000
+    ) {
+        precondition(operationTimeoutNanoseconds > 0)
+        precondition(postReleaseDrainTimeoutNanoseconds > 0)
+        self.operationTimeoutNanoseconds = operationTimeoutNanoseconds
+        self.postReleaseDrainTimeoutNanoseconds = postReleaseDrainTimeoutNanoseconds
+    }
+
+    func operationTimeout(remainingDrainNanoseconds: UInt64?) -> UInt64 {
+        guard let remainingDrainNanoseconds else {
+            return operationTimeoutNanoseconds
+        }
+        return min(operationTimeoutNanoseconds, remainingDrainNanoseconds)
+    }
+
+    func retryDelay(
+        _ requestedNanoseconds: UInt64,
+        remainingDrainNanoseconds: UInt64?
+    ) -> UInt64 {
+        guard let remainingDrainNanoseconds else {
+            return requestedNanoseconds
+        }
+        return min(requestedNanoseconds, remainingDrainNanoseconds)
+    }
+}
+
 nonisolated struct AudioIngressConfiguration: Equatable, Sendable {
     let packetByteCount: Int
     let minimumTailByteCount: Int
