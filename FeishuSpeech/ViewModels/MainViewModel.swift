@@ -134,7 +134,14 @@ class MainViewModel: ObservableObject {
         let eligibility: String
         let ownership: String
         let metrics: ResponseOutputLedger.SnapshotMetrics?
+        let outputRoute: String
         let outputOutcome: String
+    }
+
+    private struct ChangedSnapshotOutput {
+        let route: String
+        let outcome: String
+        let shouldStop: Bool
     }
 
     private enum ResponseEligibility {
@@ -1007,6 +1014,7 @@ class MainViewModel: ObservableObject {
                 eligibility: "eligible",
                 ownership: "ownedResponse",
                 metrics: metrics,
+                outputRoute: output.route,
                 outputOutcome: output.outcome
             ))
             return output.shouldStop
@@ -1017,6 +1025,7 @@ class MainViewModel: ObservableObject {
                 eligibility: "eligible",
                 ownership: "ownedResponse",
                 metrics: metrics,
+                outputRoute: "none",
                 outputOutcome: "notOffered"
             ))
             return false
@@ -1033,6 +1042,7 @@ class MainViewModel: ObservableObject {
                 eligibility: "eligible",
                 ownership: "historicalReplaySuppressed",
                 metrics: metrics,
+                outputRoute: "none",
                 outputOutcome: "notOffered"
             ))
             return false
@@ -1051,20 +1061,31 @@ class MainViewModel: ObservableObject {
         _ snapshot: String,
         identity: StreamingSessionIdentity,
         source: CurrentFocusHypothesisSource
-    ) -> (outcome: String, shouldStop: Bool) {
+    ) -> ChangedSnapshotOutput {
         if let cursorSession {
             try? cursorSession.handle(.partial(snapshot), generation: identity.generation)
-            return ("cursorOffered", false)
+            return ChangedSnapshotOutput(
+                route: "verifiedAX",
+                outcome: "offered",
+                shouldStop: false
+            )
         }
-        guard let currentFocusAppendSession else { return ("ownerUnavailable", false) }
+        guard let currentFocusAppendSession else {
+            return ChangedSnapshotOutput(
+                route: "none",
+                outcome: "ownerUnavailable",
+                shouldStop: false
+            )
+        }
         let outcome = currentFocusAppendSession.applyOpaqueHypothesis(
             snapshot,
             generation: identity.generation,
             source: source
         )
-        return (
-            String(describing: outcome),
-            interpretAppendApplyOutcome(outcome, identity: identity)
+        return ChangedSnapshotOutput(
+            route: "currentFocusKeyboard",
+            outcome: String(describing: outcome),
+            shouldStop: interpretAppendApplyOutcome(outcome, identity: identity)
         )
     }
 
@@ -1125,6 +1146,7 @@ class MainViewModel: ObservableObject {
             eligibility: "terminalNotAdmitted",
             ownership: "notOwned",
             metrics: nil,
+            outputRoute: "sealOnly",
             outputOutcome: finalization.outcome
         ))
         guard finalization.mayCompleteNormally else { return true }
@@ -1166,6 +1188,7 @@ class MainViewModel: ObservableObject {
             eligibility: eligibility,
             ownership: "notOwned",
             metrics: nil,
+            outputRoute: "none",
             outputOutcome: eligibility == "sealed" ? "sealedSuppressed" : "notOffered"
         ))
     }
@@ -1180,6 +1203,9 @@ class MainViewModel: ObservableObject {
         }
         let packetIndexValue = receipt.context.packetIndex ?? -1
         let metrics = receipt.metrics
+        let decision = receipt.ownership == "historicalReplaySuppressed"
+            ? "suppressed"
+            : metrics?.decision ?? "suppressed"
         logger.info(
             """
             Streaming response receipt generation=\(receipt.context.identity.generation, privacy: .public) \
@@ -1188,7 +1214,7 @@ class MainViewModel: ObservableObject {
             source=\(sourceName, privacy: .public) event=\(receipt.context.eventKind, privacy: .public) \
             eligibility=\(receipt.eligibility, privacy: .public) \
             ownership=\(receipt.ownership, privacy: .public) \
-            decision=\(metrics?.decision ?? "suppressed", privacy: .public) \
+            decision=\(decision, privacy: .public) \
             previousUTF16=\(metrics?.previousUTF16Count ?? 0, privacy: .public) \
             newUTF16=\(receipt.context.rawUTF16Count, privacy: .public) \
             commonUTF16=\(metrics?.commonPrefixUTF16Count ?? 0, privacy: .public) \
@@ -1198,7 +1224,8 @@ class MainViewModel: ObservableObject {
             backspaces=\(metrics?.deleteCharacterCount ?? 0, privacy: .public) \
             insertionUTF16=\(metrics?.insertUTF16Count ?? 0, privacy: .public) \
             insertionCharacters=\(metrics?.insertCharacterCount ?? 0, privacy: .public) \
-            output=\(receipt.outputOutcome, privacy: .public)
+            route=\(receipt.outputRoute, privacy: .public) \
+            transaction=\(receipt.outputOutcome, privacy: .public)
             """
         )
     }
