@@ -141,6 +141,14 @@ protocol FinalTextCurrentFocusEventPosting: AnyObject {
         to processIdentifier: pid_t,
         whileInterferenceEpochIsUnchanged: () -> Bool
     ) -> FinalTextCurrentFocusPostResult
+    func postReplacement(
+        deleteCharacterCount: Int,
+        insertText: String,
+        to processIdentifier: pid_t,
+        postCompleteSyntheticPairIfInterferenceEpochIsUnchanged pairGate: (
+            (_ postPair: () -> Void) -> Bool
+        )
+    ) -> FinalTextCurrentFocusPostResult
 }
 
 extension FinalTextCurrentFocusEventPosting {
@@ -160,6 +168,24 @@ extension FinalTextCurrentFocusEventPosting {
         whileInterferenceEpochIsUnchanged: () -> Bool
     ) -> FinalTextCurrentFocusPostResult {
         guard whileInterferenceEpochIsUnchanged() else { return .deliveryFailed }
+        return postReplacement(
+            deleteCharacterCount: deleteCharacterCount,
+            insertText: insertText,
+            to: processIdentifier
+        )
+    }
+
+    func postReplacement(
+        deleteCharacterCount: Int,
+        insertText: String,
+        to processIdentifier: pid_t,
+        postCompleteSyntheticPairIfInterferenceEpochIsUnchanged pairGate: (
+            (_ postPair: () -> Void) -> Bool
+        )
+    ) -> FinalTextCurrentFocusPostResult {
+        guard pairGate({}) else {
+            return .deliveryFailed
+        }
         return postReplacement(
             deleteCharacterCount: deleteCharacterCount,
             insertText: insertText,
@@ -307,7 +333,10 @@ final class SystemFinalTextCurrentFocusEventPoster: FinalTextCurrentFocusEventPo
             deleteCharacterCount: deleteCharacterCount,
             insertText: insertText,
             to: processIdentifier,
-            whileInterferenceEpochIsUnchanged: { true }
+            postCompleteSyntheticPairIfInterferenceEpochIsUnchanged: { postPair in
+                postPair()
+                return true
+            }
         )
     }
 
@@ -316,6 +345,26 @@ final class SystemFinalTextCurrentFocusEventPoster: FinalTextCurrentFocusEventPo
         insertText: String,
         to processIdentifier: pid_t,
         whileInterferenceEpochIsUnchanged: () -> Bool
+    ) -> FinalTextCurrentFocusPostResult {
+        postReplacement(
+            deleteCharacterCount: deleteCharacterCount,
+            insertText: insertText,
+            to: processIdentifier,
+            postCompleteSyntheticPairIfInterferenceEpochIsUnchanged: { postPair in
+                guard whileInterferenceEpochIsUnchanged() else { return false }
+                postPair()
+                return true
+            }
+        )
+    }
+
+    func postReplacement(
+        deleteCharacterCount: Int,
+        insertText: String,
+        to processIdentifier: pid_t,
+        postCompleteSyntheticPairIfInterferenceEpochIsUnchanged pairGate: (
+            (_ postPair: () -> Void) -> Bool
+        )
     ) -> FinalTextCurrentFocusPostResult {
         guard processIdentifier > 0,
               deleteCharacterCount >= 0,
@@ -370,13 +419,30 @@ final class SystemFinalTextCurrentFocusEventPoster: FinalTextCurrentFocusEventPo
         guard !secureInputStateProvider.isSecureInputEnabled() else {
             return .securityRejected
         }
+        return postPreparedPairs(
+            backspacePairs,
+            insertionPair: insertionPair,
+            to: processIdentifier,
+            pairGate: pairGate
+        ) ? .posted : .deliveryFailed
+    }
+
+    private func postPreparedPairs(
+        _ backspacePairs: [[any FinalTextUnicodeEventHandle]],
+        insertionPair: [any FinalTextUnicodeEventHandle],
+        to processIdentifier: pid_t,
+        pairGate: ((_ postPair: () -> Void) -> Bool)
+    ) -> Bool {
         for pair in backspacePairs {
-            guard whileInterferenceEpochIsUnchanged() else { return .deliveryFailed }
-            pair.forEach { backend.postUnicodeEvent($0, to: processIdentifier) }
+            let posted = pairGate {
+                pair.forEach { backend.postUnicodeEvent($0, to: processIdentifier) }
+            }
+            guard posted else { return false }
         }
-        guard whileInterferenceEpochIsUnchanged() else { return .deliveryFailed }
-        insertionPair.forEach { backend.postUnicodeEvent($0, to: processIdentifier) }
-        return .posted
+        guard !insertionPair.isEmpty else { return true }
+        return pairGate {
+            insertionPair.forEach { backend.postUnicodeEvent($0, to: processIdentifier) }
+        }
     }
 }
 

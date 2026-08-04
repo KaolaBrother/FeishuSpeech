@@ -119,12 +119,35 @@ protocol CurrentFocusInputMonitoring: AnyObject {
     var interferenceEpoch: UInt64 { get }
     func startMonitoring(_ handler: @escaping @MainActor () -> Void)
     func armMonitoringFailClosed(_ handler: @escaping @MainActor () -> Void) -> Bool
+    func armMonitoringFailClosedWithEpoch(
+        _ handler: @escaping @MainActor () -> Void
+    ) -> UInt64?
+    func postCompleteSyntheticPairIfInterferenceEpochIsUnchanged(
+        expectedEpoch: UInt64,
+        _ postPair: () -> Void
+    ) -> Bool
     func stopMonitoring()
 }
 
 extension CurrentFocusInputMonitoring {
     var interferenceEpoch: UInt64 { 0 }
     func armMonitoringFailClosed(_: @escaping @MainActor () -> Void) -> Bool { true }
+
+    func armMonitoringFailClosedWithEpoch(
+        _ handler: @escaping @MainActor () -> Void
+    ) -> UInt64? {
+        guard armMonitoringFailClosed(handler) else { return nil }
+        return interferenceEpoch
+    }
+
+    func postCompleteSyntheticPairIfInterferenceEpochIsUnchanged(
+        expectedEpoch: UInt64,
+        _ postPair: () -> Void
+    ) -> Bool {
+        guard interferenceEpoch == expectedEpoch else { return false }
+        postPair()
+        return true
+    }
 }
 
 nonisolated final class CurrentFocusInputInterferenceEpoch: @unchecked Sendable {
@@ -140,11 +163,34 @@ nonisolated final class CurrentFocusInputInterferenceEpoch: @unchecked Sendable 
         return rawValue
     }
 
+    func installAndCaptureEpoch(_ installation: () -> Bool) -> UInt64? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard installation() else { return nil }
+        return rawValue
+    }
+
+    func performIfUnchanged(expectedEpoch: UInt64, _ operation: () -> Void) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard rawValue == expectedEpoch else { return false }
+        operation()
+        return true
+    }
+
     func observePreDispatch(type: CGEventType, event: CGEvent) {
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            advance()
+            return
+        }
         guard event.getIntegerValueField(.eventSourceUserData) != FeishuSpeechSyntheticEventTag.value,
               Self.isInterferingPhysicalInput(type: type, event: event) else {
             return
         }
+        advance()
+    }
+
+    private func advance() {
         lock.lock()
         rawValue &+= 1
         lock.unlock()
@@ -216,12 +262,14 @@ final class CurrentFocusAppendSession: CurrentFocusProvisionalOutputSession {
             let suspendForInput: @MainActor () -> Void = { [weak self] in
                 self?.suspend(.deliveryUncertain)
             }
+            _ = inputMonitor.interferenceEpoch
             inputMonitor.startMonitoring(suspendForInput)
-            if inputMonitor.armMonitoringFailClosed(suspendForInput) {
-                armedInputInterferenceEpoch = inputMonitor.interferenceEpoch
-            } else {
+            guard inputMonitor.armMonitoringFailClosed(suspendForInput),
+                  let armedEpoch = inputMonitor.armMonitoringFailClosedWithEpoch(suspendForInput) else {
                 suspend(.deliveryUncertain)
+                return
             }
+            armedInputInterferenceEpoch = armedEpoch
         }
     }
 
@@ -256,8 +304,8 @@ final class CurrentFocusAppendSession: CurrentFocusProvisionalOutputSession {
             deleteCharacterCount: deleteCharacterCount,
             insertText: insertText,
             to: boundProcessIdentifier,
-            whileInterferenceEpochIsUnchanged: { [weak self] in
-                self?.inputInterferenceEpochIsUnchanged() ?? false
+            postCompleteSyntheticPairIfInterferenceEpochIsUnchanged: { [weak self] postPair in
+                self?.postCompleteSyntheticPairIfInputEpochIsUnchanged(postPair) ?? false
             }
         ) {
         case .posted:
@@ -353,6 +401,19 @@ final class CurrentFocusAppendSession: CurrentFocusProvisionalOutputSession {
     private func inputInterferenceEpochIsUnchanged() -> Bool {
         guard let inputMonitor, let armedInputInterferenceEpoch else { return true }
         return inputMonitor.interferenceEpoch == armedInputInterferenceEpoch
+    }
+
+    private func postCompleteSyntheticPairIfInputEpochIsUnchanged(
+        _ postPair: () -> Void
+    ) -> Bool {
+        guard let inputMonitor, let armedInputInterferenceEpoch else {
+            postPair()
+            return true
+        }
+        return inputMonitor.postCompleteSyntheticPairIfInterferenceEpochIsUnchanged(
+            expectedEpoch: armedInputInterferenceEpoch,
+            postPair
+        )
     }
 
     private func usableFinalValue(_ value: String?) -> String? {
@@ -599,24 +660,60 @@ private final class NoopCurrentFocusInputMonitor: CurrentFocusInputMonitoring {
 
 @MainActor
 final class WorkspaceCurrentFocusInputMonitor: CurrentFocusInputMonitoring {
+    private enum PendingArmResult {
+        case armed(epoch: UInt64)
+        case failed
+
+        var epoch: UInt64? {
+            guard case .armed(let epoch) = self else { return nil }
+            return epoch
+        }
+    }
+
     private var localMonitor: Any?
     private var globalMonitor: Any?
-    private var pendingStartResult: Bool?
+    private var pendingArmResult: PendingArmResult?
 
     var interferenceEpoch: UInt64 {
         CurrentFocusInputInterferenceEpoch.shared.value
     }
 
     func startMonitoring(_ handler: @escaping @MainActor () -> Void) {
-        pendingStartResult = installMonitoring(handler)
+        prepareAtomicArm(handler)
     }
 
     func armMonitoringFailClosed(_ handler: @escaping @MainActor () -> Void) -> Bool {
-        if let pendingStartResult {
-            self.pendingStartResult = nil
-            return pendingStartResult
+        if pendingArmResult == nil {
+            prepareAtomicArm(handler)
         }
-        return installMonitoring(handler)
+        return pendingArmResult?.epoch != nil
+    }
+
+    func armMonitoringFailClosedWithEpoch(
+        _ handler: @escaping @MainActor () -> Void
+    ) -> UInt64? {
+        if pendingArmResult == nil {
+            prepareAtomicArm(handler)
+        }
+        defer { pendingArmResult = nil }
+        return pendingArmResult?.epoch
+    }
+
+    func postCompleteSyntheticPairIfInterferenceEpochIsUnchanged(
+        expectedEpoch: UInt64,
+        _ postPair: () -> Void
+    ) -> Bool {
+        CurrentFocusInputInterferenceEpoch.shared.performIfUnchanged(
+            expectedEpoch: expectedEpoch,
+            postPair
+        )
+    }
+
+    private func prepareAtomicArm(_ handler: @escaping @MainActor () -> Void) {
+        let epoch = CurrentFocusInputInterferenceEpoch.shared.installAndCaptureEpoch {
+            installMonitoring(handler)
+        }
+        pendingArmResult = epoch.map(PendingArmResult.armed) ?? .failed
     }
 
     private func installMonitoring(_ handler: @escaping @MainActor () -> Void) -> Bool {
@@ -655,7 +752,7 @@ final class WorkspaceCurrentFocusInputMonitor: CurrentFocusInputMonitoring {
     }
 
     func stopMonitoring() {
-        pendingStartResult = nil
+        pendingArmResult = nil
         if let localMonitor {
             NSEvent.removeMonitor(localMonitor)
             self.localMonitor = nil
