@@ -185,7 +185,8 @@ Every update replaces the complete app-owned provisional range on that captured 
 and after a mutation, the writer validates generation, frontmost PID, focused element, caret,
 owned range, and exact prior text. Accessibility-returned ranges define ownership; Swift
 `String.count` does not. Any mismatch invalidates the writer permanently for that hold, and late
-events write nothing.
+events write nothing. Verified AX replacement may carry LF/newline as multiline text data; it does
+not synthesize Return.
 
 When a non-secure destination was captured but cannot support live range replacement, the initial
 `.finalOnly` result arms a continuous keyboard owner bound to the captured PID and exact
@@ -202,11 +203,23 @@ compares Swift `Character` arrays without normalization, finds the exact longest
 posts one Backspace pair for every previously owned divergent grapheme, then posts the replacement
 suffix. Equal snapshots post nothing; unsafe and contentless values remain ineligible.
 
+Route eligibility is intentionally asymmetric. All routes reject action-capable controls except
+that verified AX replacement may write LF as text data. The generic keyboard route rejects LF and
+all other C0/C1/DEL controls before snapshot ownership or event construction, so it cannot turn
+recognized text into Return, submit, or execute input.
+
 Every keyboard transaction rechecks generation/admission, live Secure Input, and the bound
 frontmost PID immediately before and after posting. A captured owner additionally validates the token's current security, original PID,
 and `CFEqual` identity of the current focused element before and after the synchronous mutation.
 Application activation change, PID/element drift, security rejection, generation invalidation, or
 uncertain delivery permanently suspends the owner.
+
+The existing HID `CGEventTap` is the synchronous interference authority. It increments a shared
+`NSLock`-protected epoch before dispatching physical key-down, non-Fn modifier-change, mouse-down,
+or mouse-drag events. The keyboard owner captures the epoch after input monitors arm, checks it
+before the transaction, before every destructive Backspace pair, and before suffix insertion.
+FeishuSpeech-tagged events and Fn transitions are excluded. Local/global AppKit monitors provide
+supplemental early suspension only; both must arm successfully or the owner fails closed.
 
 The keyboard poster accepts a positive bound PID and one replacement plan. It creates one tagged
 `.privateState` source and fully constructs all modifier-neutral Backspace down/up pairs followed
@@ -214,6 +227,9 @@ by the Unicode insertion down/up pair, when needed, before posting anything. Sou
 construction failure or the final security sample causes zero posts. `.posted` means only that the
 ordered transaction was submitted: CoreGraphics provides no target-control acceptance
 acknowledgement.
+
+An epoch change after some Backspaces may leave a partial visible mutation. The poster stops before
+the next destructive pair or suffix, permanently suspends the owner, and never rolls back.
 
 After any provisional delivery attempt, destination/security loss, or uncertainty, no full-text
 resend, one-shot current-focus insertion, Cmd+V, alternate target, or clipboard recovery is allowed.
@@ -223,8 +239,8 @@ owner was created or no post was attempted.
 The unbound path uses no pasteboard, selection, or cursor navigation. D-27-01 narrowly permits
 Backspace only up to this hold's recorded owned grapheme tail; it never deletes pre-existing text.
 Because it has no AX range, it cannot observe a caret move within the same process; text may
-therefore reach a different caret in that process. This residual risk is explicit. The local sink
-The previous snapshot advances only after a full transaction is submitted. Physical keyboard or
+therefore reach a different caret in that process. This residual risk is explicit. The previous
+snapshot advances only after a full transaction is submitted. Physical keyboard or
 mouse input, PID/activation change, security rejection, generation mismatch, or delivery
 uncertainty permanently suspends the owner without rollback. FeishuSpeech-tagged events and Fn
 transitions are exempt. At release, response/retry admission is already closed: action-2 and late
@@ -348,7 +364,9 @@ completion feedback. Direct lifecycle-free execution of the complete XCTest bund
 passing. That evidence predates issue #27 and does not prove snapshot reconciliation. Issue #27
 requires focused and full-suite coverage for duplicate, extension, shorter, revision, replay,
 Unicode-grapheme Backspace counts, transaction ordering/suspension, AX replacement, and release
-suppression.
+suppression. Multiline tests must prove LF is accepted only by AX range replacement and rejected by
+the generic keyboard route; interference tests must prove epoch checks at arming, pre-transaction,
+between Backspaces, and fail-closed monitor arming.
 
 `AudioRecorderRecoveryTests.swift` remains excluded from the test target because it is a recorded
 pre-existing AudioRecorder-owned blocker outside the #11/#12/#21 API recovery bundle.

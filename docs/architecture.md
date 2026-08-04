@@ -105,6 +105,8 @@ coordinator's latest snapshot; the writer replaces one app-owned provisional ran
 
 The owned range comes from Accessibility's returned ranges, not Swift character counts. Equal
 snapshots are no-ops. Shorter, longer, or revised snapshots replace the one verified range.
+LF/newline content is written through AX as multiline text data; this route does not synthesize a
+Return key event.
 Any focus,
 selection, caret, text, element, or generation mismatch permanently invalidates that writer.
 Late events are dropped and are never redirected to a newly focused control.
@@ -128,18 +130,32 @@ down/up pairs followed by the replacement suffix. Equal snapshots post nothing. 
 re-own historical indices, but may own a previously failed index once.
 
 The keyboard path checks Secure Input, generation/admission, and bound PID immediately before and
-after each transaction and observes application activation plus external keyboard/mouse input.
-FeishuSpeech-tagged events and Fn transitions do not self-suspend it. Captured sessions also validate the captured
+after each transaction. Before a snapshot can be claimed or posted on this route, LF and every
+other C0/C1/DEL action control are rejected so recognition text cannot become Return, submit, or
+execute input. Captured sessions also validate the captured
 token's current security, original PID, and exact focused `AXUIElement` identity through `CFEqual`
 before and after each mutation. Any PID/element/security/delivery uncertainty permanently suspends
 the owner for the hold.
 
+The existing HID `CGEventTap` is the synchronous physical-interference authority. Before dispatch,
+physical key-down, non-Fn modifier-change, mouse-down, and mouse-drag events increment one shared
+lock-protected epoch. The generic writer captures the epoch after monitoring arms and verifies it
+before the replacement transaction, before every destructive Backspace pair, and before suffix
+insertion. An epoch change permanently suspends output without rollback. Fn transitions and
+FeishuSpeech-tagged synthetic events do not advance the epoch.
+
+Local and global AppKit event monitors supplement this ordering guard with early main-actor
+suspension. They are not the authority; production requires both to arm, and arm failure fails
+closed before keyboard output.
+
 The low-level poster creates one tagged `.privateState` source and constructs every required event
 before posting: modifier-neutral Backspace down/up pairs, then a Unicode suffix down/up pair when
 needed, all to the same positive bound PID. Any construction failure or final security rejection
-produces zero posts. The prior snapshot advances only after the complete ordered transaction is
-submitted. There is no target acceptance acknowledgement, so a local `.posted` result cannot prove
-visible replacement.
+produces zero posts. The epoch is checked between destructive Backspace pairs and again before the
+suffix; an intervening physical event stops the remaining transaction and permanently suspends the
+owner. The prior snapshot advances only after the complete ordered transaction is submitted. There
+is no target acceptance acknowledgement, so a local `.posted` result cannot prove visible
+replacement.
 
 After destination/security loss, external caret-affecting input, or delivery uncertainty, the owner
 never rolls back, selects, navigates, resends a full value, switches target, uses Cmd+V, or falls
@@ -150,8 +166,9 @@ Without an AX range, the unbound owner cannot observe a caret move
 inside the same PID; that residual targeting risk is explicit. A divergent final leaves output
 unchanged rather than attempting destructive repair.
 
-Both paths reject automatic insertion for action-capable C0/C1/DEL control characters. An
-affirmatively detected secure target or Secure Event Input is fail-closed and receives
+All routes reject action-capable C0/C1/DEL controls except that verified AX range replacement may
+carry LF as multiline text data. The generic keyboard route rejects LF as well. An affirmatively
+detected secure target or Secure Event Input is fail-closed and receives
 neither synthetic input nor recovery copy. `autoInsert=false` produces no target or pasteboard
 mutation. Usable held recognition is tracked separately from output eligibility, so disabled,
 unsafe, or ownerless output is not misreported as empty recognition or a stream failure.
@@ -353,6 +370,16 @@ and secure-input status (issue #15). `PermissionManager.refreshMicrophoneStatus(
 current microphone authorization status without prompting and recomputes
 `allPermissionsGranted`, so permission changes made in System Settings are reflected at runtime.
 
+**Current-focus interference epoch**
+
+Issue #27 extends the existing HID event tap mask to physical key-down, non-Fn modifier changes,
+mouse-down, and mouse-drag events. At the start of the tap callback, before the event is returned
+for dispatch, `CurrentFocusInputInterferenceEpoch` increments a shared `NSLock`-protected counter.
+The generic writer uses that synchronous epoch rather than AppKit monitor callback timing to guard
+destructive replacement. FeishuSpeech's tagged synthetic events and the Fn transition itself are
+excluded. Local/global AppKit monitors remain supplemental; failure to install either prevents the
+writer from arming.
+
 ## TextInputSimulator — clipboard-restore contract
 
 The legacy compatibility helper in `TextInputSimulator` writes a final string to
@@ -360,13 +387,16 @@ The legacy compatibility helper in `TextInputSimulator` writes a final string to
 (issue #13, see `docs/decisions/D-13-01.md`). Production streaming output never uses this
 path. It instead:
 
-- accepts only text without C0, DEL, or C1 control scalars for automatic delivery;
+- permits LF only on the verified AX range path, where it is multiline text data; the generic
+  keyboard-event path rejects LF and all other C0/C1/DEL controls before claim/post;
 - when a destination token exists, targets that captured process with `CGEvent.postToPid` and
   validates the captured element and security state before and after delivery;
 - when AX capture/confirmation is unavailable, re-probes AX once on the first non-empty partial;
   if still unavailable, binds the frontmost PID and posts grapheme-aware Backspace-plus-Unicode
-  replacement transactions while Secure Input stays clear, external caret-affecting input is
-  absent, and the PID stays stable;
+  replacement transactions while Secure Input stays clear, the lock-protected HID interference
+  epoch stays unchanged at arming, pre-transaction, and between Backspaces, and the PID stays stable;
+- treats local/global AppKit event monitors as supplemental suspension signals and fails closed if
+  either monitor cannot arm;
 - gives captured final-only-capability targets the same continuous owner, additionally checking the original
   PID and exact AX element before/after each mutation; after any post attempt or uncertainty it
   never falls through to a full resend, Cmd+V, another target, or clipboard recovery;

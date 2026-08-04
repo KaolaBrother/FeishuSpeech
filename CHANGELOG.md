@@ -16,6 +16,7 @@
 - 新增 `MainViewModelTests` 覆盖 `MonitoringState` 失败映射、恢复清除和 cleanup 订阅释放路径（issues #22/#23/#24）
 
 ### Fixed
+- 收窄任意目标的键盘替换安全边界：LF/newline 与其他 C0/C1/DEL action controls 在 generic keyboard route claim/post 前被拒绝，避免 Return/submit/execute；verified AX range 仍可把 multiline text 作为数据替换。现有 HID event tap 以锁保护 interference epoch 提供同步权威，并在 arming、事务前、每个 Backspace 之间检查；AppKit local/global monitors 仅作补充且 arm 失败即 fail closed（issue #27）
 - 修复 Release 1.0 build 6 在 Fn 按住期间重复识别词：飞书响应现按完整不透明 snapshot 替换，不再按新 journal index 拼接；不同 packet index 返回相同 snapshot 时不产生输出（issue #27）
 - 修复较短与中途修订 snapshot 的任意目标输出：AX writer 直接替换其已验证 owned range；键盘 writer 只替换本次 hold 已输出的尾部。固定 PID、外部输入/Secure Input/目标漂移永久 suspension、无 rollback/no resend、无光标确认或运行时权限提示以及 Fn release 零 mutation 边界保持不变（issue #27）
 - 修复 build 5 的“只输出一个词”下游停滞：实机日志已证明最新一次 hold 在 13.55 秒内完成 66 个 HTTP-200 transaction，因此本地不再用原始响应字符串的相等/前缀关系决定响应身份，而是以 journal index 所有权拼接 held frontier（issue #26）
@@ -70,7 +71,7 @@
 
 ### Verification pending
 - 最新 build-5 安装版 UAT 已证明一次 13.55 秒 hold 内有 66 个 HTTP-200 transaction，但可见输出在一个词后停滞；这将故障收窄到传输之后，不能证明响应内容形态或目标接受。新的 journal-index ledger、重放一次所有权、release 禁止输出与隐私安全 receipt 仍需安装版 Release owner UAT，不声明真实端到端成功。
-- `CGEventPostToPid` 没有目标控件接受确认；本地 `.posted` 仅证明完整 PID-bound key-down/key-up pair 已提交，不能证明目标显示了 Unicode 文本。当前修正仍须安装版 owner UAT，若无可见输出应报告 PARTIAL，不能通过全局 HID、重复事件、破坏性编辑或不确定后的剪贴板回退扩展行为。
+- `CGEventPostToPid` 没有目标控件接受确认；本地 `.posted` 仅证明完整 PID-bound replacement transaction 已提交，不能证明目标完成了可见替换。当前修正仍须安装版 owner UAT，若无可见输出应报告 PARTIAL，不能通过全局 HID、重复事件、回滚或不确定后的剪贴板回退扩展行为。
 - 真实飞书凭据下的后续 action、终止请求空音频编码、首次 token 刷新同序列重试、PCM/tail 兼容性和慢网行为仍需安装版 Release UAT。issue #26 的本地拼接策略已由 build 6 证据否定；issue #27 将响应按可相同、变长、缩短或修订的完整不透明 snapshot 替换，仍不推断稳定词或做文本归一化。
 - TextEdit/原生控件、浏览器、Electron、终端和富文本编辑器的 Accessibility 范围、焦点干扰、Unicode 与 undo 行为仍需跨应用实机 UAT；当前不声明广泛兼容性。
 

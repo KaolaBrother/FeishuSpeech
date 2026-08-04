@@ -61,7 +61,7 @@ cp -R build/Build/Products/Release/FeishuSpeech.app /Applications/
 
 1. 将光标放在任意输入框中
 2. 按住 **Fn 键** 0.3 秒（菜单栏图标变红）
-3. 继续按住并说话；packet replay 所有权与识别文字状态彼此独立：同一 journal index 只处理一次，但每个新响应都是完整 snapshot。相同 snapshot 不产生按键；支持 AX 范围的输入框直接替换本次按键拥有的范围；任意当前焦点目标只删除本次按键已输出的分歧尾部（按 Swift `Character` 计数的 Backspace），再输入新 snapshot 的替换后缀
+3. 继续按住并说话；packet replay 所有权与识别文字状态彼此独立：同一 journal index 只处理一次，但每个新响应都是完整 snapshot。相同 snapshot 不产生按键；支持 AX 范围的输入框直接替换本次按键拥有的范围，并可把换行作为多行文本数据写入；任意当前焦点目标只删除本次按键已输出的分歧尾部（按 Swift `Character` 计数的 Backspace），再输入不含 LF/action controls 的替换后缀，绝不合成 Return/提交/执行
 4. 松开 **Fn 键**，等待“正在完成识别…”结束
 5. 松开 Fn 后只封口已有 snapshot。应用会在停止录音和等待网络排空前先关闭响应、重试和输出准入；`action=2`、在途 packet 与任何晚到 partial/final 都不能首次输出、追加、替换、Cmd+V 或复制。发布时一次性/final-only/手动剪贴板回退已全部移除
 
@@ -103,7 +103,7 @@ UAT 并非停在该阶段：它已成功取得 token、发送首个 `action=1` �
 
 ### 没有实时显示文字
 
-部分应用不提供可验证的 Accessibility 选区与范围读取能力。支持 AX 的目标会绑定原 PID 和精确 `AXUIElement`，并直接替换本次按键拥有的范围。无法建立 AX 范围时，应用绑定当时的前台 PID，以一笔串行事务发送恰好所需的 grapheme-counted Backspace，再输入 replacement suffix；相同 snapshot 不发送事件。物理键盘/鼠标输入、应用切换、安全输入、目标漂移或交付不确定会永久停止本次按键的后续替换，不回滚、不重发、不切换 writer、不复制。应用不会询问光标位置，也不会在按键期间弹出新的权限请求；无 AX 路径仍无法证明同一 PID 内由应用自身造成的光标移动。`CGEventPostToPid` 没有目标接受回执，因此安装版 Release owner UAT 仍是必需门槛。
+部分应用不提供可验证的 Accessibility 选区与范围读取能力。支持 AX 的目标会绑定原 PID 和精确 `AXUIElement`，并直接替换本次按键拥有的范围；LF 可作为多行文本数据写入，不会合成 Return。无法建立 AX 范围时，应用绑定当时的前台 PID，以一笔串行事务发送恰好所需的 grapheme-counted Backspace，再输入 replacement suffix；该键盘路由拒绝 LF 与所有 action controls。现有 HID event tap 在物理事件分发前同步更新锁保护的 interference epoch，并在 writer arming、事务前、每个破坏性 Backspace 之间复核；AppKit local/global monitors 只作补充，任一 monitor 无法 arm 都会 fail closed。物理输入、应用切换、安全输入、目标漂移或交付不确定会永久停止本次按键的后续替换，不回滚、不重发、不切换 writer、不复制。应用不会询问光标位置，也不会在按键期间弹出新的权限请求；无 AX 路径仍无法证明同一 PID 内由应用自身造成的光标移动。`CGEventPostToPid` 没有目标接受回执，因此安装版 Release owner UAT 仍是必需门槛。
 
 ### 开机启动
 
