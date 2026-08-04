@@ -1,9 +1,11 @@
 # Cursor-bound streaming speech design
 
 Status: issue #27 snapshot replacement and the final atomic HID interference gate are implemented
-locally through tests `8ebf31e` + `81dbfc8` and production `ec4ddd6`; final workflow gates and
-installed Release credential-bearing/cross-application UAT remain pending. Earlier
-`47d90ed`/`d138624` checks are intermediate, pre-atomic provenance only.
+locally in production `ec4ddd6`; `8ebf31e`/`81dbfc8` provide earlier atomic race/seam evidence,
+and `cd1132c` directly exercises `SystemFinalTextCurrentFocusEventPoster` through the real
+`CurrentFocusInputInterferenceEpoch` gate. Final workflow gates and installed Release
+credential-bearing/cross-application UAT remain pending. Earlier `47d90ed`/`d138624` checks are
+intermediate, pre-atomic provenance only.
 
 ## 1. Outcome
 
@@ -590,8 +592,9 @@ No cursor destination survives the process lifetime or is persisted to UserDefau
 4. **Cursor text session and issue #27 continuous output — implemented locally**
    - AX replace/read-back and fixed destination boundaries remain. The issue #26 suffix-only generic
      writer and blanket Backspace prohibition are replaced by the issue #27 transaction contract;
-     Final race tests landed in `8ebf31e` and the unified gate seam in `81dbfc8`; production
-     `ec4ddd6` atomically arms/captures the baseline and holds the shared gate across each pair.
+     Earlier atomic race tests landed in `8ebf31e` and the unified seam in `81dbfc8`; production
+     `ec4ddd6` atomically arms/captures the baseline and holds the shared gate across each pair,
+     while `cd1132c` directly exercises that production poster and epoch gate together.
 5. **Coordinator/state migration — implemented locally**
    - Production hot-key work uses one generation-owned recorder/ingress, ordered journal, fresh
      serial session attempts, hold-wide capped backoff, journal-indexed replay ownership,
@@ -715,8 +718,10 @@ then recorded 66 HTTP-200 transactions over 13.55 seconds while visible output s
 word, motivating issue #26's journal-indexed local frontier. Release 1.0 build 6 later proved that
 this concatenated complete snapshots and repeated text. [D-27-01](decisions/D-27-01.md) replaces
 that assembly rule with opaque snapshot replacement while retaining replay ownership and
-release-only sealing. Final race coverage `8ebf31e`, unified atomic-gate test seam `81dbfc8`, and
-production `ec4ddd6` establish the current LF/action-control and HID interference contract;
+release-only sealing. Earlier atomic race coverage `8ebf31e` and unified seam coverage `81dbfc8`
+support the current LF/action-control and HID interference contract; production `ec4ddd6` and
+`cd1132c`'s direct exercise of `SystemFinalTextCurrentFocusEventPoster` through the real
+`CurrentFocusInputInterferenceEpoch` gate establish the final production-gate provenance.
 `47d90ed`/`d138624` are intermediate pre-atomic steps. Final workflow gates and installed Release
 verification remain pending.
 

@@ -369,9 +369,12 @@ passing. That evidence predates issue #27 and does not prove snapshot reconcilia
 requires focused and full-suite coverage for duplicate, extension, shorter, revision, replay,
 Unicode-grapheme Backspace counts, transaction ordering/suspension, AX replacement, and release
 suppression. Multiline tests must prove LF is accepted only by AX range replacement and rejected by
-the generic keyboard route. Final interference tests `8ebf31e` + `81dbfc8` cover atomic baseline
-capture, a continuous lock hold across each complete pair, physical advance through the same gate,
-tap-disable loss-of-observability, and fail-closed monitor arming; production is `ec4ddd6`.
+the generic keyboard route. `8ebf31e` and `81dbfc8` provide earlier atomic race and unified-seam
+evidence, including baseline capture, continuous lock hold across each complete pair, physical
+advance through the same gate, tap-disable loss-of-observability, and fail-closed monitor arming.
+Production is `ec4ddd6`; `cd1132c` directly exercises `SystemFinalTextCurrentFocusEventPoster`
+through the real `CurrentFocusInputInterferenceEpoch` gate and is the final production-gate test
+provenance.
 
 `AudioRecorderRecoveryTests.swift` remains excluded from the test target because it is a recorded
 pre-existing AudioRecorder-owned blocker outside the #11/#12/#21 API recovery bundle.
