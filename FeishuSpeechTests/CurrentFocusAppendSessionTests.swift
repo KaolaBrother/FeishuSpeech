@@ -66,6 +66,30 @@ final class CurrentFocusAppendSessionTests: XCTestCase {
                 next: family + "y",
                 expectedDeleteCharacterCount: 1,
                 expectedInsertText: "y"
+            ),
+            SnapshotReplacementCase(
+                previous: "🇨🇳x",
+                next: "🇨🇳y",
+                expectedDeleteCharacterCount: 1,
+                expectedInsertText: "y"
+            ),
+            SnapshotReplacementCase(
+                previous: "你好猫",
+                next: "你好狗",
+                expectedDeleteCharacterCount: 1,
+                expectedInsertText: "狗"
+            ),
+            SnapshotReplacementCase(
+                previous: "שלוםא",
+                next: "שלוםב",
+                expectedDeleteCharacterCount: 1,
+                expectedInsertText: "ב"
+            ),
+            SnapshotReplacementCase(
+                previous: "line1\nold",
+                next: "line1\nnew",
+                expectedDeleteCharacterCount: 3,
+                expectedInsertText: "new"
             )
         ]
 
@@ -101,103 +125,114 @@ final class CurrentFocusAppendSessionTests: XCTestCase {
         }
     }
 
-    func test_exactUTF16ExtensionsPostOnlyUnseenSuffixesAcrossEmojiZWJCJKAndRTL() {
+    func test_completeExtensionSnapshotsPostOnlyUnseenSuffixAcrossEmojiZWJCJKAndRTL() {
         let context = makeContext()
         let first = "A"
         let family = "👨‍👩‍👧‍👦"
         let cjk = "中文"
         let rtl = "שלום"
 
-        XCTAssertEqual(
-            context.session.applyOpaqueHypothesis(first, generation: generation, source: .livePacket),
-            .insertedFirst
+        _ = context.session.applyOpaqueHypothesis(first, generation: generation, source: .livePacket)
+        _ = context.session.applyOpaqueHypothesis(
+            first + family,
+            generation: generation,
+            source: .livePacket
         )
-        XCTAssertEqual(
-            context.session.applyOpaqueHypothesis(
-                first + family,
-                generation: generation,
-                source: .livePacket
-            ),
-            .appendedSuffix
-        )
-        XCTAssertEqual(
-            context.session.applyOpaqueHypothesis(
-                first + family + cjk + rtl,
-                generation: generation,
-                source: .livePacket
-            ),
-            .appendedSuffix
+        _ = context.session.applyOpaqueHypothesis(
+            first + family + cjk + rtl,
+            generation: generation,
+            source: .livePacket
         )
 
-        assertPosted([first, family, cjk + rtl], by: context.poster)
-        XCTAssertTrue(
-            context.poster.requestedTexts.joined().utf16.elementsEqual((first + family + cjk + rtl).utf16),
-            "posted UTF-16 payloads must concatenate to the latest accepted hypothesis"
+        XCTAssertEqual(
+            context.poster.replacementRequests,
+            [
+                ReplacementRequest(
+                    deleteCharacterCount: 0,
+                    insertText: first,
+                    processIdentifier: boundProcessIdentifier
+                ),
+                ReplacementRequest(
+                    deleteCharacterCount: 0,
+                    insertText: family,
+                    processIdentifier: boundProcessIdentifier
+                ),
+                ReplacementRequest(
+                    deleteCharacterCount: 0,
+                    insertText: cjk + rtl,
+                    processIdentifier: boundProcessIdentifier
+                )
+            ]
         )
     }
 
-    func test_coordinatorAssembledGrowingFrontiersPostOnlyEachNewUTF16Suffix() {
+    func test_completeGrowingSnapshotsRemainBoundToOnePID() {
         let context = makeContext()
         let firstScalar = "one"
         let secondScalar = "👩🏽‍💻"
         let thirdScalar = "שלום"
-        let frontiers = [
+        let snapshots = [
             firstScalar,
             firstScalar + secondScalar,
             firstScalar + secondScalar + thirdScalar
         ]
 
-        let outcomes = frontiers.map { frontier in
-            context.session.applyOpaqueHypothesis(
-                frontier,
+        snapshots.forEach { snapshot in
+            _ = context.session.applyOpaqueHypothesis(
+                snapshot,
                 generation: generation,
                 source: .livePacket
             )
         }
 
-        XCTAssertEqual(outcomes, [.insertedFirst, .appendedSuffix, .appendedSuffix])
-        assertPosted([firstScalar, secondScalar, thirdScalar], by: context.poster)
-        XCTAssertTrue(
-            context.poster.requestedTexts.joined().utf16.elementsEqual(frontiers.last?.utf16 ?? "".utf16),
-            "the production append owner must receive a locally monotonic frontier and post only new UTF-16 units"
-        )
+        XCTAssertEqual(context.poster.requestedTexts, [firstScalar, secondScalar, thirdScalar])
         XCTAssertEqual(
             context.poster.destinationProcessIdentifiers,
             Array(repeating: boundProcessIdentifier, count: 3),
-            "assembling responses must not weaken the fixed-PID boundary"
+            "reconciling complete snapshots must not weaken the fixed-PID boundary"
         )
     }
 
-    func test_shorterRevisedAndCanonicallyEquivalentValuesAreSuppressedButLaterExactExtensionAppends() {
+    func test_shorterDivergentAndCombiningMarkSnapshotsReplaceOwnedTailThenExtend() {
         let context = makeContext()
-        let decomposed = "cafe\u{301}"
+        let decomposed = "cafe\u{301}x"
+
+        _ = context.session.applyOpaqueHypothesis(decomposed, generation: generation, source: .livePacket)
+        _ = context.session.applyOpaqueHypothesis("cafe\u{301}", generation: generation, source: .livePacket)
+        _ = context.session.applyOpaqueHypothesis("cafe\u{301}y", generation: generation, source: .livePacket)
+        _ = context.session.applyOpaqueHypothesis("revised", generation: generation, source: .livePacket)
+        _ = context.session.applyOpaqueHypothesis("revised!", generation: generation, source: .replayCatchUp)
 
         XCTAssertEqual(
-            context.session.applyOpaqueHypothesis(decomposed, generation: generation, source: .livePacket),
-            .insertedFirst
+            context.poster.replacementRequests,
+            [
+                ReplacementRequest(
+                    deleteCharacterCount: 0,
+                    insertText: decomposed,
+                    processIdentifier: boundProcessIdentifier
+                ),
+                ReplacementRequest(
+                    deleteCharacterCount: 1,
+                    insertText: "",
+                    processIdentifier: boundProcessIdentifier
+                ),
+                ReplacementRequest(
+                    deleteCharacterCount: 0,
+                    insertText: "y",
+                    processIdentifier: boundProcessIdentifier
+                ),
+                ReplacementRequest(
+                    deleteCharacterCount: 5,
+                    insertText: "revised",
+                    processIdentifier: boundProcessIdentifier
+                ),
+                ReplacementRequest(
+                    deleteCharacterCount: 0,
+                    insertText: "!",
+                    processIdentifier: boundProcessIdentifier
+                )
+            ]
         )
-        XCTAssertEqual(
-            context.session.applyOpaqueHypothesis("caf", generation: generation, source: .livePacket),
-            .revisionSuppressed
-        )
-        XCTAssertEqual(
-            context.session.applyOpaqueHypothesis("café", generation: generation, source: .livePacket),
-            .revisionSuppressed
-        )
-        XCTAssertEqual(
-            context.session.applyOpaqueHypothesis("revised", generation: generation, source: .livePacket),
-            .revisionSuppressed
-        )
-        XCTAssertEqual(
-            context.session.applyOpaqueHypothesis(
-                decomposed + "!",
-                generation: generation,
-                source: .replayCatchUp
-            ),
-            .appendedSuffix
-        )
-
-        assertPosted([decomposed, "!"], by: context.poster)
     }
 
     func test_contentlessAndUnsafeC0C1DELValuesNeverPostAndSafeExtensionCanRecover() {
@@ -524,19 +559,16 @@ final class CurrentFocusAppendSessionTests: XCTestCase {
         XCTAssertEqual(context.activationMonitor.stopCallCount, 1)
     }
 
-    func test_finalizeExactExtensionPostsSuffixOnce() {
+    func test_finalizeNeverPostsAReleaseTimeExtension() {
         let context = makeContext()
         _ = context.session.applyOpaqueHypothesis("base", generation: generation, source: .livePacket)
 
-        XCTAssertEqual(
-            context.session.finalize(
-                finalText: "base final",
-                lastAcceptedText: "base final",
-                generation: generation
-            ),
-            .suffixCommitted
+        _ = context.session.finalize(
+            finalText: "base final",
+            lastAcceptedText: "base final",
+            generation: generation
         )
-        assertPosted(["base", " final"], by: context.poster)
+        assertPosted(["base"], by: context.poster)
     }
 
     func test_finalizeRevisionOrShorteningPreservesEmittedTextWithoutRecoveryOutput() {
@@ -556,7 +588,7 @@ final class CurrentFocusAppendSessionTests: XCTestCase {
         }
     }
 
-    func test_finalizeEmptyPreservesEmittedOrUsesLastAcceptedThroughNormalGates() {
+    func test_finalizeEmptyPreservesEmittedAndNeverCreatesFirstOutput() {
         let emitted = makeContext()
         _ = emitted.session.applyOpaqueHypothesis("visible", generation: generation, source: .livePacket)
         XCTAssertEqual(
@@ -570,15 +602,12 @@ final class CurrentFocusAppendSessionTests: XCTestCase {
         assertPosted(["visible"], by: emitted.poster)
 
         let fallback = makeContext()
-        XCTAssertEqual(
-            fallback.session.finalize(
-                finalText: "",
-                lastAcceptedText: "accepted",
-                generation: generation
-            ),
-            .suffixCommitted
+        _ = fallback.session.finalize(
+            finalText: "",
+            lastAcceptedText: "accepted",
+            generation: generation
         )
-        assertPosted(["accepted"], by: fallback.poster)
+        XCTAssertEqual(fallback.poster.callCount, 0)
 
         let empty = makeContext()
         XCTAssertEqual(

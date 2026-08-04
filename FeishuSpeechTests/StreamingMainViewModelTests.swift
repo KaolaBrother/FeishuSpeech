@@ -940,10 +940,10 @@ final class StreamingMainViewModelTests: XCTestCase {
             context.accessibility.setSelectedTextCalls,
             [
                 "first frontier",
-                "first frontiercatch-up frontier",
-                "first frontiercatch-up frontierlive frontier"
+                "catch-up frontier",
+                "live frontier"
             ],
-            "replay must suppress historical indices and extend the held frontier only for newly owned indices"
+            "replay must suppress historical indices and offer each newly owned complete snapshot"
         )
         XCTAssertEqual(context.viewModel.activeSessionIdentityForTesting, identity)
         XCTAssertEqual(context.recorder.startStreamingCallCount, 1)
@@ -1152,7 +1152,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         }
     }
 
-    func test_unboundFirstPartialRebindsOnceAndGrowsOwnedRangeContinuously() async {
+    func test_unboundFirstPartialRebindsOnceAndReplacesOwnedRangeWithEachSnapshot() async {
         let context = makeContext(
             capability: .accessibilityUnavailable,
             rebindCapability: .live,
@@ -1177,18 +1177,18 @@ final class StreamingMainViewModelTests: XCTestCase {
             context.accessibility.setSelectedTextCalls,
             [
                 "a longer provisional value",
-                "a longer provisional valueshort",
-                "a longer provisional valueshortrevised frontier"
+                "short",
+                "revised frontier"
             ]
         )
-        XCTAssertEqual(context.accessibility.rangeText, "a longer provisional valueshortrevised frontier")
+        XCTAssertEqual(context.accessibility.rangeText, "revised frontier")
 
         context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
         await waitUntil { await context.session.finishCallCount == 1 }
 
         XCTAssertEqual(
             context.accessibility.setSelectedTextCalls.last,
-            "a longer provisional valueshortrevised frontier"
+            "revised frontier"
         )
         XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
         XCTAssertEqual(context.output.currentFocusInsertedTexts, [])
@@ -1224,7 +1224,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         XCTAssertEqual(disabled.output.currentFocusAttemptedTexts, [])
     }
 
-    func test_trulyUnboundModeConcatenatesEveryLivePacketResponseBeforeRelease() async {
+    func test_trulyUnboundModeOffersChangedCompleteSnapshotsBeforeRelease() async {
         let context = makeAppendContext(
             autoInsert: true,
             packetEvents: [
@@ -1243,9 +1243,9 @@ final class StreamingMainViewModelTests: XCTestCase {
 
         XCTAssertEqual(
             context.appendSession.appliedTexts,
-            ["first", "firstfirst extension", "firstfirst extensionfirst extension"]
+            ["first", "first extension"]
         )
-        XCTAssertEqual(context.appendSession.appliedSources, ["live", "live", "live"])
+        XCTAssertEqual(context.appendSession.appliedSources, ["live", "live"])
         XCTAssertEqual(context.appendFactory.makeSessionCallCount, 1)
         XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
         XCTAssertEqual(context.output.copiedTexts, [])
@@ -1297,7 +1297,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         await context.viewModel.resetService()
     }
 
-    func test_equalTextOnDistinctLivePacketIndicesIsOwnedTwice() async {
+    func test_equalTextOnDistinctLivePacketIndicesIsOwnedButOfferedOnce() async {
         let context = makeAppendContext(
             autoInsert: true,
             packetEvents: [.partial("same"), .partial("same")],
@@ -1312,10 +1312,10 @@ final class StreamingMainViewModelTests: XCTestCase {
 
         XCTAssertEqual(
             context.appendSession.appliedTexts,
-            ["same", "samesame"],
-            "string equality is not response identity; each new journal index extends the local frontier"
+            ["same"],
+            "packet ownership is independent, but equal complete snapshots must not retype"
         )
-        XCTAssertEqual(context.appendSession.appliedSources, ["live", "live"])
+        XCTAssertEqual(context.appendSession.appliedSources, ["live"])
 
         await context.viewModel.resetService()
     }
@@ -1453,26 +1453,26 @@ final class StreamingMainViewModelTests: XCTestCase {
 
         XCTAssertEqual(
             context.appendSession.appliedTexts,
-            ["same", "samesame"],
-            "historical index 0 must remain owned while the formerly failed index 1 is admitted exactly once"
+            ["same"],
+            "historical index 0 remains owned while an equal snapshot on newly owned index 1 is a no-op"
         )
-        XCTAssertEqual(context.appendSession.appliedSources, ["live", "replay"])
+        XCTAssertEqual(context.appendSession.appliedSources, ["live"])
 
         context.recorder.emit(Data(repeating: 0xB4, count: 6_400))
         await waitUntil { await sleeper.callCount == 2 }
         await sleeper.releaseNext()
         await waitUntil { await secondReplacement.sendCallCount == 3 }
-        XCTAssertEqual(context.appendSession.appliedTexts, ["same", "samesame", "samesametail"])
+        XCTAssertEqual(context.appendSession.appliedTexts, ["same", "tail"])
         XCTAssertEqual(
             context.appendSession.appliedSources,
-            ["live", "replay", "replay"],
+            ["live", "replay"],
             "an index first owned during replay must become historical on every later replay"
         )
 
         await context.viewModel.resetService()
     }
 
-    func test_liveAXOwnerReceivesGrowingFrontiersForDisjointPacketResponses() async {
+    func test_liveAXOwnerReceivesEachCompleteSnapshotForDisjointPacketResponses() async {
         let context = makeContext(
             capability: .live,
             packetEvents: [.partial("one"), .partial("two"), .partial("three")],
@@ -1487,8 +1487,8 @@ final class StreamingMainViewModelTests: XCTestCase {
 
         XCTAssertEqual(
             context.accessibility.setSelectedTextCalls,
-            ["one", "onetwo", "onetwothree"],
-            "the exact captured AX range must receive the coordinator's locally growing frontier"
+            ["one", "two", "three"],
+            "the exact captured AX range must receive each raw complete snapshot"
         )
         XCTAssertEqual(context.output.syntheticInputCallCount, 0)
         XCTAssertEqual(context.output.copiedTexts, [])
@@ -1612,7 +1612,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         await waitUntil { await replacement.sendCallCount == 2 }
 
         XCTAssertEqual(context.appendFactory.makeSessionCallCount, 1)
-        XCTAssertEqual(context.appendSession.appliedTexts, ["prefix", "prefixprefix extension"])
+        XCTAssertEqual(context.appendSession.appliedTexts, ["prefix", "prefix extension"])
         XCTAssertEqual(context.appendSession.appliedSources, ["live", "replay"])
         XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
         XCTAssertEqual(context.output.copiedTexts, [])
@@ -1648,7 +1648,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         XCTAssertEqual(context.appendFactory.makeSessionCallCount, 1)
         XCTAssertEqual(
             context.appendSession.appliedTexts,
-            ["captured prefix", "captured prefixcaptured prefix extension"]
+            ["captured prefix", "captured prefix extension"]
         )
         XCTAssertEqual(context.appendSession.appliedSources, ["live", "replay"])
         XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
@@ -2376,7 +2376,7 @@ final class StreamingMainViewModelTests: XCTestCase {
             rebindCapability: .finalOnly,
             packetEvents: [.partial("provisional")],
             finishEvent: .final("provisional suffix"),
-            appendFinalOutcomes: [.suffixCommitted]
+            appendFinalOutcomes: [.exactCommitted]
         )
         let identity = StreamingSessionIdentity(generation: 296)
 
@@ -2620,7 +2620,7 @@ final class StreamingMainViewModelTests: XCTestCase {
             rebindCapability: nil,
             packetEvents: [.partial("visible")],
             finishEvent: .final("visible final"),
-            appendFinalOutcomes: [.suffixCommitted]
+            appendFinalOutcomes: [.exactCommitted]
         )
         let identity = StreamingSessionIdentity(generation: 309)
 
