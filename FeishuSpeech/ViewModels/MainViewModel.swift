@@ -26,10 +26,16 @@ extension HotKeyService: HotKeyWakeRecovering {}
 @MainActor
 class MainViewModel: ObservableObject {
     private struct ResponseOutputLedger {
+        enum ReservationResult {
+            case owned
+            case historical(metrics: SnapshotMetrics)
+            case staleGeneration
+            case sealed
+        }
+
         enum ClaimResult {
             case changed(snapshot: String, metrics: SnapshotMetrics)
             case duplicate(metrics: SnapshotMetrics)
-            case historical(metrics: SnapshotMetrics)
             case staleGeneration
             case sealed
         }
@@ -71,18 +77,25 @@ class MainViewModel: ObservableObject {
             isAdmissionOpen = false
         }
 
-        mutating func claim(
+        mutating func reserve(
             text: String,
             packetIndex: Int,
             generation: UInt64
-        ) -> ClaimResult {
+        ) -> ReservationResult {
+            guard generation == self.generation else { return .staleGeneration }
+            guard isAdmissionOpen else { return .sealed }
+
+            guard ownedPacketIndices.insert(packetIndex).inserted else {
+                return .historical(metrics: snapshotMetrics(for: text))
+            }
+            return .owned
+        }
+
+        mutating func claim(text: String, generation: UInt64) -> ClaimResult {
             guard generation == self.generation else { return .staleGeneration }
             guard isAdmissionOpen else { return .sealed }
 
             let metrics = snapshotMetrics(for: text)
-            guard ownedPacketIndices.insert(packetIndex).inserted else {
-                return .historical(metrics: metrics)
-            }
             guard text != latestSnapshot else { return .duplicate(metrics: metrics) }
             latestSnapshot = text
             return .changed(snapshot: text, metrics: metrics)
@@ -982,12 +995,16 @@ class MainViewModel: ObservableObject {
             rawUTF16Count: text.utf16.count
         )
         recordHeldRecognitionIfEligible(text, packetIndex: context.packetIndex)
-        let eligiblePacketIndex: Int
-        switch classifyResponse(text, context: context) {
-        case .eligible(let packetIndex):
-            eligiblePacketIndex = packetIndex
-        case .ineligible(let reason):
-            logIneligibleResponse(context, eligibility: reason)
+        guard reservePacketIndex(
+            text: text,
+            context: context,
+            generation: identity.generation
+        ) else {
+            return false
+        }
+
+        if let rejection = classifySnapshot(text) {
+            logReservedIneligibleResponse(context, eligibility: rejection)
             return false
         }
         guard prepareContinuousOutputIfNeeded(identity: identity) else { return true }
@@ -996,11 +1013,7 @@ class MainViewModel: ObservableObject {
             return false
         }
 
-        switch responseOutputLedger.claim(
-            text: text,
-            packetIndex: eligiblePacketIndex,
-            generation: identity.generation
-        ) {
+        switch responseOutputLedger.claim(text: text, generation: identity.generation) {
         case .changed(let snapshot, let metrics):
             let output = offerChangedSnapshot(snapshot, identity: identity, source: source)
             logResponseReceipt(ResponseReceipt(
@@ -1030,23 +1043,6 @@ class MainViewModel: ObservableObject {
             ))
             return false
 
-        case .historical(let metrics):
-            logResponseReceipt(ResponseReceipt(
-                context: ResponseReceiptContext(
-                    identity: context.identity,
-                    packetIndex: context.packetIndex,
-                    source: context.source,
-                    eventKind: context.eventKind,
-                    rawUTF16Count: metrics.newUTF16Count
-                ),
-                eligibility: "eligible",
-                ownership: "historicalReplaySuppressed",
-                metrics: metrics,
-                outputRoute: "none",
-                outputOutcome: "notOffered"
-            ))
-            return false
-
         case .staleGeneration:
             logIneligibleResponse(context, eligibility: "staleGeneration")
             return false
@@ -1055,6 +1051,65 @@ class MainViewModel: ObservableObject {
             logIneligibleResponse(context, eligibility: "sealed")
             return false
         }
+    }
+
+    private func reservePacketIndex(
+        text: String,
+        context: ResponseReceiptContext,
+        generation: UInt64
+    ) -> Bool {
+        let packetIndex: Int
+        switch classifyPacketAdmission(context: context) {
+        case .eligible(let eligibleIndex):
+            packetIndex = eligibleIndex
+        case .ineligible(let reason):
+            logIneligibleResponse(context, eligibility: reason)
+            return false
+        }
+
+        switch responseOutputLedger.reserve(
+            text: text,
+            packetIndex: packetIndex,
+            generation: generation
+        ) {
+        case .owned:
+            return true
+        case .historical(let metrics):
+            logHistoricalResponse(context, metrics: metrics)
+        case .staleGeneration:
+            logIneligibleResponse(context, eligibility: "staleGeneration")
+        case .sealed:
+            logIneligibleResponse(context, eligibility: "sealed")
+        }
+        return false
+    }
+
+    private func logHistoricalResponse(
+        _ context: ResponseReceiptContext,
+        metrics: ResponseOutputLedger.SnapshotMetrics
+    ) {
+        logResponseReceipt(ResponseReceipt(
+            context: context,
+            eligibility: "eligible",
+            ownership: "historicalReplaySuppressed",
+            metrics: metrics,
+            outputRoute: "none",
+            outputOutcome: "notOffered"
+        ))
+    }
+
+    private func logReservedIneligibleResponse(
+        _ context: ResponseReceiptContext,
+        eligibility: String
+    ) {
+        logResponseReceipt(ResponseReceipt(
+            context: context,
+            eligibility: eligibility,
+            ownership: "ownedPacketIndex",
+            metrics: nil,
+            outputRoute: "none",
+            outputOutcome: "snapshotNotAdmitted"
+        ))
     }
 
     private func offerChangedSnapshot(
@@ -1099,22 +1154,23 @@ class MainViewModel: ObservableObject {
         hasUsableHeldRecognition = true
     }
 
-    private func classifyResponse(
-        _ text: String,
+    private func classifyPacketAdmission(
         context: ResponseReceiptContext
     ) -> ResponseEligibility {
         guard !sealStarted, responseOutputLedger.isAdmissionOpen else {
             return .ineligible(reason: "sealed")
-        }
-        guard !isContentless(text) else { return .ineligible(reason: "contentless") }
-        guard TextInputSimulator.isSafeForAutomaticPaste(text) else {
-            return .ineligible(reason: "unsafeText")
         }
         guard settings.autoInsert else { return .ineligible(reason: "outputDisabled") }
         guard let packetIndex = context.packetIndex else {
             return .ineligible(reason: "missingJournalIndex")
         }
         return .eligible(packetIndex: packetIndex)
+    }
+
+    private func classifySnapshot(_ text: String) -> String? {
+        guard !isContentless(text) else { return "contentless" }
+        guard TextInputSimulator.isSafeForAutomaticKeyboardText(text) else { return "unsafeText" }
+        return nil
     }
 
     private func handleFinal(

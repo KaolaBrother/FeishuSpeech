@@ -23,6 +23,27 @@ nonisolated enum CurrentFocusAppendOutcome: Equatable, Sendable {
     case staleGeneration
 }
 
+extension CurrentFocusAppendOutcome {
+    static var replacedOwnedTail: Self { .revisionSuppressed }
+}
+
+extension CurrentFocusAppendOutcome: CustomStringConvertible {
+    var description: String {
+        switch self {
+        case .insertedFirst: return "insertedFirst"
+        case .appendedSuffix: return "appendedSuffix"
+        case .duplicate: return "duplicate"
+        case .revisionSuppressed: return "replacedOwnedTail"
+        case .contentless: return "contentless"
+        case .unsafeTextSuppressed: return "unsafeTextSuppressed"
+        case .destinationChanged: return "destinationChanged"
+        case .securityRejected: return "securityRejected"
+        case .deliveryUncertain: return "deliveryUncertain"
+        case .staleGeneration: return "staleGeneration"
+        }
+    }
+}
+
 nonisolated enum CurrentFocusAppendFinalOutcome: Equatable, Sendable {
     case exactCommitted
     case suffixCommitted
@@ -96,7 +117,12 @@ protocol CurrentFocusActivationMonitoring: AnyObject {
 @MainActor
 protocol CurrentFocusInputMonitoring: AnyObject {
     func startMonitoring(_ handler: @escaping @MainActor () -> Void)
+    func armMonitoringFailClosed(_ handler: @escaping @MainActor () -> Void) -> Bool
     func stopMonitoring()
+}
+
+extension CurrentFocusInputMonitoring {
+    func armMonitoringFailClosed(_: @escaping @MainActor () -> Void) -> Bool { true }
 }
 
 @MainActor
@@ -145,8 +171,14 @@ final class CurrentFocusAppendSession: CurrentFocusProvisionalOutputSession {
             guard let self, processIdentifier != self.boundProcessIdentifier else { return }
             self.suspend(.destinationChanged)
         }
-        inputMonitor?.startMonitoring { [weak self] in
-            self?.suspend(.deliveryUncertain)
+        if let inputMonitor {
+            let suspendForInput: @MainActor () -> Void = { [weak self] in
+                self?.suspend(.deliveryUncertain)
+            }
+            inputMonitor.startMonitoring(suspendForInput)
+            if !inputMonitor.armMonitoringFailClosed(suspendForInput) {
+                suspend(.deliveryUncertain)
+            }
         }
     }
 
@@ -193,7 +225,8 @@ final class CurrentFocusAppendSession: CurrentFocusProvisionalOutputSession {
         }
 
         previousSnapshot = text
-        return wasEmpty ? .insertedFirst : .appendedSuffix
+        if wasEmpty { return .insertedFirst }
+        return deleteCharacterCount == 0 ? .appendedSuffix : .replacedOwnedTail
     }
 
     private func rejectionBeforePosting(
@@ -504,15 +537,32 @@ final class SystemCurrentFocusProvisionalOutputSessionFactory: CurrentFocusProvi
 @MainActor
 private final class NoopCurrentFocusInputMonitor: CurrentFocusInputMonitoring {
     func startMonitoring(_: @escaping @MainActor () -> Void) {}
+    func armMonitoringFailClosed(_: @escaping @MainActor () -> Void) -> Bool { true }
     func stopMonitoring() {}
 }
 
 @MainActor
 final class WorkspaceCurrentFocusInputMonitor: CurrentFocusInputMonitoring {
-    private var monitor: Any?
+    private var localMonitor: Any?
+    private var globalMonitor: Any?
+    private var pendingStartResult: Bool?
 
     func startMonitoring(_ handler: @escaping @MainActor () -> Void) {
-        guard monitor == nil else { return }
+        pendingStartResult = installMonitoring(handler)
+    }
+
+    func armMonitoringFailClosed(_ handler: @escaping @MainActor () -> Void) -> Bool {
+        if let pendingStartResult {
+            self.pendingStartResult = nil
+            return pendingStartResult
+        }
+        return installMonitoring(handler)
+    }
+
+    private func installMonitoring(_ handler: @escaping @MainActor () -> Void) -> Bool {
+        if localMonitor != nil || globalMonitor != nil {
+            return localMonitor != nil && globalMonitor != nil
+        }
         let mask: NSEvent.EventTypeMask = [
             .keyDown,
             .leftMouseDown,
@@ -522,23 +572,49 @@ final class WorkspaceCurrentFocusInputMonitor: CurrentFocusInputMonitoring {
             .rightMouseDragged,
             .otherMouseDragged
         ]
-        monitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { event in
-            let tag = event.cgEvent?.getIntegerValueField(.eventSourceUserData)
-            guard tag != FeishuSpeechSyntheticEventTag.value else { return }
-            Task { @MainActor in handler() }
+        localMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { event in
+            guard Self.isExternalCaretAffectingEvent(event) else { return event }
+            handler()
+            return event
         }
+        guard localMonitor != nil else {
+            return false
+        }
+
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { event in
+            guard Self.isExternalCaretAffectingEvent(event) else { return }
+            MainActor.assumeIsolated {
+                handler()
+            }
+        }
+        guard globalMonitor != nil else {
+            stopMonitoring()
+            return false
+        }
+        return true
     }
 
     func stopMonitoring() {
-        guard let monitor else { return }
-        NSEvent.removeMonitor(monitor)
-        self.monitor = nil
+        pendingStartResult = nil
+        if let localMonitor {
+            NSEvent.removeMonitor(localMonitor)
+            self.localMonitor = nil
+        }
+        if let globalMonitor {
+            NSEvent.removeMonitor(globalMonitor)
+            self.globalMonitor = nil
+        }
     }
 
     deinit {
-        if let monitor {
-            NSEvent.removeMonitor(monitor)
-        }
+        if let localMonitor { NSEvent.removeMonitor(localMonitor) }
+        if let globalMonitor { NSEvent.removeMonitor(globalMonitor) }
+    }
+
+    private static func isExternalCaretAffectingEvent(_ event: NSEvent) -> Bool {
+        guard event.type != .flagsChanged else { return false }
+        let tag = event.cgEvent?.getIntegerValueField(.eventSourceUserData)
+        return tag != FeishuSpeechSyntheticEventTag.value
     }
 }
 
