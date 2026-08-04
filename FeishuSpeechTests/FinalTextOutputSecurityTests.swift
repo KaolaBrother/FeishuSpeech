@@ -242,6 +242,158 @@ final class FinalTextOutputSecurityTests: XCTestCase {
         XCTAssertEqual(secureInput.queryCount, 1)
     }
 
+    func test_productionGuardedReplacementEpochDriftBeforeFirstPairPostsNothing() {
+        let gate = CurrentFocusInputInterferenceEpoch()
+        let expectedEpoch = gate.value
+        let backend = FakeSystemUnicodeEventBackend(
+            failure: nil,
+            trace: FakePosterOperationTrace()
+        )
+        let poster = SystemFinalTextCurrentFocusEventPoster(
+            backend: backend,
+            secureInputStateProvider: FakeSecureInputStateProvider(states: [false])
+        )
+        gate.observePreDispatch(type: .keyDown, event: makePhysicalKeyEvent())
+
+        let result = poster.postReplacement(
+            deleteCharacterCount: 2,
+            insertText: "replacement",
+            to: 4242,
+            postCompleteSyntheticPairIfInterferenceEpochIsUnchanged: { postPair in
+                gate.performIfUnchanged(expectedEpoch: expectedEpoch, postPair)
+            }
+        )
+
+        XCTAssertEqual(result, .deliveryFailed)
+        XCTAssertEqual(backend.postedEvents, [])
+    }
+
+    func test_productionGuardedReplacementUnchangedEpochPostsEveryCompletePair() {
+        let gate = CurrentFocusInputInterferenceEpoch()
+        let expectedEpoch = gate.value
+        let backend = FakeSystemUnicodeEventBackend(
+            failure: nil,
+            trace: FakePosterOperationTrace()
+        )
+        let poster = SystemFinalTextCurrentFocusEventPoster(
+            backend: backend,
+            secureInputStateProvider: FakeSecureInputStateProvider(states: [false])
+        )
+
+        let result = poster.postReplacement(
+            deleteCharacterCount: 2,
+            insertText: "r",
+            to: 4242,
+            postCompleteSyntheticPairIfInterferenceEpochIsUnchanged: { postPair in
+                gate.performIfUnchanged(expectedEpoch: expectedEpoch, postPair)
+            }
+        )
+
+        XCTAssertEqual(result, .posted)
+        XCTAssertEqual(
+            backend.postedEvents.map(\.phase),
+            [.keyDown, .keyUp, .keyDown, .keyUp, .keyDown, .keyUp]
+        )
+        XCTAssertEqual(
+            backend.postedEvents.map(\.virtualKey),
+            [
+                CGKeyCode(kVK_Delete),
+                CGKeyCode(kVK_Delete),
+                CGKeyCode(kVK_Delete),
+                CGKeyCode(kVK_Delete),
+                nil,
+                nil
+            ]
+        )
+    }
+
+    func test_productionSharedGateFinishesFirstPairThenBlocksLaterPairsAndInsertion() {
+        let gate = CurrentFocusInputInterferenceEpoch()
+        let expectedEpoch = gate.value
+        let backend = FakeSystemUnicodeEventBackend(
+            failure: nil,
+            trace: FakePosterOperationTrace()
+        )
+        let poster = SystemFinalTextCurrentFocusEventPoster(
+            backend: backend,
+            secureInputStateProvider: FakeSecureInputStateProvider(states: [false])
+        )
+        let trace = ThreadSafeProductionGateTrace()
+        let physicalEvent = makePhysicalKeyEvent()
+        let attemptedAdvance = DispatchSemaphore(value: 0)
+        let completedAdvance = DispatchSemaphore(value: 0)
+        var advanceStarted = false
+
+        backend.onPostedEvent = { event in
+            let isDelete = event.virtualKey == CGKeyCode(kVK_Delete)
+            trace.append(isDelete ? "delete-\(event.phase)" : "insert-\(event.phase)")
+            guard isDelete, event.phase == .keyDown, !advanceStarted else { return }
+            advanceStarted = true
+            DispatchQueue.global(qos: .userInitiated).async {
+                attemptedAdvance.signal()
+                gate.observePreDispatch(type: .keyDown, event: physicalEvent)
+                trace.append("physical-epoch-advance")
+                completedAdvance.signal()
+            }
+            attemptedAdvance.wait()
+        }
+
+        let result = poster.postReplacement(
+            deleteCharacterCount: 3,
+            insertText: "r",
+            to: 4242,
+            postCompleteSyntheticPairIfInterferenceEpochIsUnchanged: { postPair in
+                let posted = gate.performIfUnchanged(
+                    expectedEpoch: expectedEpoch,
+                    postPair
+                )
+                if advanceStarted {
+                    completedAdvance.wait()
+                    advanceStarted = false
+                }
+                return posted
+            }
+        )
+
+        XCTAssertEqual(result, .deliveryFailed)
+        XCTAssertEqual(
+            trace.values,
+            ["delete-keyDown", "delete-keyUp", "physical-epoch-advance"]
+        )
+        XCTAssertEqual(backend.postedEvents.count, 2)
+        XCTAssertEqual(backend.postedEvents.map(\.phase), [.keyDown, .keyUp])
+        XCTAssertEqual(
+            backend.postedEvents.map(\.virtualKey),
+            [CGKeyCode(kVK_Delete), CGKeyCode(kVK_Delete)]
+        )
+    }
+
+    func test_productionGuardedInsertionOnlyRejectsEpochDriftWithoutPosting() {
+        let gate = CurrentFocusInputInterferenceEpoch()
+        let expectedEpoch = gate.value
+        let backend = FakeSystemUnicodeEventBackend(
+            failure: nil,
+            trace: FakePosterOperationTrace()
+        )
+        let poster = SystemFinalTextCurrentFocusEventPoster(
+            backend: backend,
+            secureInputStateProvider: FakeSecureInputStateProvider(states: [false])
+        )
+        gate.observePreDispatch(type: .leftMouseDown, event: makePhysicalMouseEvent())
+
+        let result = poster.postReplacement(
+            deleteCharacterCount: 0,
+            insertText: "insertion",
+            to: 4242,
+            postCompleteSyntheticPairIfInterferenceEpochIsUnchanged: { postPair in
+                gate.performIfUnchanged(expectedEpoch: expectedEpoch, postPair)
+            }
+        )
+
+        XCTAssertEqual(result, .deliveryFailed)
+        XCTAssertEqual(backend.postedEvents, [])
+    }
+
     func test_systemReplacementPosterDeleteOnlyPostsExactBackspacePairs() {
         let backend = FakeSystemUnicodeEventBackend(failure: nil, trace: FakePosterOperationTrace())
         let poster = SystemFinalTextCurrentFocusEventPoster(
@@ -474,6 +626,23 @@ final class FinalTextOutputSecurityTests: XCTestCase {
             originalSelection: CursorTextRange(location: 2, length: 0)
         )
     }
+
+    private func makePhysicalKeyEvent() -> CGEvent {
+        CGEvent(
+            keyboardEventSource: nil,
+            virtualKey: 0,
+            keyDown: true
+        )!
+    }
+
+    private func makePhysicalMouseEvent() -> CGEvent {
+        CGEvent(
+            mouseEventSource: nil,
+            mouseType: .leftMouseDown,
+            mouseCursorPosition: .zero,
+            mouseButton: .left
+        )!
+    }
 }
 
 @MainActor
@@ -534,6 +703,7 @@ private final class FakeSystemUnicodeEventBackend: FinalTextUnicodeEventBackend 
     private(set) var postedEvents: [FakePostedUnicodeEvent] = []
     private(set) var taggedUserData: [Int64] = []
     var onConstructedEvent: ((FinalTextUnicodeEventPhase) -> Void)?
+    var onPostedEvent: ((FakePostedUnicodeEvent) -> Void)?
 
     var sourceIdentity: ObjectIdentifier { ObjectIdentifier(source) }
     var operations: [String] { trace.operations }
@@ -619,14 +789,14 @@ private final class FakeSystemUnicodeEventBackend: FinalTextUnicodeEventBackend 
         let phaseName = event.phase == .keyDown ? "down" : "up"
         let eventName = event.virtualKey == CGKeyCode(kVK_Delete) ? "delete-\(phaseName)" : phaseName
         trace.record("post-\(eventName)-\(processIdentifier)")
-        postedEvents.append(
-            FakePostedUnicodeEvent(
-                phase: event.phase,
-                processIdentifier: processIdentifier,
-                virtualKey: event.virtualKey,
-                utf16: event.utf16
-            )
+        let postedEvent = FakePostedUnicodeEvent(
+            phase: event.phase,
+            processIdentifier: processIdentifier,
+            virtualKey: event.virtualKey,
+            utf16: event.utf16
         )
+        postedEvents.append(postedEvent)
+        onPostedEvent?(postedEvent)
     }
 }
 
@@ -661,6 +831,23 @@ private struct FakePostedUnicodeEvent: Equatable {
     let processIdentifier: pid_t
     let virtualKey: CGKeyCode?
     let utf16: [UInt16]
+}
+
+private final class ThreadSafeProductionGateTrace: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [String] = []
+
+    var values: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+
+    func append(_ value: String) {
+        lock.lock()
+        storage.append(value)
+        lock.unlock()
+    }
 }
 
 @MainActor
