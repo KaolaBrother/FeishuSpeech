@@ -1,3 +1,4 @@
+import AppKit
 @testable import FeishuSpeech
 import Foundation
 import os.log
@@ -235,6 +236,37 @@ final class CurrentFocusAppendSessionTests: XCTestCase {
         )
     }
 
+    func test_shorterAndDivergentReplacementOutcomesUsedByReceiptsNeverSayAppendedSuffix() {
+        let shorter = makeContext()
+        _ = shorter.session.applyOpaqueHypothesis(
+            "hello world",
+            generation: generation,
+            source: .livePacket
+        )
+        let shorterOutcome = shorter.session.applyOpaqueHypothesis(
+            "hello",
+            generation: generation,
+            source: .livePacket
+        )
+
+        let divergent = makeContext()
+        _ = divergent.session.applyOpaqueHypothesis(
+            "hello cat",
+            generation: generation,
+            source: .livePacket
+        )
+        let divergentOutcome = divergent.session.applyOpaqueHypothesis(
+            "hello dog",
+            generation: generation,
+            source: .replayCatchUp
+        )
+
+        XCTAssertNotEqual(shorterOutcome, .appendedSuffix)
+        XCTAssertNotEqual(divergentOutcome, .appendedSuffix)
+        XCTAssertNotEqual(String(describing: shorterOutcome), "appendedSuffix")
+        XCTAssertNotEqual(String(describing: divergentOutcome), "appendedSuffix")
+    }
+
     func test_contentlessAndUnsafeC0C1DELValuesNeverPostAndSafeExtensionCanRecover() {
         for unsafe in ["safe\u{0000}", "safe\u{001F}", "safe\u{007F}", "safe\u{0085}", "safe\u{009F}"] {
             let context = makeContext()
@@ -341,6 +373,142 @@ final class CurrentFocusAppendSessionTests: XCTestCase {
         XCTAssertEqual(context.poster.replacementRequests.count, 1)
         XCTAssertEqual(context.inputMonitor.startCallCount, 1)
         XCTAssertEqual(context.inputMonitor.stopCallCount, 1)
+    }
+
+    func test_inputMonitorFailureAtEitherRegistrationArmFailsClosedBeforeTransaction() {
+        for failure in [TestInputMonitorArmFailure.local, .global] {
+            let context = makeContext(inputMonitorArmFailure: failure)
+
+            let outcome = context.session.applyOpaqueHypothesis(
+                "must not post",
+                generation: generation,
+                source: .livePacket
+            )
+
+            XCTAssertFalse(context.inputMonitor.isCompletelyArmed)
+            XCTAssertEqual(
+                context.inputMonitor.failClosedArmCallCount,
+                1,
+                "the session must consume an explicit complete-arm result"
+            )
+            XCTAssertEqual(
+                context.poster.callCount,
+                0,
+                "\(failure) registration failure must prevent the transaction"
+            )
+            XCTAssertNotEqual(outcome, .insertedFirst)
+            XCTAssertNotEqual(outcome, .appendedSuffix)
+        }
+    }
+
+    func test_workspaceInputMonitorObservesSameAppPhysicalKeyboardSynchronously() {
+        let monitor = WorkspaceCurrentFocusInputMonitor()
+        var suspensionCount = 0
+        monitor.startMonitoring {
+            suspensionCount += 1
+        }
+        defer { monitor.stopMonitoring() }
+
+        NSApplication.shared.sendEvent(makeKeyEvent(type: .keyDown, characters: "a", keyCode: 0))
+
+        XCTAssertEqual(
+            suspensionCount,
+            1,
+            "same-app keyboard input must synchronously cross the suspension barrier"
+        )
+    }
+
+    func test_workspaceInputMonitorObservesSameAppPhysicalMouseSynchronously() {
+        let monitor = WorkspaceCurrentFocusInputMonitor()
+        var suspensionCount = 0
+        monitor.startMonitoring {
+            suspensionCount += 1
+        }
+        defer { monitor.stopMonitoring() }
+
+        let event = NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            eventNumber: 1,
+            clickCount: 1,
+            pressure: 1
+        )!
+        NSApplication.shared.sendEvent(event)
+
+        XCTAssertEqual(
+            suspensionCount,
+            1,
+            "same-app mouse input must synchronously cross the suspension barrier"
+        )
+    }
+
+    func test_workspaceInputMonitorExemptsTaggedSyntheticEventsAndFnTransitions() {
+        let monitor = WorkspaceCurrentFocusInputMonitor()
+        var suspensionCount = 0
+        monitor.startMonitoring {
+            suspensionCount += 1
+        }
+        defer { monitor.stopMonitoring() }
+
+        let taggedCGEvent = CGEvent(
+            keyboardEventSource: nil,
+            virtualKey: 0,
+            keyDown: true
+        )!
+        taggedCGEvent.setIntegerValueField(
+            .eventSourceUserData,
+            value: FeishuSpeechSyntheticEventTag.value
+        )
+        NSApplication.shared.sendEvent(NSEvent(cgEvent: taggedCGEvent)!)
+        NSApplication.shared.sendEvent(
+            makeKeyEvent(
+                type: .flagsChanged,
+                characters: "",
+                modifierFlags: .function,
+                keyCode: 63
+            )
+        )
+
+        XCTAssertEqual(suspensionCount, 0)
+    }
+
+    func test_sameAppPhysicalInputSuspendsBeforeQueuedReplacementTransaction() {
+        let processProvider = FakeAppendFrontmostProcessProvider(
+            processIdentifiers: Array(repeating: boundProcessIdentifier, count: 10)
+        )
+        let secureInputProvider = FakeAppendSecureInputStateProvider(
+            states: Array(repeating: false, count: 10)
+        )
+        let poster = FakeUnicodeEventPoster(results: [])
+        let monitor = WorkspaceCurrentFocusInputMonitor()
+        let session = CurrentFocusAppendSession(
+            generation: generation,
+            boundProcessIdentifier: boundProcessIdentifier,
+            eventPoster: poster,
+            secureInputStateProvider: secureInputProvider,
+            frontmostProcessProvider: processProvider,
+            activationMonitor: FakeActivationMonitor(),
+            inputMonitor: monitor
+        )
+        defer { session.invalidate() }
+
+        NSApplication.shared.sendEvent(makeKeyEvent(type: .keyDown, characters: "a", keyCode: 0))
+        let outcome = session.applyOpaqueHypothesis(
+            "queued replacement",
+            generation: generation,
+            source: .livePacket
+        )
+
+        XCTAssertEqual(outcome, .deliveryUncertain)
+        XCTAssertEqual(
+            poster.callCount,
+            0,
+            "suspension must become visible atomically before the queued transaction can post"
+        )
     }
 
     func test_stableSamePIDAllowsOutputAndDocumentsUnobservableSameProcessCaretRisk() {
@@ -721,7 +889,8 @@ final class CurrentFocusAppendSessionTests: XCTestCase {
     private func makeContext(
         processIdentifiers: [pid_t?]? = nil,
         secureInputStates: [Bool]? = nil,
-        posterResults: [FinalTextCurrentFocusPostResult] = []
+        posterResults: [FinalTextCurrentFocusPostResult] = [],
+        inputMonitorArmFailure: TestInputMonitorArmFailure? = nil
     ) -> TestContext {
         let processProvider = FakeAppendFrontmostProcessProvider(
             processIdentifiers: processIdentifiers ?? Array(repeating: boundProcessIdentifier, count: 30)
@@ -731,7 +900,7 @@ final class CurrentFocusAppendSessionTests: XCTestCase {
         )
         let poster = FakeUnicodeEventPoster(results: posterResults)
         let activationMonitor = FakeActivationMonitor()
-        let inputMonitor = FakeInputMonitor()
+        let inputMonitor = FakeInputMonitor(armFailure: inputMonitorArmFailure)
         let session = CurrentFocusAppendSession(
             generation: generation,
             boundProcessIdentifier: boundProcessIdentifier,
@@ -750,6 +919,26 @@ final class CurrentFocusAppendSessionTests: XCTestCase {
             inputMonitor: inputMonitor
         )
     }
+
+    private func makeKeyEvent(
+        type: NSEvent.EventType,
+        characters: String,
+        modifierFlags: NSEvent.ModifierFlags = [],
+        keyCode: UInt16
+    ) -> NSEvent {
+        NSEvent.keyEvent(
+            with: type,
+            location: .zero,
+            modifierFlags: modifierFlags,
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: characters,
+            charactersIgnoringModifiers: characters,
+            isARepeat: false,
+            keyCode: keyCode
+        )!
+    }
 }
 
 @MainActor
@@ -767,6 +956,11 @@ private struct SnapshotReplacementCase {
     let next: String
     let expectedDeleteCharacterCount: Int
     let expectedInsertText: String
+}
+
+private enum TestInputMonitorArmFailure: String {
+    case local
+    case global
 }
 
 private struct ReplacementRequest: Equatable {
@@ -879,18 +1073,38 @@ private final class FakeActivationMonitor: CurrentFocusActivationMonitoring {
 
 @MainActor
 private final class FakeInputMonitor: CurrentFocusInputMonitoring {
+    private let armFailure: TestInputMonitorArmFailure?
     private var handler: (@MainActor () -> Void)?
     private(set) var startCallCount = 0
+    private(set) var failClosedArmCallCount = 0
     private(set) var stopCallCount = 0
+    private(set) var isCompletelyArmed = false
+
+    init(armFailure: TestInputMonitorArmFailure? = nil) {
+        self.armFailure = armFailure
+    }
 
     func startMonitoring(_ handler: @escaping @MainActor () -> Void) {
         startCallCount += 1
-        self.handler = handler
+        isCompletelyArmed = armFailure == nil
+        if isCompletelyArmed {
+            self.handler = handler
+        }
+    }
+
+    func armMonitoringFailClosed(_ handler: @escaping @MainActor () -> Void) -> Bool {
+        failClosedArmCallCount += 1
+        isCompletelyArmed = armFailure == nil
+        if isCompletelyArmed {
+            self.handler = handler
+        }
+        return isCompletelyArmed
     }
 
     func stopMonitoring() {
         stopCallCount += 1
         handler = nil
+        isCompletelyArmed = false
     }
 
     func receiveExternalInput() {

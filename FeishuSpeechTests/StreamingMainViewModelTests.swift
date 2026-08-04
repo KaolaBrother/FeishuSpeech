@@ -1500,7 +1500,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         await context.viewModel.resetService()
     }
 
-    func test_ineligibleEventsNeverAdvanceOrReserveTheLatestSnapshot() async {
+    func test_ineligibleEventsNeverAdvanceTheLatestSnapshot() async {
         let unsafe = "unsafe\u{001B}"
         let context = makeProductionCapturedAppendContext(
             route: CoordinatorFinalOnlyRoute(
@@ -1521,7 +1521,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         XCTAssertEqual(
             context.unicodePoster.requestedTexts,
             ["safe"],
-            "contentless and unsafe packet responses must not advance or contaminate the assembled frontier"
+            "contentless and unsafe packet responses must not advance the assembled snapshot"
         )
 
         context.viewModel.handleStreamingEventForTesting(
@@ -1537,6 +1537,105 @@ final class StreamingMainViewModelTests: XCTestCase {
         XCTAssertEqual(context.unicodePoster.destinationProcessIdentifiers, [42])
         XCTAssertEqual(context.output.syntheticInputCallCount, 0)
         XCTAssertEqual(context.output.copiedTexts, [])
+    }
+
+    func test_ineligiblePacketStillReservesItsIndexAgainstChangedHistoricalReplay() async {
+        let cases = [
+            (name: "contentless", response: " \n "),
+            (name: "unsafe", response: "unsafe\u{001B}")
+        ]
+
+        for (offset, testCase) in cases.enumerated() {
+            let firstSession = RetryCoordinatorStreamingSession(
+                packetEvents: [
+                    .partial("stable snapshot"),
+                    .partial(testCase.response),
+                    .failed(.network)
+                ]
+            )
+            let replacementSession = RetryCoordinatorStreamingSession(
+                packetEvents: [
+                    .partial("changed historical zero"),
+                    .partial("changed historical one"),
+                    .partial("next snapshot")
+                ]
+            )
+            let sleeper = ControlledCoordinatorRetrySleeper()
+            let context = makeAppendRetryContext(
+                sessions: [firstSession, replacementSession],
+                sleeper: sleeper
+            )
+            let identity = StreamingSessionIdentity(generation: UInt64(410 + offset))
+
+            context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+            await waitUntil { await context.provider.makeSessionCallCount == 1 }
+            context.recorder.emit(Data(repeating: 0xBA, count: 19_200))
+
+            await waitUntil { await sleeper.callCount == 1 }
+            XCTAssertEqual(
+                context.appendSession.appliedTexts,
+                ["stable snapshot"],
+                "\(testCase.name) response must not mutate output before replay"
+            )
+
+            await sleeper.releaseNext()
+            await waitUntil { await replacementSession.sendCallCount == 3 }
+
+            XCTAssertEqual(
+                context.appendSession.appliedTexts,
+                ["stable snapshot", "next snapshot"],
+                "\(testCase.name) response must reserve packet index 1 so changed replay is historical"
+            )
+            await context.viewModel.resetService()
+        }
+    }
+
+    func test_multilineLFSnapshotReachesAccessibilityOutput() async {
+        let snapshot = "first line\nsecond line"
+        let context = makeContext(
+            capability: .live,
+            packetEvents: [.partial(snapshot)]
+        )
+        let identity = StreamingSessionIdentity(generation: 420)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await context.provider.makeSessionCallCount == 1 }
+        context.recorder.emit(Data(repeating: 0xBB, count: 6_400))
+
+        await waitUntil {
+            context.accessibility.setSelectedTextCalls == [snapshot]
+        }
+
+        XCTAssertEqual(context.accessibility.setSelectedTextCalls, [snapshot])
+        await context.viewModel.resetService()
+    }
+
+    func test_multilineLFSnapshotReachesKeyboardOutput() async {
+        let snapshot = "first line\nsecond line"
+        let context = makeProductionCapturedAppendContext(
+            route: CoordinatorFinalOnlyRoute(
+                capability: .finalOnly,
+                rebindCapability: nil,
+                generation: 421
+            ),
+            packetEvents: [.partial(snapshot)],
+            finishEvent: .cancelled
+        )
+        let identity = StreamingSessionIdentity(generation: 421)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await context.provider.makeSessionCallCount == 1 }
+        context.recorder.emit(Data(repeating: 0xBC, count: 6_400))
+
+        await waitUntil {
+            context.unicodePoster.replacementRequests.count == 1
+        }
+
+        XCTAssertEqual(
+            context.unicodePoster.replacementRequests.map(\.insertText),
+            [snapshot]
+        )
+        await context.viewModel.resetService()
     }
 
     func test_releaseActionTwoCannotCreateFirstOutputOrMutateOwnedSnapshot() async {
