@@ -282,6 +282,10 @@ final class CurrentFocusAppendSession: CurrentFocusProvisionalOutputSession {
             return rejection
         }
 
+        return postReplacement(with: text)
+    }
+
+    private func postReplacement(with text: String) -> CurrentFocusAppendOutcome {
         let oldCharacters = Array(previousSnapshot)
         let newCharacters = Array(text)
         let commonCount = zip(oldCharacters, newCharacters).prefix { $0 == $1 }.count
@@ -353,20 +357,52 @@ final class CurrentFocusAppendSession: CurrentFocusProvisionalOutputSession {
         generation: UInt64
     ) -> CurrentFocusAppendFinalOutcome {
         guard !isClosed, generation == self.generation else { return .staleGeneration }
-        close()
+        defer { close() }
 
         if let suspension {
             return finalOutcome(for: suspension)
         }
 
-        let candidate = usableFinalValue(finalText) ?? usableFinalValue(lastAcceptedText)
-        guard !previousSnapshot.isEmpty else { return .noUsableText }
-        guard let candidate,
-              TextInputSimulator.isSafeForAutomaticKeyboardText(candidate),
-              candidate == previousSnapshot else {
-            return .preservedDivergence
+        let authoritativeFinal = usableFinalValue(finalText)
+        let candidate = authoritativeFinal ?? usableFinalValue(lastAcceptedText)
+        guard let candidate else {
+            return previousSnapshot.isEmpty ? .noUsableText : .exactCommitted
         }
-        return .exactCommitted
+        guard authoritativeFinal != nil || !previousSnapshot.isEmpty else {
+            return .noUsableText
+        }
+        guard TextInputSimulator.isSafeForAutomaticKeyboardText(candidate) else {
+            return previousSnapshot.isEmpty ? .noUsableText : .preservedDivergence
+        }
+        guard candidate != previousSnapshot else { return .exactCommitted }
+
+        let hadPreviousSnapshot = !previousSnapshot.isEmpty
+        return finalOutcome(
+            for: postReplacement(with: candidate),
+            hadPreviousSnapshot: hadPreviousSnapshot
+        )
+    }
+
+    private func finalOutcome(
+        for replacementOutcome: CurrentFocusAppendOutcome,
+        hadPreviousSnapshot: Bool
+    ) -> CurrentFocusAppendFinalOutcome {
+        switch replacementOutcome {
+        case .insertedFirst, .revisionSuppressed, .duplicate:
+            return .exactCommitted
+        case .appendedSuffix:
+            return .suffixCommitted
+        case .contentless, .unsafeTextSuppressed:
+            return hadPreviousSnapshot ? .preservedDivergence : .noUsableText
+        case .destinationChanged:
+            return .preservedDestinationLoss
+        case .securityRejected:
+            return .preservedSecurityRejection
+        case .deliveryUncertain:
+            return .deliveryUncertain
+        case .staleGeneration:
+            return .staleGeneration
+        }
     }
 
     func invalidate() {
