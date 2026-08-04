@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- 新增完整 snapshot reconciliation：packet replay ownership 与识别状态分离；任意当前焦点目标以 Swift `Character` 最长公共前缀计算恰好所需的 Backspace，再输入 replacement suffix（issue #27）
 - 新增按键内韧性流式会话：可恢复的网络/超时/部分 HTTP 和业务码 `10024` 失败会在 Fn 仍按住时以 250 ms 起步、4 s 封顶的指数退避创建新串行会话；同一录音/入口持续捕获，已录分片通过有序 journal 从头回放，已拥有的历史 index 不重复输出（issue #26）
 - 新增 generation-scoped 响应输出 ledger：每个符合条件的 journal packet index 只拥有一次原始标量，并按响应顺序拼接为增长的 UTF-16 frontier。相同、不相交和修订值都会作为不同 index 的本地输出策略拼接，不代表已证明飞书供应商语义（issue #26）
 - 按住 Fn 0.3 秒后进入光标绑定的飞书流式识别：每次交互由唯一 generation 共同拥有录音、精确字节上限且可感知消费进度的音频入口、严格串行的 Feishu session，以及绑定原始 `AXUIElement` 的文字会话；松开 Fn 或达到 60 秒进入 sealing 并只完成一次（issue #26）
@@ -15,6 +16,8 @@
 - 新增 `MainViewModelTests` 覆盖 `MonitoringState` 失败映射、恢复清除和 cleanup 订阅释放路径（issues #22/#23/#24）
 
 ### Fixed
+- 修复 Release 1.0 build 6 在 Fn 按住期间重复识别词：飞书响应现按完整不透明 snapshot 替换，不再按新 journal index 拼接；不同 packet index 返回相同 snapshot 时不产生输出（issue #27）
+- 修复较短与中途修订 snapshot 的任意目标输出：AX writer 直接替换其已验证 owned range；键盘 writer 只替换本次 hold 已输出的尾部。固定 PID、外部输入/Secure Input/目标漂移永久 suspension、无 rollback/no resend、无光标确认或运行时权限提示以及 Fn release 零 mutation 边界保持不变（issue #27）
 - 修复 build 5 的“只输出一个词”下游停滞：实机日志已证明最新一次 hold 在 13.55 秒内完成 66 个 HTTP-200 transaction，因此本地不再用原始响应字符串的相等/前缀关系决定响应身份，而是以 journal index 所有权拼接 held frontier（issue #26）
 - release 现在在录音、会话排空之前同步关闭响应 ledger 与重试准入。`action=2`、在途包和晚到 partial/final 均不能创建、追加、改写或复制文本；旧的 release-time 一次性/final-only/Cmd+V/手动剪贴板回退已移除（issue #26）
 - 识别可用性与输出资格分离：`autoInsert=false`、不安全文本或无 owner 时，可用 held 识别不再被误报为空结果/流式失败，同时仍保持零输出与零复制（issue #26）
@@ -68,7 +71,7 @@
 ### Verification pending
 - 最新 build-5 安装版 UAT 已证明一次 13.55 秒 hold 内有 66 个 HTTP-200 transaction，但可见输出在一个词后停滞；这将故障收窄到传输之后，不能证明响应内容形态或目标接受。新的 journal-index ledger、重放一次所有权、release 禁止输出与隐私安全 receipt 仍需安装版 Release owner UAT，不声明真实端到端成功。
 - `CGEventPostToPid` 没有目标控件接受确认；本地 `.posted` 仅证明完整 PID-bound key-down/key-up pair 已提交，不能证明目标显示了 Unicode 文本。当前修正仍须安装版 owner UAT，若无可见输出应报告 PARTIAL，不能通过全局 HID、重复事件、破坏性编辑或不确定后的剪贴板回退扩展行为。
-- 真实飞书凭据下的后续 action、终止请求空音频编码、`recognition_text` / `text` 实际形态、首次 token 刷新同序列重试、PCM/tail 兼容性和慢网行为仍需安装版 Release UAT。飞书和 KaolaTerminal 只暴露不透明的响应标量；累积/delta/revision 关系仍未验证，不把本地拼接策略宣称为供应商保证。
+- 真实飞书凭据下的后续 action、终止请求空音频编码、首次 token 刷新同序列重试、PCM/tail 兼容性和慢网行为仍需安装版 Release UAT。issue #26 的本地拼接策略已由 build 6 证据否定；issue #27 将响应按可相同、变长、缩短或修订的完整不透明 snapshot 替换，仍不推断稳定词或做文本归一化。
 - TextEdit/原生控件、浏览器、Electron、终端和富文本编辑器的 Accessibility 范围、焦点干扰、Unicode 与 undo 行为仍需跨应用实机 UAT；当前不声明广泛兼容性。
 
 ## [0.3.0] - 2025

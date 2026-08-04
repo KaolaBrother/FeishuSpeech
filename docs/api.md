@@ -50,9 +50,9 @@ stopped after one word. This proves continued transport but not the scalar conte
 ownership outcomes, or target acceptance. Owner UAT must still verify the repaired replay, release,
 continuous-output, and remaining runtime contract.
 
-## Streaming recognition contract (issues #25/#26)
+## Streaming recognition contract (issues #25/#26/#27)
 
-Issue #25 defined and issue #26 implements production recognition at:
+Issues #25/#26 introduced production recognition; issue #27 corrects response interpretation at:
 
 `POST /open-apis/speech_to_text/v1/speech/stream_recognize`
 
@@ -148,11 +148,12 @@ inert. When recorder shutdown is already in flight, its barrier remains independ
 blocks successor admission and final idle/error publication, but never delays authority revocation
 or transport cancellation.
 
-Feishu and KaolaTerminal expose one opaque response scalar and do not verify whether successive
-values are cumulative, delta, disjoint, or revisable. FeishuSpeech therefore applies a local policy:
-each eligible journal index owns its raw scalar once and concatenates it to a growing UTF-16 held
-frontier. Equal, disjoint, shorter, and revised values on distinct indices all advance that frontier.
-Action 2 is not output authority and cannot mutate the frontier after release.
+Feishu responses are treated as complete opaque recognition snapshots. The coordinator keeps
+packet-index replay ownership separate from `latestSnapshot`: each eligible journal index may own a
+response once, but an equal snapshot emits no output and any different snapshot replaces the held
+recognition state. Historical replay indices remain suppressed even if a replacement attempt
+returns different text; a previously failed unowned index may advance the snapshot once. Action 2
+is not output authority and cannot mutate text after release.
 
 Response decoding follows KaolaTerminal's credential-bearing, proven streaming implementation:
 after valid JSON and `code == 0`, response `stream_id` and `sequence_id` echoes are ignored;
@@ -166,7 +167,8 @@ public diagnostics.
 The public Feishu contract confirms the endpoint, fields, action meanings, Base64 PCM, and a
 100–200 ms fragment recommendation. Lowercase-only IDs, exact packet/tail sizes, empty strings for
 terminal audio, same-sequence first-token retry, strict serialization/idempotence, and
-journal-index concatenation are FeishuSpeech policies rather than vendor guarantees. They remain
+snapshot replacement and packet-index replay suppression are FeishuSpeech policies rather than
+vendor guarantees. They remain
 behind credential-bearing UAT.
 
 ### Internal cursor-writer interface
@@ -186,43 +188,51 @@ owned range, and exact prior text. Accessibility-returned ranges define ownershi
 events write nothing.
 
 When a non-secure destination was captured but cannot support live range replacement, the initial
-`.finalOnly` result arms a continuous append owner bound to the captured PID and exact
+`.finalOnly` result arms a continuous keyboard owner bound to the captured PID and exact
 `AXUIElement`. A first-partial rebind that returns `.finalOnly` does the same and offers that
 triggering partial immediately. Thus every eligible packet response received before sealing can
-claim its index once and extend the frontier offered to the selected owner while Fn remains held.
+claim its index once; only a different complete snapshot is offered while Fn remains held.
 Release only closes that existing owner and cannot create output.
 
 When AX destination capture or confirmation is unavailable, the first non-contentless hypothesis
 causes one more `CursorTextSession.begin()` attempt. If that yields live AX capability, normal
 verified range replacement takes ownership. If it remains unavailable,
-`CurrentFocusAppendSession` binds the then-frontmost PID and receives the coordinator's locally
-monotonic frontier. It posts only the frontier's unseen UTF-16 suffix. Raw scalar equality,
-disjointness, shortening, or revision does not suppress a distinct eligible packet index; unsafe
-and contentless values remain ineligible.
+`CurrentFocusAppendSession` binds the then-frontmost PID and receives complete snapshots. It
+compares Swift `Character` arrays without normalization, finds the exact longest common prefix,
+posts one Backspace pair for every previously owned divergent grapheme, then posts the replacement
+suffix. Equal snapshots post nothing; unsafe and contentless values remain ineligible.
 
-Every append mutation samples live Secure Input and the bound frontmost PID twice before and once
-after posting. A captured append additionally validates the token's current security, original PID,
+Every keyboard transaction rechecks generation/admission, live Secure Input, and the bound
+frontmost PID immediately before and after posting. A captured owner additionally validates the token's current security, original PID,
 and `CFEqual` identity of the current focused element before and after the synchronous mutation.
 Application activation change, PID/element drift, security rejection, generation invalidation, or
 uncertain delivery permanently suspends the owner.
 
-The Unicode poster accepts a positive bound PID and safe non-empty text, creates one
-`.privateState` source, and fully constructs key-down and key-up with the same UTF-16 payload and
-explicit empty flags before either can be posted. It samples live Secure Input only after the pair
-exists; on success, the two `CGEventPostToPid` submissions are adjacent. Source/down/up construction
-failure or the final security sample causes zero posts. `.posted` means only that both events were
-submitted: CoreGraphics provides no target-control acceptance acknowledgement.
+The keyboard poster accepts a positive bound PID and one replacement plan. It creates one tagged
+`.privateState` source and fully constructs all modifier-neutral Backspace down/up pairs followed
+by the Unicode insertion down/up pair, when needed, before posting anything. Source/event
+construction failure or the final security sample causes zero posts. `.posted` means only that the
+ordered transaction was submitted: CoreGraphics provides no target-control acceptance
+acknowledgement.
 
 After any provisional delivery attempt, destination/security loss, or uncertainty, no full-text
 resend, one-shot current-focus insertion, Cmd+V, alternate target, or clipboard recovery is allowed.
 Release-time one-shot/final-only insertion and manual-copy recovery are removed even when no output
 owner was created or no post was attempted.
 
-The unbound append path uses no pasteboard, Backspace, selection, deletion, or cursor navigation.
+The unbound path uses no pasteboard, selection, or cursor navigation. D-27-01 narrowly permits
+Backspace only up to this hold's recorded owned grapheme tail; it never deletes pre-existing text.
 Because it has no AX range, it cannot observe a caret move within the same process; text may
 therefore reach a different caret in that process. This residual risk is explicit. The local sink
-frontier is never destructively rewritten. At release, response/retry admission is already closed:
-action-2 and late packet/final values cannot append or replace text.
+The previous snapshot advances only after a full transaction is submitted. Physical keyboard or
+mouse input, PID/activation change, security rejection, generation mismatch, or delivery
+uncertainty permanently suspends the owner without rollback. FeishuSpeech-tagged events and Fn
+transitions are exempt. At release, response/retry admission is already closed: action-2 and late
+packet/final values cannot append or replace text.
+
+The generic route does not ask the user to confirm cursor position and does not request a new macOS
+permission during the hold. Same-PID caret movement initiated by the target application cannot be
+proven without AX and remains an explicit best-effort limitation.
 
 `autoInsert=false` keeps recognition active but discards cursor-writing capability and produces no
 target or pasteboard mutation. Usable held recognition is tracked independently, so disabled,
@@ -232,7 +242,8 @@ audio/network work when affirmatively detected.
 
 The coordinator's response receipt is transcript-free. It records only generation, attempt and
 journal index, source/event kind, eligibility, ownership and output outcome, coarse raw-response
-shape, and raw/frontier UTF-16 lengths. It does not contain or hash text and does not record audio,
+snapshot decision, previous/new/common-prefix UTF-16 and `Character` counts, Backspace/insertion
+counts, route, and outcome. It does not contain or hash text and does not record audio,
 credentials/tokens, stream IDs, raw response bodies/messages, PID, AX identity/value, application
 or window names, or clipboard payloads. Shape is diagnostic only and never determines ownership.
 
@@ -241,7 +252,8 @@ claim. Installed owner UAT must still observe visible held output on the real ta
 pair with no visible text remains a PARTIAL result and does not authorize global HID posting,
 retries, destructive editing, or fallback after uncertainty.
 
-See [D-25-01](decisions/D-25-01.md), [D-26-01](decisions/D-26-01.md), and the
+See [D-25-01](decisions/D-25-01.md), [D-26-01](decisions/D-26-01.md),
+[D-27-01](decisions/D-27-01.md), and the
 [full design](streaming-speech-design.md) for state, lifecycle, failure, fallback, privacy, and test
 requirements.
 
@@ -329,12 +341,14 @@ cancelled work into additional network attempts.
 
 ## Test target caveat
 
-`FeishuSpeechTests` is wired into the Xcode project. Issue #26 adds automated coverage for exact
+`FeishuSpeechTests` is wired into the Xcode project. Issue #26 added automated coverage for exact
 audio ingress accounting, recorder sealing barriers, streaming action/sequence/token/cancel races,
 cursor replacement, captured and unbound output, lifecycle generation, settings, and fixed
 completion feedback. Direct lifecycle-free execution of the complete XCTest bundle reports 272/272
-passing. It covers packet-index ownership, replay exact-once behavior, release suppression,
-recognition/output separation, fixed destination/security boundaries, and transcript-free receipts.
+passing. That evidence predates issue #27 and does not prove snapshot reconciliation. Issue #27
+requires focused and full-suite coverage for duplicate, extension, shorter, revision, replay,
+Unicode-grapheme Backspace counts, transaction ordering/suspension, AX replacement, and release
+suppression.
 
 `AudioRecorderRecoveryTests.swift` remains excluded from the test target because it is a recorded
 pre-existing AudioRecorder-owned blocker outside the #11/#12/#21 API recovery bundle.

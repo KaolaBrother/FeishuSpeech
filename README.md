@@ -5,9 +5,9 @@ macOS 本地语音输入工具，使用飞书语音识别 API。
 ## 功能
 
 - 🎤 按住 **Fn 键** 0.3 秒开始流式识别
-- ⌨️ 按住 Fn 时持续输出：每个符合条件的 journal packet index 只拥有一次原始响应值，本地按响应顺序拼接为不断增长的 UTF-16 frontier，再交给本次交互的唯一输出 owner
+- ⌨️ 按住 Fn 时持续输出：飞书响应按完整、不透明的识别 snapshot 处理；相同 snapshot 不重复输出，变长、缩短或修订都会替换本次按键拥有的暂定文字
 - 🔄 按键期间的可恢复流式失败不会立即报错；应用在松开 Fn 前持续使用新会话重试，并保留已录音频的有序回放
-- 🎯 松开 **Fn 键** 会在排空前关闭响应/重试/输出准入，只封口按键期间已拥有的 frontier
+- 🎯 松开 **Fn 键** 会在排空前关闭响应/重试/输出准入，只封口按键期间已拥有的 snapshot，release/terminal 回调不再改字
 - 🔒 安全输入和密码框会拒绝输出；捕获目标路径验证原 PID 和精确 AX 元素，无 AX 目标路径在可检测的进程切换时停止，但无法感知同 PID 内的光标移动
 
 ## 系统要求
@@ -61,13 +61,13 @@ cp -R build/Build/Products/Release/FeishuSpeech.app /Applications/
 
 1. 将光标放在任意输入框中
 2. 按住 **Fn 键** 0.3 秒（菜单栏图标变红）
-3. 继续按住并说话；每个可用 packet 响应在本次 generation 内按 journal index 只被拥有一次。原始标量会被按响应顺序本地拼接（即使值相同、不相交或修订也一样），生成增长的 UTF-16 frontier。支持 AX 范围的输入框接收该 frontier 的可验证范围替换；已捕获的 final-only 目标绑定原 PID/精确 AX 元素，无 AX 目标则绑定当时的前台 PID，并只投递 frontier 的未见后缀
+3. 继续按住并说话；packet replay 所有权与识别文字状态彼此独立：同一 journal index 只处理一次，但每个新响应都是完整 snapshot。相同 snapshot 不产生按键；支持 AX 范围的输入框直接替换本次按键拥有的范围；任意当前焦点目标只删除本次按键已输出的分歧尾部（按 Swift `Character` 计数的 Backspace），再输入新 snapshot 的替换后缀
 4. 松开 **Fn 键**，等待“正在完成识别…”结束
-5. 松开 Fn 后只封口已有 held frontier。应用会在停止录音和等待网络排空前先关闭响应、重试和输出准入；`action=2`、在途 packet 与任何晚到 partial/final 只能完成既有 owner，不能首次输出、追加、改写、Cmd+V 或复制。发布时一次性/final-only/手动剪贴板回退已全部移除
+5. 松开 Fn 后只封口已有 snapshot。应用会在停止录音和等待网络排空前先关闭响应、重试和输出准入；`action=2`、在途 packet 与任何晚到 partial/final 都不能首次输出、追加、替换、Cmd+V 或复制。发布时一次性/final-only/手动剪贴板回退已全部移除
 
-“自动输入”关闭、文本不安全或无法取得 owner 时仍会记录“已有可用 held 识别”，但不会把“没有输出 frontier”误报为“未识别到内容”或流式失败；这些路径仍然零输入、零改写、零复制。运行时诊断只记录长度、形状、journal index 所有权和类型化结果，不显示或哈希识别文本，也不记录音频、凭据、token、stream ID、目标控件内容或剪贴板内容。
+“自动输入”关闭、文本不安全或无法取得 owner 时仍会记录“已有可用 held 识别”，但不会把“没有自动输出”误报为“未识别到内容”或流式失败；这些路径仍然零输入、零改写、零复制。运行时诊断只记录长度/字符数、snapshot 决策、journal index 所有权和类型化结果，不显示或哈希识别文本，也不记录音频、凭据、token、stream ID、目标控件内容或剪贴板内容。
 
-> 最新 build-5 实机证据在 13.55 秒内记录了 66 个 HTTP-200 transaction，而可见输出在一个词后停滞。这证明音频/传输没有在首词后停止，但不能证明响应标量内容、输出所有权结果或目标已接受。飞书与 KaolaTerminal 都只暴露不透明标量，累积/delta/revision 语义仍未验证。本地 272/272 测试通过不代表安装版可见输出成功；`CGEventPostToPid` 没有目标接受确认，Release owner UAT 仍是必需门槛。
+> build 6 的隐私安全诊断已确认重复来自把每个新 packet index 的完整 snapshot 错当成 delta 拼接，而非 replay、重连或 transport 失败。当前契约改为完整 snapshot 替换；`CGEventPostToPid` 仍没有目标接受确认，Release owner UAT 仍是必需门槛。
 
 ## 常见问题
 
@@ -103,7 +103,7 @@ UAT 并非停在该阶段：它已成功取得 token、发送首个 `action=1` �
 
 ### 没有实时显示文字
 
-部分应用不提供可验证的 Accessibility 选区与范围读取能力。只要能捕获明确的非安全目标，应用就会把原 PID 和精确 `AXUIElement` 绑定到本次按键，并在每次 Unicode 后缀投递前后复核 Secure Input、PID 和该元素；无法捕获/确认 AX 目标时，首个非空 packet 响应会再尝试一次 AX 绑定，仍不可用时绑定当时最前台 PID。两种 append 路径接收的都是协调器按 journal index 一次拥有并拼接的本地增长 frontier，因此 sink 只需发送其未见 UTF-16 后缀。重放不会重新拥有历史 index；先前失败的 index 可在首次成功时拥有一次。切换应用、安全状态、精确元素变化或交付不确定会永久停止后续自动输出，且不删除、不重发、不切换 writer、不复制。无 AX 路径仍无法观测同一 PID 内的光标移动。`CGEventPostToPid` 没有目标接受回执，因此安装版 Release owner UAT 仍是必需门槛；当前只有 272/272 的不启动应用生命周期本地测试通过，不声明真实控件已接受文字。
+部分应用不提供可验证的 Accessibility 选区与范围读取能力。支持 AX 的目标会绑定原 PID 和精确 `AXUIElement`，并直接替换本次按键拥有的范围。无法建立 AX 范围时，应用绑定当时的前台 PID，以一笔串行事务发送恰好所需的 grapheme-counted Backspace，再输入 replacement suffix；相同 snapshot 不发送事件。物理键盘/鼠标输入、应用切换、安全输入、目标漂移或交付不确定会永久停止本次按键的后续替换，不回滚、不重发、不切换 writer、不复制。应用不会询问光标位置，也不会在按键期间弹出新的权限请求；无 AX 路径仍无法证明同一 PID 内由应用自身造成的光标移动。`CGEventPostToPid` 没有目标接受回执，因此安装版 Release owner UAT 仍是必需门槛。
 
 ### 开机启动
 
@@ -128,7 +128,7 @@ FeishuSpeech/
 │   ├── FeishuStreamingSession.swift # 严格串行的飞书流
 │   ├── AccessibilityClient.swift # 原始目标捕获与安全校验
 │   ├── CursorTextSession.swift  # 暂定文本范围替换
-│   ├── CurrentFocusAppendSession.swift # 无 AX 范围时的同 PID UTF-16 后缀输出
+│   ├── CurrentFocusAppendSession.swift # 无 AX 范围时的同 PID snapshot 键盘替换
 │   ├── FeishuAPIService.swift   # token 与 HTTP 传输
 │   ├── LoginItemService.swift   # 开机启动
 │   ├── PermissionManager.swift  # 权限管理

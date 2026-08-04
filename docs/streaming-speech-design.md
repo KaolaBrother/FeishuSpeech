@@ -1,29 +1,29 @@
 # Cursor-bound streaming speech design
 
-Status: resilient hold retry and continuous-output refinements are implemented locally in issue #26
-with lifecycle-free automated evidence; installed Release credential-bearing Feishu and
-cross-application output UAT remain pending.
+Status: issue #27 owner-approved snapshot-replacement correction is the current contract;
+implementation evidence and installed Release credential-bearing/cross-application UAT remain
+pending.
 
 ## 1. Outcome
 
 Holding Fn for the existing 0.3-second gate starts a Feishu streaming-recognition interaction.
-When a safe AX range is available, each recognized hypothesis replaces one provisional text range
-at the cursor that was active when the interaction began, and the final replaces the same range.
+When a safe AX range is available, each different complete snapshot replaces one provisional text
+range at the cursor that was active when the interaction began.
 If an affirmatively safe target is captured but lacks live AX range replacement, startup now arms a
-continuous append owner bound to its original PID and exact `AXUIElement`. If AX cursor/focus
+continuous keyboard owner bound to its original PID and exact `AXUIElement`. If AX cursor/focus
 capture is unavailable, recording and streaming still proceed; the first non-empty hypothesis
 re-probes AX once, and a final-only rebound arms the same captured owner while a still-unavailable
 result arms an unbound PID-only owner. Each eligible held packet response owns its journal index
-once and concatenates its raw scalar to a local growing UTF-16 frontier. The selected owner receives
-that frontier immediately while Fn remains held. Release closes admission and only closes the
+once, independently of recognition state. Equal complete snapshots emit nothing; a different
+snapshot replaces `latestSnapshot` and is offered immediately while Fn remains held. Release
+closes admission and only closes the
 existing owner; it cannot mutate output. The FeishuSpeech overlay reports neutral state only; it
 does not host a transcript preview,
 editable draft, or send button and does not claim that a target accepted synthetic input.
 
 The implementation ports KaolaTerminal's stream transport and bounded-ingress rules, but deliberately
 replaces its preview/review UI with an opportunistic macOS Accessibility writer plus a guarded
-same-PID suffix writer when no AX destination can be established. KaolaTerminal's opaque preview
-replacement is not evidence of Feishu cumulative, delta, or revision semantics.
+same-PID grapheme-aware keyboard replacement writer when no AX destination can be established.
 
 It also ports KaolaTerminal's response compatibility boundary: response identity echoes are not
 trusted as acknowledgements, code-zero missing data is an empty value, and `recognition_text` is
@@ -58,17 +58,15 @@ session.
 
 ### Explicitly unverified
 
-Feishu does not state whether intermediate `recognition_text` is a delta, cumulative text,
-stabilized segments, disjoint text, or a revisable hypothesis. No implementation may claim one of
-those forms without credential-bearing live evidence. FeishuSpeech receives one opaque scalar and
-applies an explicit local policy: concatenate each eligible journal index's raw scalar once.
+Feishu responses are complete opaque recognition snapshots: a later value may be equal, longer,
+shorter, or revised. This observed replacement contract does not claim stabilization or permit
+normalization/inference. Packet index remains replay identity only; it is never a text delta rule.
 
 Accessibility behavior is application-dependent. Native AppKit, WebKit, Electron, terminal, and
 document-editor targets require live UAT before broad compatibility claims are made.
 
-Lifecycle-free evidence reports 272/272 tests passing across the complete XCTest bundle. It verifies
-local routing, paired-event construction, ownership, retry/replay, release, and lifecycle contracts;
-it does not replace installed UAT. In particular,
+Issue #26's lifecycle-free 272/272 evidence predates the issue #27 correction. Issue #27 requires
+new focused and full-suite evidence; neither automated suite replaces installed UAT. In particular,
 `CGEventPostToPid` exposes no target-control acceptance acknowledgement, so `.posted` cannot prove
 visible text.
 
@@ -85,8 +83,8 @@ coordinator ownership, or target acceptance. Earlier observations of undefined b
   range replacement is supported.
 - Preserve the 0.3-second Fn gate, 60-second maximum hold, multi-display status overlay, sleep/wake
   cleanup, microphone/accessibility permissions, and Keychain credential storage.
-- Use verified AX replacement when available; otherwise feed a locally growing, journal-index-owned
-  frontier to a sink that posts only its byte-exact unseen UTF-16 suffix.
+- Use verified AX replacement when available; otherwise reconcile only this hold's keyboard text
+  with grapheme-counted Backspaces followed by the replacement suffix.
 - Never redirect a captured AX write. The current-focus fallback binds one frontmost PID on first
   output and permanently suspends after a detectable process/security/delivery change.
 - Keep audio memory and network backpressure bounded.
@@ -135,16 +133,16 @@ partial / final / cancelled / failed
         |
         +--------------> MainViewModel generation gate
                                 |
-                                +--> response ledger: own journal index once + grow UTF-16 frontier
+                                +--> snapshot ledger: own journal index once + replace latest snapshot
                                                 |
                                                 +--> one AX or PID-bound owner
 ```
 
-Held-frontier AX writes belong only to `CursorTextSession`. Captured final-only-capability destinations
+Verified AX writes belong only to `CursorTextSession`. Captured final-only-capability destinations
 and AX-unavailable destinations use `CurrentFocusAppendSession`; the captured variant binds the
 original PID plus exact AX element, while the unbound variant binds one frontmost PID. Both post
-only monotonic local-frontier suffixes after repeated security/destination checks. They use no deletion,
-selection, cursor navigation, or per-partial pasteboard mutation. The transport does not know about
+one ordered Backspace-plus-Unicode replacement transaction after security/destination checks. They
+use no selection, cursor navigation, or per-partial pasteboard mutation. The transport does not know about
 focus or UI, and no output boundary knows about audio, credentials, or HTTP.
 
 ## 5. State model
@@ -198,12 +196,14 @@ rebindOnFirstPartial
   | AX still unavailable              -> currentFocusAppend(boundPID, emittedUTF16)
 
 capturedAppend / currentFocusAppend
-  | each eligible journal index -> append raw scalar to coordinator frontier once
-  | growing frontier            -> append unseen suffix
+  | each eligible journal index -> admit complete snapshot at most once
+  | equal snapshot              -> no event
+  | different snapshot          -> replace owned keyboard tail by Character LCP
   | historical replay index     -> no-op
   | unsafe/contentless          -> no ownership or output
   | release                     -> close existing owner without response text
   | PID/element/security/delivery change -> suspended
+  | external caret-affecting input        -> suspended
 
 currentFocusAppend
   | same-PID caret movement remains unobservable
@@ -373,23 +373,19 @@ post-write caret/range values returned by Accessibility, not from Swift characte
 
 ### Later partials
 
-For each newly owned held frontier:
+For each different admitted snapshot:
 
 1. Verify the destination token and generation.
 2. Verify the same process and focused element.
 3. Verify a collapsed caret at the owned range end.
 4. Read the owned range and require exact equality with `lastWrittenText`.
 5. Set the selected range to the owned range on the captured element.
-6. Set selected text to the complete growing frontier.
+6. Set selected text to the complete raw latest snapshot.
 7. Read back the caret and new range; update ownership only on exact success.
 
-This is replace-not-append at the AX sink, but the value replaced is the coordinator's local
-frontier. Equal, disjoint, cumulative, shorter, or revised raw scalars on different eligible packet
-indices each extend that frontier once. This local behavior does not assert a provider semantic.
-
-The writer never deletes by simulated key count. It never computes deletion length from UTF-8
-bytes, Unicode scalar count, or Swift grapheme count. Emoji, combining marks, CJK, and bidirectional
-text are acceptance cases for the Accessibility adapter.
+Equal snapshots are no-ops. Extensions, shorter values, and revisions all replace the same verified
+AX range. The AX writer never deletes by simulated key count; Accessibility-returned ranges define
+its ownership. Emoji, combining marks, CJK, bidirectional text, and newlines remain acceptance cases.
 
 ### Interference and stale destinations
 
@@ -405,7 +401,7 @@ ensure that a stale result cannot be intentionally routed to a newly focused fie
 
 ### Release and failures
 
-- Release: close admission before drain and finalize only the already-owned frontier; action-2 text
+- Release: close admission before drain and close the owner without mutation; action-2 text
   and late callbacks cannot replace, append, create, or copy output.
 - No held recognition: release ownership and surface the fixed empty-recognition outcome.
 - Stream failure after visible partial: keep the last verified text, release ownership, surface
@@ -416,21 +412,20 @@ ensure that a stale result cannot be intentionally routed to a newly focused fie
 Preserving visible text is deliberate. Once ownership becomes uncertain, deleting the range could
 delete user edits or unrelated content.
 
-## 9. Captured and unbound continuous output
+## 9. Captured and unbound keyboard replacement
 
 For a captured non-secure editable control that cannot support verified live replacement:
 
 1. Startup `.finalOnly`, or a first-partial rebind returning `.finalOnly`, creates a continuous
    owner bound to the captured PID and exact `AXUIElement`; the rebound triggering partial is
    applied before its callback returns.
-2. Every eligible packet response received while Fn remains held claims its journal index once,
-   extends the local frontier, and offers that frontier immediately to this owner.
-3. Before and after each append mutation, validation requires live Secure Input to be off, the
+2. Every eligible packet response received while Fn remains held may claim its journal index once;
+   an equal complete snapshot emits nothing and a different snapshot is offered immediately.
+3. Before and after each replacement transaction, validation requires live Secure Input to be off, the
    captured token's security to remain affirmatively safe, the original PID to remain frontmost,
    and the current focused AX element to be exactly `CFEqual` to the captured element.
-4. It posts only the locally growing frontier's unseen UTF-16 suffix. Equal, disjoint, shorter, and
-   revised raw scalars on distinct eligible indices all extend the frontier once.
-5. Any provisional attempt, destination/security failure, or delivery uncertainty permanently
+4. It replaces only this hold's keyboard text using the grapheme reconciliation algorithm below.
+5. External caret-affecting input, destination/security failure, or delivery uncertainty permanently
    closes all full-text resend, one-shot current-focus, Cmd+V, alternate-target, and clipboard
    fallback paths.
 6. Release closes ledger and retry admission before draining, then closes the owner without final
@@ -443,32 +438,47 @@ For an interaction where no AX cursor/focused element can be captured or confirm
    the fixed verified AX destination for the rest of the hold.
 3. A `.finalOnly` probe result creates the captured owner above. If the probe remains unavailable,
    `CurrentFocusAppendSession` captures the then-frontmost PID and begins activation monitoring.
-4. It receives the same coordinator-built growing frontier and posts only its unseen UTF-16 suffix.
+4. It receives the same complete snapshots and applies the same replacement transaction.
 5. Historical replay indices, contentless values, and C0/C1/DEL-bearing values do not own or post.
-   A previously failed index may own once when replay first succeeds. There is no deletion,
-   selection, navigation, pasteboard write, or uncertain resend.
-6. Secure Input and the bound PID are sampled twice before and once after a post. App activation
-   away, PID mismatch, security rejection, or delivery uncertainty permanently suspends output.
+   A previously failed index may own once when replay first succeeds. There is no selection,
+   navigation, pasteboard write, or uncertain resend.
+6. Generation/admission, Secure Input, and the bound PID are rechecked immediately before and after
+   a transaction. App activation away, PID mismatch, external keyboard/mouse input, security
+   rejection, or delivery uncertainty permanently suspends output. Fn transitions and
+   FeishuSpeech-tagged synthetic events are exempt.
 7. Action-2 and late packet/final values cannot mutate submitted output after release.
 
-The shared low-level Unicode poster first validates the positive bound PID and safe non-empty text,
-creates one `.privateState` source, and fully constructs a key-down and key-up carrying the same
-UTF-16 payload and explicit empty flags. It then performs the final live Secure Input sample. Only
-after that sample passes are the already-constructed down/up events submitted adjacently to the
-same PID. Source or event construction failure and the final security rejection all produce zero
-posts; there is no fallible construction or security gate between down and up.
+For the generic keyboard owner, reconciliation uses Swift extended grapheme clusters without
+normalization:
 
-This unbound path is best effort, not verified replacement. It cannot observe a mouse/keyboard
-caret move between controls owned by the same PID, so a later suffix can reach a different caret in
-that process. Fixed PID, permanent suspension, and no resend contain but do not eliminate that
-residual targeting risk. Secure fields remain fail-closed. With `autoInsert=false`, unsafe text, or
-no owner, recognition remains available but neither path mutates the target/pasteboard or reports
-the missing output frontier as missing recognition.
+```text
+oldCharacters = Array(previousSnapshot)
+newCharacters = Array(nextSnapshot)
+commonCount   = exact longest-common-prefix count
+deleteCount  = oldCharacters.count - commonCount
+insertText   = String(newCharacters.dropFirst(commonCount))
+```
+
+`deleteCount` never uses UTF-8 bytes or UTF-16 units and never exceeds this hold's recorded owned
+tail. The shared poster validates the positive PID, creates one tagged `.privateState` source, and
+constructs every Backspace down/up pair followed by the modifier-free Unicode insertion down/up
+pair, when needed, before posting anything. Construction or final security failure produces zero
+posts. It submits all Backspaces and then the suffix in order to the one captured PID. The previous
+snapshot advances only after the complete transaction is submitted successfully. A possible
+partial visible mutation is never rolled back.
+
+This unbound path is best effort. The external-input monitor catches physical keyboard/mouse input,
+but application-initiated caret movement inside the same PID cannot be proven without AX. Fixed
+PID, permanent suspension, and no resend contain but do not eliminate that residual risk. The app
+does not ask for cursor confirmation and does not request a new runtime permission during the hold.
+Secure fields remain fail-closed. With `autoInsert=false`, unsafe text, or no owner, recognition
+remains available but neither path mutates the target/pasteboard or reports missing output as
+missing recognition.
 
 `CGEventPostToPid` does not report whether the destination control accepted, transformed, ignored,
-or displayed the Unicode payload. A `.posted` pair therefore closes only the local submission
+or displayed the replacement. A `.posted` transaction therefore closes only the local submission
 contract. Installed owner UAT is still required; no visible output after submission is PARTIAL and
-does not authorize retry, global HID posting, destructive repair, or clipboard fallback after
+does not authorize retry, global HID posting, rollback, or clipboard fallback after
 uncertainty.
 
 ## 10. Coordinator and concurrency ownership
@@ -480,10 +490,10 @@ uncertainty.
 | PCM conversion/coalescing | audio/buffer serial queues | preserve order; never block capture on network |
 | Feishu sequence/token state | `FeishuStreamingSession` actor | one strict request chain per attempt; at most one active attempt |
 | packet journal/retry admission | `MainViewModel @MainActor` | one recorder/ingress per hold; fresh sessions replay in order |
-| response-output ledger | `MainViewModel @MainActor` | each eligible journal index owns once; concatenate raw scalar into held frontier |
+| snapshot/replay ledger | `MainViewModel @MainActor` | own each eligible journal index once; independently replace `latestSnapshot` |
 | UI/status/session generation | `MainViewModel @MainActor` | single coordinator verdict for every callback |
 | AX destination and owned range | `CursorTextSession @MainActor` | all target writes serialized and verified |
-| append destination | `CurrentFocusAppendSession @MainActor` | fixed PID/exact AX checks; append only the local frontier's unseen suffix |
+| keyboard destination | `CurrentFocusAppendSession @MainActor` | fixed PID/exact AX checks; serialize owned-tail Backspace plus suffix replacement |
 
 The coordinator starts capture and stream setup without blocking the main actor. It consumes audio
 and stream events in generation-bound tasks. A recoverable attempt failure first claims/cancels the
@@ -510,8 +520,8 @@ teardown from continuously advancing the overlay generation and leaving its wind
 - Transcript content never appears in the overlay, menu bar, logs, notifications, or accessibility
   labels owned by FeishuSpeech.
 - `playSound` may retain start/final feedback but must not play once per partial.
-- `autoInsert=true` enables verified AX live replacement, captured-target continuous append, or
-  best-effort same-PID suffix output when AX is unavailable. Release-time fallbacks are removed.
+- `autoInsert=true` enables verified AX live replacement or captured/fixed-PID grapheme-aware
+  keyboard replacement when AX is unavailable. Release-time fallbacks are removed.
 - `autoInsert=false` keeps streaming recognition active but discards cursor-writing capability and
   performs no target or pasteboard mutation. Secure target probing remains fail-closed.
 - A target capability warning is per interaction; it does not silently change the saved setting.
@@ -530,8 +540,9 @@ Allowed diagnostic fields:
 
 - typed lifecycle/capability/failure, eligibility, ownership, shape, and output enums;
 - generation, retry ordinal, journal index, source, and event kind;
-- packet action, sequence number, byte count, bounded-queue occupancy, and raw/frontier UTF-16
-  lengths.
+- packet action, sequence number, byte count, bounded-queue occupancy, snapshot decision,
+  previous/new/common-prefix UTF-16 and `Character` counts, Backspace/insertion counts, route, and
+  transaction outcome.
 
 Forbidden diagnostic fields:
 
@@ -557,14 +568,12 @@ No cursor destination survives the process lifetime or is persisted to UserDefau
    - Request models, stream ID generation, explicit serial gate, first-packet token refresh,
      exact-once finish, failed-established-stream exact-once abort, typed numeric failures, and
      sanitized diagnostics are implemented and covered.
-4. **Cursor text session and continuous output — complete locally**
-   - Capability probe, captured destination, replace/read-back loop, invalidation, final commit, and
-     captured/unbound append security policy are implemented with fake AX clients. Initial and
-     rebound final-only destinations now route partials during the hold through exact-token-checked
-     PID-bound output; AX-unavailable output retains same-PID local-frontier suffix behavior.
-5. **Coordinator/state migration — complete**
+4. **Cursor text session and issue #26 continuous output — superseded in part by issue #27**
+   - AX replace/read-back and fixed destination boundaries remain. The issue #26 suffix-only generic
+     writer and blanket Backspace prohibition are replaced by the issue #27 transaction contract.
+5. **Coordinator/state migration — issue #27 correction pending evidence**
    - Production hot-key work uses one generation-owned recorder/ingress, ordered journal, fresh
-     serial session attempts, hold-wide capped backoff, journal-indexed response ownership,
+     serial session attempts, hold-wide capped backoff, journal-indexed replay ownership,
      release-closed response/retry admission, and identity-owned cleanup. Whole-file recognition
      remains compatibility-only.
 6. **UI/settings docking — complete**
@@ -613,15 +622,16 @@ Test/production custody separation was preserved for the automated implementatio
 - AX destination capture/confirmation failure selects unbound fallback instead of blocking startup;
 - late partial/final after commit, invalidation, reset, or new generation writes nothing.
 
-### Current-focus suffix writer
+### Current-focus snapshot replacement writer (required issue #27 evidence)
 
-- locally assembled growing frontiers post only their unseen UTF-16 suffixes across emoji ZWJ,
-  combining marks, CJK, and RTL text;
-- sink-level duplicate/divergence checks remain no-resend protection, while raw response identity
-  belongs to the coordinator's packet-index ledger;
-- repeated pre/post Secure Input and PID sampling plus permanent suspension after app activation,
-  PID, security, or delivery uncertainty;
-- no deletion, selection, navigation, pasteboard mutation, uncertain resend, or one-shot fallback;
+- exact duplicate posts nothing; extension, shorter, and revision examples produce the exact
+  grapheme-counted Backspaces and replacement suffix;
+- emoji ZWJ, combining marks, flags, CJK, RTL, and newlines use `Character` deletion counts;
+- all Backspace and insertion events are constructed before the first post and submitted in order
+  to the captured PID; construction failure produces zero mutation;
+- external keyboard/mouse input, app activation/PID, security, generation, or delivery uncertainty
+  permanently suspends; tagged synthetic events do not self-suspend;
+- no rollback, selection, navigation, pasteboard mutation, uncertain resend, or one-shot fallback;
 - same-PID caret movement remains unobservable and is an explicit installed-UAT risk.
 
 ### Coordinator
@@ -639,15 +649,15 @@ Test/production custody separation was preserved for the automated implementatio
 - an immediate terminal provider event and a provider-auth exception each hide the overlay and
   clean the active generation exactly once;
 - repeated identical hot-key errors publish once and cannot re-enter coordinator teardown;
-- initial final-only-capability, rebound final-only-capability, and unbound continuous output route
-  each eligible journal index once before Fn release; historical replay never re-owns, while a
-  previously failed index may own once;
+- initial final-only-capability, rebound final-only-capability, and unbound routes admit each
+  eligible journal index once while independently suppressing equal snapshots; historical replay
+  never re-owns, while a previously failed index may own once;
 - release closes response/retry admission before drain; action-2 and late callbacks never create,
   append, rewrite, Cmd+V, or copy output;
 - output-disabled, unsafe, and ownerless usable held recognition completes without false
   empty-result/stream-error feedback and with zero output/copy;
-- the PID poster constructs one private-source, empty-flag, same-payload down/up pair before the
-  final Secure Input sample and submits the two events adjacently to the bound PID;
+- the PID poster constructs the whole tagged private-source Backspace-plus-Unicode transaction
+  before the final Secure Input sample and submits every event in order to the bound PID;
 - `autoInsert=false` produces no target writes;
 - logs and feedback never contain recognized text.
 
@@ -667,20 +677,21 @@ Test/production custody separation was preserved for the automated implementatio
 
 ## 15. Completion boundary
 
-Issue #25 supplied the accepted contract. Issue #26 supplies the production implementation,
+Issue #25 supplied the initial contract. Issue #26 supplied the production implementation,
 RED-first tests, independent correctness/security review, and documentation docking. Initial UAT
 then superseded the strict AX destination startup gate. Later UAT isolated a real HTTP-200 business
 failure after accepted packets, motivating [D-26-01](decisions/D-26-01.md). The latest build-5 leg
 then recorded 66 HTTP-200 transactions over 13.55 seconds while visible output stalled after one
-word, motivating journal-indexed local frontier assembly and release-only sealing. The lifecycle-free
-full bundle is 272/272 green and independent code/security reviews pass; installed Release
-verification remains pending.
+word, motivating issue #26's journal-indexed local frontier. Release 1.0 build 6 later proved that
+this concatenated complete snapshots and repeated text. [D-27-01](decisions/D-27-01.md) replaces
+that assembly rule with opaque snapshot replacement while retaining replay ownership and
+release-only sealing. Issue #27 automated and installed Release verification remain pending.
 
 General-availability closure remains intentionally separate: the owner will self-test the installed
 Release with real Feishu credentials and the live target-application matrix above. Until the
-repaired build passes owner UAT, packet-response shape, visible frontier growth, action-3 acceptance,
+repaired build passes owner UAT, snapshot replacement, visible target mutation, action-3 acceptance,
 retry/replay recovery, release races, PCM/tail behavior, slow-network handling, same-PID caret risk,
 and broad cross-application compatibility remain unverified. No cumulative/delta/revision provider
-semantic is claimed.
-Local `CGEventPostToPid` pair submission cannot substitute for the visible target-acceptance
+semantic is inferred beyond complete opaque replacement.
+Local `CGEventPostToPid` transaction submission cannot substitute for the visible target-acceptance
 observation required from owner UAT.
