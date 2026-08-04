@@ -27,26 +27,36 @@ extension HotKeyService: HotKeyWakeRecovering {}
 class MainViewModel: ObservableObject {
     private struct ResponseOutputLedger {
         enum ClaimResult {
-            case owned(frontier: String, frontierUTF16Count: Int, rawUTF16Count: Int, shape: String)
-            case historical(frontierUTF16Count: Int, rawUTF16Count: Int, shape: String)
+            case changed(snapshot: String, metrics: SnapshotMetrics)
+            case duplicate(metrics: SnapshotMetrics)
+            case historical(metrics: SnapshotMetrics)
             case staleGeneration
             case sealed
         }
 
+        struct SnapshotMetrics {
+            let decision: String
+            let previousUTF16Count: Int
+            let newUTF16Count: Int
+            let commonPrefixUTF16Count: Int
+            let previousCharacterCount: Int
+            let newCharacterCount: Int
+            let commonPrefixCharacterCount: Int
+            let deleteCharacterCount: Int
+            let insertUTF16Count: Int
+            let insertCharacterCount: Int
+        }
+
         private(set) var generation: UInt64?
-        private(set) var frontier: String = ""
+        private(set) var latestSnapshot: String = ""
         private(set) var isAdmissionOpen = false
 
-        private var frontierUTF16: [UInt16] = []
         private var ownedPacketIndices = Set<Int>()
-        private var previousEligibleRawUTF16: [UInt16]?
 
         mutating func begin(generation: UInt64) {
             self.generation = generation
-            frontier = ""
-            frontierUTF16.removeAll(keepingCapacity: true)
+            latestSnapshot = ""
             ownedPacketIndices.removeAll(keepingCapacity: true)
-            previousEligibleRawUTF16 = nil
             isAdmissionOpen = true
         }
 
@@ -56,10 +66,8 @@ class MainViewModel: ObservableObject {
 
         mutating func reset() {
             generation = nil
-            frontier = ""
-            frontierUTF16.removeAll(keepingCapacity: true)
+            latestSnapshot = ""
             ownedPacketIndices.removeAll(keepingCapacity: true)
-            previousEligibleRawUTF16 = nil
             isAdmissionOpen = false
         }
 
@@ -71,33 +79,45 @@ class MainViewModel: ObservableObject {
             guard generation == self.generation else { return .staleGeneration }
             guard isAdmissionOpen else { return .sealed }
 
-            let rawUTF16 = Array(text.utf16)
-            let shape = responseShape(rawUTF16)
+            let metrics = snapshotMetrics(for: text)
             guard ownedPacketIndices.insert(packetIndex).inserted else {
-                return .historical(
-                    frontierUTF16Count: frontierUTF16.count,
-                    rawUTF16Count: rawUTF16.count,
-                    shape: shape
-                )
+                return .historical(metrics: metrics)
             }
-
-            frontierUTF16.append(contentsOf: rawUTF16)
-            frontier = String(decoding: frontierUTF16, as: UTF16.self)
-            previousEligibleRawUTF16 = rawUTF16
-            return .owned(
-                frontier: frontier,
-                frontierUTF16Count: frontierUTF16.count,
-                rawUTF16Count: rawUTF16.count,
-                shape: shape
-            )
+            guard text != latestSnapshot else { return .duplicate(metrics: metrics) }
+            latestSnapshot = text
+            return .changed(snapshot: text, metrics: metrics)
         }
 
-        private func responseShape(_ rawUTF16: [UInt16]) -> String {
-            guard let previousEligibleRawUTF16 else { return "first" }
-            if rawUTF16 == previousEligibleRawUTF16 { return "exactDuplicate" }
-            if rawUTF16.starts(with: previousEligibleRawUTF16) { return "prefixExtension" }
-            if previousEligibleRawUTF16.starts(with: rawUTF16) { return "shorter" }
-            return "divergent"
+        private func snapshotMetrics(for text: String) -> SnapshotMetrics {
+            let previousCharacters = Array(latestSnapshot)
+            let newCharacters = Array(text)
+            let commonCount = zip(previousCharacters, newCharacters).prefix { $0 == $1 }.count
+            let commonPrefix = String(newCharacters.prefix(commonCount))
+            let inserted = String(newCharacters.dropFirst(commonCount))
+            let decision: String
+            if latestSnapshot.isEmpty {
+                decision = "first"
+            } else if text == latestSnapshot {
+                decision = "duplicateSnapshot"
+            } else if commonCount == previousCharacters.count {
+                decision = "extension"
+            } else if commonCount == newCharacters.count {
+                decision = "shorter"
+            } else {
+                decision = "revision"
+            }
+            return SnapshotMetrics(
+                decision: decision,
+                previousUTF16Count: latestSnapshot.utf16.count,
+                newUTF16Count: text.utf16.count,
+                commonPrefixUTF16Count: commonPrefix.utf16.count,
+                previousCharacterCount: previousCharacters.count,
+                newCharacterCount: newCharacters.count,
+                commonPrefixCharacterCount: commonCount,
+                deleteCharacterCount: previousCharacters.count - commonCount,
+                insertUTF16Count: inserted.utf16.count,
+                insertCharacterCount: inserted.count
+            )
         }
     }
 
@@ -112,9 +132,8 @@ class MainViewModel: ObservableObject {
     private struct ResponseReceipt {
         let context: ResponseReceiptContext
         let eligibility: String
-        let frontierUTF16Count: Int
         let ownership: String
-        let shape: String
+        let metrics: ResponseOutputLedger.SnapshotMetrics?
         let outputOutcome: String
     }
 
@@ -975,52 +994,45 @@ class MainViewModel: ObservableObject {
             packetIndex: eligiblePacketIndex,
             generation: identity.generation
         ) {
-        case .owned(let frontier, let frontierUTF16Count, let ownedRawUTF16Count, let shape):
-            let outputOutcome: String
-            var shouldStop = false
-            if let cursorSession {
-                try? cursorSession.handle(.partial(frontier), generation: identity.generation)
-                outputOutcome = "cursorOffered"
-            } else if let currentFocusAppendSession {
-                let outcome = currentFocusAppendSession.applyOpaqueHypothesis(
-                    frontier,
-                    generation: identity.generation,
-                    source: source
-                )
-                outputOutcome = String(describing: outcome)
-                shouldStop = interpretAppendApplyOutcome(outcome, identity: identity)
-            } else {
-                outputOutcome = "ownerUnavailable"
-            }
+        case .changed(let snapshot, let metrics):
+            let output = offerChangedSnapshot(snapshot, identity: identity, source: source)
             logResponseReceipt(ResponseReceipt(
                 context: ResponseReceiptContext(
                     identity: context.identity,
                     packetIndex: context.packetIndex,
                     source: context.source,
                     eventKind: context.eventKind,
-                    rawUTF16Count: ownedRawUTF16Count
+                    rawUTF16Count: metrics.newUTF16Count
                 ),
                 eligibility: "eligible",
-                frontierUTF16Count: frontierUTF16Count,
                 ownership: "ownedResponse",
-                shape: shape,
-                outputOutcome: outputOutcome
+                metrics: metrics,
+                outputOutcome: output.outcome
             ))
-            return shouldStop
+            return output.shouldStop
 
-        case .historical(let frontierUTF16Count, let historicalRawUTF16Count, let shape):
+        case .duplicate(let metrics):
+            logResponseReceipt(ResponseReceipt(
+                context: context,
+                eligibility: "eligible",
+                ownership: "ownedResponse",
+                metrics: metrics,
+                outputOutcome: "notOffered"
+            ))
+            return false
+
+        case .historical(let metrics):
             logResponseReceipt(ResponseReceipt(
                 context: ResponseReceiptContext(
                     identity: context.identity,
                     packetIndex: context.packetIndex,
                     source: context.source,
                     eventKind: context.eventKind,
-                    rawUTF16Count: historicalRawUTF16Count
+                    rawUTF16Count: metrics.newUTF16Count
                 ),
                 eligibility: "eligible",
-                frontierUTF16Count: frontierUTF16Count,
                 ownership: "historicalReplaySuppressed",
-                shape: shape,
+                metrics: metrics,
                 outputOutcome: "notOffered"
             ))
             return false
@@ -1033,6 +1045,27 @@ class MainViewModel: ObservableObject {
             logIneligibleResponse(context, eligibility: "sealed")
             return false
         }
+    }
+
+    private func offerChangedSnapshot(
+        _ snapshot: String,
+        identity: StreamingSessionIdentity,
+        source: CurrentFocusHypothesisSource
+    ) -> (outcome: String, shouldStop: Bool) {
+        if let cursorSession {
+            try? cursorSession.handle(.partial(snapshot), generation: identity.generation)
+            return ("cursorOffered", false)
+        }
+        guard let currentFocusAppendSession else { return ("ownerUnavailable", false) }
+        let outcome = currentFocusAppendSession.applyOpaqueHypothesis(
+            snapshot,
+            generation: identity.generation,
+            source: source
+        )
+        return (
+            String(describing: outcome),
+            interpretAppendApplyOutcome(outcome, identity: identity)
+        )
     }
 
     private func recordHeldRecognitionIfEligible(_ text: String, packetIndex: Int?) {
@@ -1090,9 +1123,8 @@ class MainViewModel: ObservableObject {
                 rawUTF16Count: text.utf16.count
             ),
             eligibility: "terminalNotAdmitted",
-            frontierUTF16Count: responseOutputLedger.frontier.utf16.count,
             ownership: "notOwned",
-            shape: "unclassified",
+            metrics: nil,
             outputOutcome: finalization.outcome
         ))
         guard finalization.mayCompleteNormally else { return true }
@@ -1111,18 +1143,15 @@ class MainViewModel: ObservableObject {
     private func finalizeExistingOutputOwner(
         identity: StreamingSessionIdentity
     ) -> (mayCompleteNormally: Bool, outcome: String) {
-        let frontier = responseOutputLedger.frontier
+        let latestSnapshot = responseOutputLedger.latestSnapshot
         if let cursorSession {
-            try? cursorSession.handle(
-                .final(frontier),
-                generation: identity.generation
-            )
-            return (true, "cursorFinalizeOffered")
+            try? cursorSession.handle(.cancelled, generation: identity.generation)
+            return (true, "cursorSealedWithoutOutput")
         }
         guard let currentFocusAppendSession else { return (true, "noOwner") }
         let outcome = currentFocusAppendSession.finalize(
             finalText: nil,
-            lastAcceptedText: frontier.isEmpty ? nil : frontier,
+            lastAcceptedText: latestSnapshot.isEmpty ? nil : latestSnapshot,
             generation: identity.generation
         )
         return (
@@ -1135,9 +1164,8 @@ class MainViewModel: ObservableObject {
         logResponseReceipt(ResponseReceipt(
             context: context,
             eligibility: eligibility,
-            frontierUTF16Count: responseOutputLedger.frontier.utf16.count,
             ownership: "notOwned",
-            shape: "unclassified",
+            metrics: nil,
             outputOutcome: eligibility == "sealed" ? "sealedSuppressed" : "notOffered"
         ))
     }
@@ -1151,6 +1179,7 @@ class MainViewModel: ObservableObject {
             sourceName = "replay"
         }
         let packetIndexValue = receipt.context.packetIndex ?? -1
+        let metrics = receipt.metrics
         logger.info(
             """
             Streaming response receipt generation=\(receipt.context.identity.generation, privacy: .public) \
@@ -1158,9 +1187,17 @@ class MainViewModel: ObservableObject {
             packetIndex=\(packetIndexValue, privacy: .public) \
             source=\(sourceName, privacy: .public) event=\(receipt.context.eventKind, privacy: .public) \
             eligibility=\(receipt.eligibility, privacy: .public) \
-            rawUTF16=\(receipt.context.rawUTF16Count, privacy: .public) \
-            frontierUTF16=\(receipt.frontierUTF16Count, privacy: .public) \
-            shape=\(receipt.shape, privacy: .public) ownership=\(receipt.ownership, privacy: .public) \
+            ownership=\(receipt.ownership, privacy: .public) \
+            decision=\(metrics?.decision ?? "suppressed", privacy: .public) \
+            previousUTF16=\(metrics?.previousUTF16Count ?? 0, privacy: .public) \
+            newUTF16=\(receipt.context.rawUTF16Count, privacy: .public) \
+            commonUTF16=\(metrics?.commonPrefixUTF16Count ?? 0, privacy: .public) \
+            previousCharacters=\(metrics?.previousCharacterCount ?? 0, privacy: .public) \
+            newCharacters=\(metrics?.newCharacterCount ?? 0, privacy: .public) \
+            commonCharacters=\(metrics?.commonPrefixCharacterCount ?? 0, privacy: .public) \
+            backspaces=\(metrics?.deleteCharacterCount ?? 0, privacy: .public) \
+            insertionUTF16=\(metrics?.insertUTF16Count ?? 0, privacy: .public) \
+            insertionCharacters=\(metrics?.insertCharacterCount ?? 0, privacy: .public) \
             output=\(receipt.outputOutcome, privacy: .public)
             """
         )

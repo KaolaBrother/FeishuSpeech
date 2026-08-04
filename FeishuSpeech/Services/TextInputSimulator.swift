@@ -130,6 +130,22 @@ protocol FinalTextCurrentFocusEventPosting: AnyObject {
         _ text: String,
         to processIdentifier: pid_t
     ) -> FinalTextCurrentFocusPostResult
+    func postReplacement(
+        deleteCharacterCount: Int,
+        insertText: String,
+        to processIdentifier: pid_t
+    ) -> FinalTextCurrentFocusPostResult
+}
+
+extension FinalTextCurrentFocusEventPosting {
+    func postReplacement(
+        deleteCharacterCount: Int,
+        insertText: String,
+        to processIdentifier: pid_t
+    ) -> FinalTextCurrentFocusPostResult {
+        guard deleteCharacterCount == 0 else { return .deliveryFailed }
+        return postUnicodeText(insertText, to: processIdentifier)
+    }
 }
 
 nonisolated enum FinalTextCurrentFocusPostResult: Equatable, Sendable {
@@ -160,10 +176,40 @@ protocol FinalTextUnicodeEventBackend: AnyObject {
         utf16: [UInt16],
         flags: CGEventFlags
     ) -> (any FinalTextUnicodeEventHandle)?
+    func makeKeyboardEvent(
+        source: any FinalTextUnicodeEventSourceHandle,
+        phase: FinalTextUnicodeEventPhase,
+        virtualKey: CGKeyCode,
+        flags: CGEventFlags
+    ) -> (any FinalTextUnicodeEventHandle)?
+    func setUserData(
+        _ userData: Int64,
+        for event: any FinalTextUnicodeEventHandle
+    )
     func postUnicodeEvent(
         _ event: any FinalTextUnicodeEventHandle,
         to processIdentifier: pid_t
     )
+}
+
+extension FinalTextUnicodeEventBackend {
+    func makeKeyboardEvent(
+        source _: any FinalTextUnicodeEventSourceHandle,
+        phase _: FinalTextUnicodeEventPhase,
+        virtualKey _: CGKeyCode,
+        flags _: CGEventFlags
+    ) -> (any FinalTextUnicodeEventHandle)? {
+        nil
+    }
+
+    func setUserData(
+        _: Int64,
+        for _: any FinalTextUnicodeEventHandle
+    ) {}
+}
+
+nonisolated enum FeishuSpeechSyntheticEventTag {
+    static let value: Int64 = 0x4653_5350_4545_4348
 }
 
 @MainActor
@@ -225,32 +271,72 @@ final class SystemFinalTextCurrentFocusEventPoster: FinalTextCurrentFocusEventPo
         _ text: String,
         to processIdentifier: pid_t
     ) -> FinalTextCurrentFocusPostResult {
+        postReplacement(
+            deleteCharacterCount: 0,
+            insertText: text,
+            to: processIdentifier
+        )
+    }
+
+    func postReplacement(
+        deleteCharacterCount: Int,
+        insertText: String,
+        to processIdentifier: pid_t
+    ) -> FinalTextCurrentFocusPostResult {
         guard processIdentifier > 0,
-              !text.utf16.isEmpty,
-              TextInputSimulator.isSafeForAutomaticPaste(text) else {
+              deleteCharacterCount >= 0,
+              deleteCharacterCount > 0 || !insertText.isEmpty,
+              TextInputSimulator.isSafeForAutomaticKeyboardText(insertText) else {
             return .deliveryFailed
         }
-        let utf16 = Array(text.utf16)
-        guard let source = backend.makeEventSource(stateID: .privateState),
-              let keyDown = backend.makeUnicodeEvent(
+        guard let source = backend.makeEventSource(stateID: .privateState) else {
+            return .deliveryFailed
+        }
+
+        var events: [any FinalTextUnicodeEventHandle] = []
+        events.reserveCapacity((deleteCharacterCount * 2) + (insertText.isEmpty ? 0 : 2))
+        for _ in 0 ..< deleteCharacterCount {
+            guard let keyDown = backend.makeKeyboardEvent(
+                source: source,
+                phase: .keyDown,
+                virtualKey: CGKeyCode(kVK_Delete),
+                flags: []
+            ), let keyUp = backend.makeKeyboardEvent(
+                source: source,
+                phase: .keyUp,
+                virtualKey: CGKeyCode(kVK_Delete),
+                flags: []
+            ) else {
+                return .deliveryFailed
+            }
+            events.append(keyDown)
+            events.append(keyUp)
+        }
+
+        if !insertText.isEmpty {
+            let utf16 = Array(insertText.utf16)
+            guard let keyDown = backend.makeUnicodeEvent(
                 source: source,
                 phase: .keyDown,
                 utf16: utf16,
                 flags: []
-              ),
-              let keyUp = backend.makeUnicodeEvent(
+            ), let keyUp = backend.makeUnicodeEvent(
                 source: source,
                 phase: .keyUp,
                 utf16: utf16,
                 flags: []
-              ) else {
-            return .deliveryFailed
+            ) else {
+                return .deliveryFailed
+            }
+            events.append(keyDown)
+            events.append(keyUp)
         }
+
+        events.forEach { backend.setUserData(FeishuSpeechSyntheticEventTag.value, for: $0) }
         guard !secureInputStateProvider.isSecureInputEnabled() else {
             return .securityRejected
         }
-        backend.postUnicodeEvent(keyDown, to: processIdentifier)
-        backend.postUnicodeEvent(keyUp, to: processIdentifier)
+        events.forEach { backend.postUnicodeEvent($0, to: processIdentifier) }
         return .posted
     }
 }
@@ -281,6 +367,32 @@ private final class SystemFinalTextUnicodeEventBackend: FinalTextUnicodeEventBac
         event.flags = flags
         event.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: utf16)
         return SystemFinalTextUnicodeEventHandle(event: event)
+    }
+
+    func makeKeyboardEvent(
+        source: any FinalTextUnicodeEventSourceHandle,
+        phase: FinalTextUnicodeEventPhase,
+        virtualKey: CGKeyCode,
+        flags: CGEventFlags
+    ) -> (any FinalTextUnicodeEventHandle)? {
+        guard let source = source as? SystemFinalTextUnicodeEventSourceHandle,
+              let event = CGEvent(
+                keyboardEventSource: source.source,
+                virtualKey: virtualKey,
+                keyDown: phase == .keyDown
+              ) else {
+            return nil
+        }
+        event.flags = flags
+        return SystemFinalTextUnicodeEventHandle(event: event)
+    }
+
+    func setUserData(
+        _ userData: Int64,
+        for event: any FinalTextUnicodeEventHandle
+    ) {
+        guard let event = event as? SystemFinalTextUnicodeEventHandle else { return }
+        event.event.setIntegerValueField(.eventSourceUserData, value: userData)
     }
 
     func postUnicodeEvent(
@@ -342,6 +454,14 @@ enum TextInputSimulator {
     static func isSafeForAutomaticPaste(_ text: String) -> Bool {
         !text.unicodeScalars.contains { scalar in
             scalar.value < 0x20 || scalar.value == 0x7F || (0x80 ... 0x9F).contains(scalar.value)
+        }
+    }
+
+    static func isSafeForAutomaticKeyboardText(_ text: String) -> Bool {
+        !text.unicodeScalars.contains { scalar in
+            let value = scalar.value
+            if value == 0x0A { return false }
+            return value < 0x20 || value == 0x7F || (0x80 ... 0x9F).contains(value)
         }
     }
 

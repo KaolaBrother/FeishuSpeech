@@ -94,6 +94,12 @@ protocol CurrentFocusActivationMonitoring: AnyObject {
 }
 
 @MainActor
+protocol CurrentFocusInputMonitoring: AnyObject {
+    func startMonitoring(_ handler: @escaping @MainActor () -> Void)
+    func stopMonitoring()
+}
+
+@MainActor
 final class CurrentFocusAppendSession: CurrentFocusProvisionalOutputSession {
     private enum Suspension {
         case destinationChanged
@@ -107,9 +113,10 @@ final class CurrentFocusAppendSession: CurrentFocusProvisionalOutputSession {
     private let secureInputStateProvider: SecureInputStateProviding
     private let frontmostProcessProvider: FrontmostProcessProviding
     private let activationMonitor: CurrentFocusActivationMonitoring
+    private let inputMonitor: CurrentFocusInputMonitoring?
     private let validateBoundDestination: (@MainActor () -> CurrentFocusBoundDestinationValidation)?
 
-    private var emittedUTF16: [UInt16] = []
+    private var previousSnapshot = ""
     private var suspension: Suspension?
     private var isClosed = false
     private var isMonitoring = false
@@ -121,6 +128,7 @@ final class CurrentFocusAppendSession: CurrentFocusProvisionalOutputSession {
         secureInputStateProvider: SecureInputStateProviding,
         frontmostProcessProvider: FrontmostProcessProviding,
         activationMonitor: CurrentFocusActivationMonitoring,
+        inputMonitor: CurrentFocusInputMonitoring? = nil,
         validateBoundDestination: (@MainActor () -> CurrentFocusBoundDestinationValidation)? = nil
     ) {
         self.generation = generation
@@ -129,12 +137,16 @@ final class CurrentFocusAppendSession: CurrentFocusProvisionalOutputSession {
         self.secureInputStateProvider = secureInputStateProvider
         self.frontmostProcessProvider = frontmostProcessProvider
         self.activationMonitor = activationMonitor
+        self.inputMonitor = inputMonitor
         self.validateBoundDestination = validateBoundDestination
 
         isMonitoring = true
         activationMonitor.startMonitoring { [weak self] processIdentifier in
             guard let self, processIdentifier != self.boundProcessIdentifier else { return }
             self.suspend(.destinationChanged)
+        }
+        inputMonitor?.startMonitoring { [weak self] in
+            self?.suspend(.deliveryUncertain)
         }
     }
 
@@ -143,18 +155,16 @@ final class CurrentFocusAppendSession: CurrentFocusProvisionalOutputSession {
         generation: UInt64,
         source _: CurrentFocusHypothesisSource
     ) -> CurrentFocusAppendOutcome {
-        let hypothesisUTF16 = Array(text.utf16)
-        if let rejection = rejectionBeforePosting(
-            text,
-            hypothesisUTF16: hypothesisUTF16,
-            generation: generation
-        ) {
+        if let rejection = rejectionBeforePosting(text, generation: generation) {
             return rejection
         }
 
-        let suffixUTF16 = hypothesisUTF16[emittedUTF16.count...]
-        let suffix = String(decoding: suffixUTF16, as: UTF16.self)
-        let wasEmpty = emittedUTF16.isEmpty
+        let oldCharacters = Array(previousSnapshot)
+        let newCharacters = Array(text)
+        let commonCount = zip(oldCharacters, newCharacters).prefix { $0 == $1 }.count
+        let deleteCharacterCount = oldCharacters.count - commonCount
+        let insertText = String(newCharacters.dropFirst(commonCount))
+        let wasEmpty = previousSnapshot.isEmpty
 
         guard sampleDestinationAndSecurity() else {
             return applyOutcome(for: suspension ?? .deliveryUncertain)
@@ -163,7 +173,11 @@ final class CurrentFocusAppendSession: CurrentFocusProvisionalOutputSession {
             return applyOutcome(for: suspension ?? .deliveryUncertain)
         }
 
-        switch eventPoster.postUnicodeText(suffix, to: boundProcessIdentifier) {
+        switch eventPoster.postReplacement(
+            deleteCharacterCount: deleteCharacterCount,
+            insertText: insertText,
+            to: boundProcessIdentifier
+        ) {
         case .posted:
             break
         case .securityRejected:
@@ -178,13 +192,12 @@ final class CurrentFocusAppendSession: CurrentFocusProvisionalOutputSession {
             return applyOutcome(for: suspension ?? .deliveryUncertain)
         }
 
-        emittedUTF16 = hypothesisUTF16
+        previousSnapshot = text
         return wasEmpty ? .insertedFirst : .appendedSuffix
     }
 
     private func rejectionBeforePosting(
         _ text: String,
-        hypothesisUTF16: [UInt16],
         generation: UInt64
     ) -> CurrentFocusAppendOutcome? {
         guard !isClosed, generation == self.generation else { return .staleGeneration }
@@ -194,13 +207,10 @@ final class CurrentFocusAppendSession: CurrentFocusProvisionalOutputSession {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return .contentless
         }
-        guard TextInputSimulator.isSafeForAutomaticPaste(text) else {
+        guard TextInputSimulator.isSafeForAutomaticKeyboardText(text) else {
             return .unsafeTextSuppressed
         }
-        guard hypothesisUTF16.starts(with: emittedUTF16) else {
-            return .revisionSuppressed
-        }
-        guard hypothesisUTF16.count > emittedUTF16.count else {
+        guard text != previousSnapshot else {
             return .duplicate
         }
         return nil
@@ -219,49 +229,18 @@ final class CurrentFocusAppendSession: CurrentFocusProvisionalOutputSession {
         }
 
         let candidate = usableFinalValue(finalText) ?? usableFinalValue(lastAcceptedText)
-        guard let candidate else {
-            return emittedUTF16.isEmpty ? .noUsableText : .exactCommitted
-        }
-
-        guard TextInputSimulator.isSafeForAutomaticPaste(candidate) else {
-            return emittedUTF16.isEmpty ? .noUsableText : .preservedDivergence
-        }
-
-        let candidateUTF16 = Array(candidate.utf16)
-        guard candidateUTF16.starts(with: emittedUTF16) else {
+        guard !previousSnapshot.isEmpty else { return .noUsableText }
+        guard let candidate,
+              TextInputSimulator.isSafeForAutomaticKeyboardText(candidate),
+              candidate == previousSnapshot else {
             return .preservedDivergence
         }
-        guard candidateUTF16.count > emittedUTF16.count else {
-            return .exactCommitted
-        }
-
-        let suffix = String(decoding: candidateUTF16[emittedUTF16.count...], as: UTF16.self)
-        guard postFinalSuffix(suffix) else {
-            return finalOutcome(for: suspension ?? .deliveryUncertain)
-        }
-        emittedUTF16 = candidateUTF16
-        return .suffixCommitted
+        return .exactCommitted
     }
 
     func invalidate() {
         guard !isClosed else { return }
         close()
-    }
-
-    private func postFinalSuffix(_ suffix: String) -> Bool {
-        guard sampleDestinationAndSecurity(), sampleDestinationAndSecurity() else { return false }
-
-        switch eventPoster.postUnicodeText(suffix, to: boundProcessIdentifier) {
-        case .posted:
-            break
-        case .securityRejected:
-            suspend(.securityRejected)
-            return false
-        case .deliveryFailed:
-            suspend(.deliveryUncertain)
-            return false
-        }
-        return sampleDestinationAndSecurity()
     }
 
     private func sampleDestinationAndSecurity() -> Bool {
@@ -319,6 +298,7 @@ final class CurrentFocusAppendSession: CurrentFocusProvisionalOutputSession {
         guard isMonitoring else { return }
         isMonitoring = false
         activationMonitor.stopMonitoring()
+        inputMonitor?.stopMonitoring()
     }
 
     private func applyOutcome(for suspension: Suspension) -> CurrentFocusAppendOutcome {
@@ -454,13 +434,15 @@ final class SystemCurrentFocusProvisionalOutputSessionFactory: CurrentFocusProvi
     private let secureInputStateProvider: SecureInputStateProviding
     private let frontmostProcessProvider: FrontmostProcessProviding
     private let activationMonitorFactory: @MainActor () -> CurrentFocusActivationMonitoring
+    private let inputMonitorFactory: @MainActor () -> CurrentFocusInputMonitoring
 
     convenience init() {
         self.init(
             eventPoster: SystemFinalTextCurrentFocusEventPoster(),
             secureInputStateProvider: SystemSecureInputStateProvider(),
             frontmostProcessProvider: SystemFrontmostProcessProvider(),
-            activationMonitorFactory: { WorkspaceCurrentFocusActivationMonitor() }
+            activationMonitorFactory: { WorkspaceCurrentFocusActivationMonitor() },
+            inputMonitorFactory: { WorkspaceCurrentFocusInputMonitor() }
         )
     }
 
@@ -468,12 +450,16 @@ final class SystemCurrentFocusProvisionalOutputSessionFactory: CurrentFocusProvi
         eventPoster: FinalTextCurrentFocusEventPosting,
         secureInputStateProvider: SecureInputStateProviding,
         frontmostProcessProvider: FrontmostProcessProviding,
-        activationMonitorFactory: @escaping @MainActor () -> CurrentFocusActivationMonitoring
+        activationMonitorFactory: @escaping @MainActor () -> CurrentFocusActivationMonitoring,
+        inputMonitorFactory: @escaping @MainActor () -> CurrentFocusInputMonitoring = {
+            NoopCurrentFocusInputMonitor()
+        }
     ) {
         self.eventPoster = eventPoster
         self.secureInputStateProvider = secureInputStateProvider
         self.frontmostProcessProvider = frontmostProcessProvider
         self.activationMonitorFactory = activationMonitorFactory
+        self.inputMonitorFactory = inputMonitorFactory
     }
 
     func validateCapturedDestinationSecurity() -> CurrentFocusBoundDestinationValidation {
@@ -491,7 +477,8 @@ final class SystemCurrentFocusProvisionalOutputSessionFactory: CurrentFocusProvi
             eventPoster: eventPoster,
             secureInputStateProvider: secureInputStateProvider,
             frontmostProcessProvider: frontmostProcessProvider,
-            activationMonitor: activationMonitorFactory()
+            activationMonitor: activationMonitorFactory(),
+            inputMonitor: inputMonitorFactory()
         )
     }
 
@@ -508,8 +495,50 @@ final class SystemCurrentFocusProvisionalOutputSessionFactory: CurrentFocusProvi
             secureInputStateProvider: secureInputStateProvider,
             frontmostProcessProvider: frontmostProcessProvider,
             activationMonitor: activationMonitorFactory(),
+            inputMonitor: inputMonitorFactory(),
             validateBoundDestination: validateBoundDestination
         )
+    }
+}
+
+@MainActor
+private final class NoopCurrentFocusInputMonitor: CurrentFocusInputMonitoring {
+    func startMonitoring(_: @escaping @MainActor () -> Void) {}
+    func stopMonitoring() {}
+}
+
+@MainActor
+final class WorkspaceCurrentFocusInputMonitor: CurrentFocusInputMonitoring {
+    private var monitor: Any?
+
+    func startMonitoring(_ handler: @escaping @MainActor () -> Void) {
+        guard monitor == nil else { return }
+        let mask: NSEvent.EventTypeMask = [
+            .keyDown,
+            .leftMouseDown,
+            .rightMouseDown,
+            .otherMouseDown,
+            .leftMouseDragged,
+            .rightMouseDragged,
+            .otherMouseDragged
+        ]
+        monitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { event in
+            let tag = event.cgEvent?.getIntegerValueField(.eventSourceUserData)
+            guard tag != FeishuSpeechSyntheticEventTag.value else { return }
+            Task { @MainActor in handler() }
+        }
+    }
+
+    func stopMonitoring() {
+        guard let monitor else { return }
+        NSEvent.removeMonitor(monitor)
+        self.monitor = nil
+    }
+
+    deinit {
+        if let monitor {
+            NSEvent.removeMonitor(monitor)
+        }
     }
 }
 
