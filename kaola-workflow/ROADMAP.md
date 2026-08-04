@@ -8,6 +8,7 @@ This file mirrors active unfinished work. GitHub issues are the source of truth 
 | Issue | Title | Status | Workflow Project | Next Step |
 |-------|-------|--------|------------------|-----------|
 | #26 | enhancement: implement cursor-bound streaming Feishu transcription | open | — | Run kaola-workflow-next for issue #26 |
+| #27 | bug: reconcile repeated and revised streaming snapshots as keyboard replacement | open | — | Owner UAT Release 1.0 build 7; record the result before closure |
 
 ## Rules
 
