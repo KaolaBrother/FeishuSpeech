@@ -1320,6 +1320,102 @@ final class StreamingMainViewModelTests: XCTestCase {
         await context.viewModel.resetService()
     }
 
+    func test_distinctLivePacketIndicesOfferOnlyChangedCompleteSnapshots() async {
+        let context = makeAppendContext(
+            autoInsert: true,
+            packetEvents: [
+                .partial("hello"),
+                .partial("hello"),
+                .partial("hello world"),
+                .partial("hello"),
+                .partial("yellow")
+            ],
+            finishEvent: .cancelled
+        )
+        let identity = StreamingSessionIdentity(generation: 4_027)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await context.provider.makeSessionCallCount == 1 }
+        context.recorder.emit(Data(repeating: 0xC1, count: 32_000))
+        await waitUntil { await context.transport.sendCallCount == 5 }
+
+        XCTAssertEqual(
+            context.appendSession.appliedTexts,
+            ["hello", "hello world", "hello", "yellow"],
+            "new packet ownership must not turn equal or changed complete snapshots into concatenated fragments"
+        )
+        XCTAssertEqual(context.appendSession.appliedSources, ["live", "live", "live", "live"])
+
+        await context.viewModel.resetService()
+    }
+
+    func test_retryReplaySuppressesHistoricalPacketsAndReconcilesFirstNewSnapshotOnce() async {
+        let first = RetryCoordinatorStreamingSession(
+            packetEvents: [.partial("stable"), .failed(.network)]
+        )
+        let replacement = RetryCoordinatorStreamingSession(
+            packetEvents: [
+                .partial("changed historical replay"),
+                .partial("stable"),
+                .partial("revised")
+            ]
+        )
+        let sleeper = ControlledCoordinatorRetrySleeper()
+        let context = makeAppendRetryContext(
+            sessions: [first, replacement],
+            sleeper: sleeper
+        )
+        let identity = StreamingSessionIdentity(generation: 4_028)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await context.provider.makeSessionCallCount == 1 }
+        context.recorder.emit(Data(repeating: 0xC2, count: 12_800))
+        await waitUntil { await sleeper.callCount == 1 }
+        context.recorder.emit(Data(repeating: 0xC3, count: 6_400))
+
+        await sleeper.releaseNext()
+        await waitUntil { await replacement.sendCallCount == 3 }
+
+        XCTAssertEqual(
+            context.appendSession.appliedTexts,
+            ["stable", "revised"],
+            "historical replay is packet-suppressed, duplicate recovery snapshots are text-suppressed, and the first changed new index advances once"
+        )
+        XCTAssertEqual(context.appendSession.appliedSources, ["live", "live"])
+
+        await context.viewModel.resetService()
+    }
+
+    func test_releaseSealsSnapshotAdmissionBeforeLatePartialAndFinalCallbacks() async {
+        let context = makeAppendContext(
+            autoInsert: true,
+            packetEvents: [.partial("visible before release")],
+            finishEvent: .final("terminal after release")
+        )
+        let identity = StreamingSessionIdentity(generation: 4_029)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await context.provider.makeSessionCallCount == 1 }
+        context.recorder.emit(Data(repeating: 0xC4, count: 6_400))
+        await waitUntil { await context.transport.sendCallCount == 1 }
+
+        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        context.viewModel.handleStreamingEventForTesting(
+            .partial("late partial replacement"),
+            identity: identity
+        )
+        context.viewModel.handleStreamingEventForTesting(
+            .final("late final replacement"),
+            identity: identity
+        )
+        await waitUntil { context.viewModel.status == .idle }
+
+        XCTAssertEqual(context.appendSession.appliedTexts, ["visible before release"])
+        XCTAssertEqual(context.appendSession.finalizeCallCount, 1)
+        XCTAssertEqual(context.output.syntheticInputCallCount, 0)
+        XCTAssertEqual(context.output.copiedTexts, [])
+    }
+
     func test_retryOwnsOnlyThePreviouslyFailedJournalIndexAndNeverReownsHistory() async {
         let first = RetryCoordinatorStreamingSession(
             packetEvents: [.partial("same"), .failed(.network)]

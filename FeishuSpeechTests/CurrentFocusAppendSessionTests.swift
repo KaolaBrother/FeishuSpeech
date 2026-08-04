@@ -34,6 +34,73 @@ final class CurrentFocusAppendSessionTests: XCTestCase {
         XCTAssertEqual(context.poster.callCount, 1)
     }
 
+    func test_snapshotReplacementUsesExactGraphemeBackspacesAndReplacementSuffix() {
+        let family = "👨‍👩‍👧‍👦"
+        let cases = [
+            SnapshotReplacementCase(
+                previous: "hello",
+                next: "hello world",
+                expectedDeleteCharacterCount: 0,
+                expectedInsertText: " world"
+            ),
+            SnapshotReplacementCase(
+                previous: "abcd",
+                next: "ab",
+                expectedDeleteCharacterCount: 2,
+                expectedInsertText: ""
+            ),
+            SnapshotReplacementCase(
+                previous: "hello cat",
+                next: "hello car",
+                expectedDeleteCharacterCount: 1,
+                expectedInsertText: "r"
+            ),
+            SnapshotReplacementCase(
+                previous: "one",
+                next: "two",
+                expectedDeleteCharacterCount: 3,
+                expectedInsertText: "two"
+            ),
+            SnapshotReplacementCase(
+                previous: family + "x",
+                next: family + "y",
+                expectedDeleteCharacterCount: 1,
+                expectedInsertText: "y"
+            )
+        ]
+
+        for testCase in cases {
+            let context = makeContext()
+            _ = context.session.applyOpaqueHypothesis(
+                testCase.previous,
+                generation: generation,
+                source: .livePacket
+            )
+            _ = context.session.applyOpaqueHypothesis(
+                testCase.next,
+                generation: generation,
+                source: .livePacket
+            )
+
+            XCTAssertEqual(
+                context.poster.replacementRequests,
+                [
+                    ReplacementRequest(
+                        deleteCharacterCount: 0,
+                        insertText: testCase.previous,
+                        processIdentifier: boundProcessIdentifier
+                    ),
+                    ReplacementRequest(
+                        deleteCharacterCount: testCase.expectedDeleteCharacterCount,
+                        insertText: testCase.expectedInsertText,
+                        processIdentifier: boundProcessIdentifier
+                    )
+                ],
+                "replacement must reconcile Swift Character boundaries for \(testCase.previous.debugDescription)"
+            )
+        }
+    }
+
     func test_exactUTF16ExtensionsPostOnlyUnseenSuffixesAcrossEmojiZWJCJKAndRTL() {
         let context = makeContext()
         let first = "A"
@@ -641,11 +708,25 @@ private struct TestContext {
     let activationMonitor: FakeActivationMonitor
 }
 
+private struct SnapshotReplacementCase {
+    let previous: String
+    let next: String
+    let expectedDeleteCharacterCount: Int
+    let expectedInsertText: String
+}
+
+private struct ReplacementRequest: Equatable {
+    let deleteCharacterCount: Int
+    let insertText: String
+    let processIdentifier: pid_t
+}
+
 @MainActor
 private final class FakeUnicodeEventPoster: FinalTextCurrentFocusEventPosting {
     private var results: [FinalTextCurrentFocusPostResult]
     private(set) var requestedTexts: [String] = []
     private(set) var destinationProcessIdentifiers: [pid_t] = []
+    private(set) var replacementRequests: [ReplacementRequest] = []
 
     var callCount: Int { requestedTexts.count }
 
@@ -659,6 +740,31 @@ private final class FakeUnicodeEventPoster: FinalTextCurrentFocusEventPosting {
     ) -> FinalTextCurrentFocusPostResult {
         requestedTexts.append(text)
         destinationProcessIdentifiers.append(processIdentifier)
+        replacementRequests.append(
+            ReplacementRequest(
+                deleteCharacterCount: 0,
+                insertText: text,
+                processIdentifier: processIdentifier
+            )
+        )
+        guard !results.isEmpty else { return .posted }
+        return results.removeFirst()
+    }
+
+    func postReplacement(
+        deleteCharacterCount: Int,
+        insertText: String,
+        to processIdentifier: pid_t
+    ) -> FinalTextCurrentFocusPostResult {
+        requestedTexts.append(insertText)
+        destinationProcessIdentifiers.append(processIdentifier)
+        replacementRequests.append(
+            ReplacementRequest(
+                deleteCharacterCount: deleteCharacterCount,
+                insertText: insertText,
+                processIdentifier: processIdentifier
+            )
+        )
         guard !results.isEmpty else { return .posted }
         return results.removeFirst()
     }
