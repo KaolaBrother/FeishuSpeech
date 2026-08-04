@@ -116,13 +116,53 @@ protocol CurrentFocusActivationMonitoring: AnyObject {
 
 @MainActor
 protocol CurrentFocusInputMonitoring: AnyObject {
+    var interferenceEpoch: UInt64 { get }
     func startMonitoring(_ handler: @escaping @MainActor () -> Void)
     func armMonitoringFailClosed(_ handler: @escaping @MainActor () -> Void) -> Bool
     func stopMonitoring()
 }
 
 extension CurrentFocusInputMonitoring {
+    var interferenceEpoch: UInt64 { 0 }
     func armMonitoringFailClosed(_: @escaping @MainActor () -> Void) -> Bool { true }
+}
+
+nonisolated final class CurrentFocusInputInterferenceEpoch: @unchecked Sendable {
+    static let shared = CurrentFocusInputInterferenceEpoch()
+    private static let functionKeyCode: CGKeyCode = 63
+
+    private let lock = NSLock()
+    private var rawValue: UInt64 = 0
+
+    var value: UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return rawValue
+    }
+
+    func observePreDispatch(type: CGEventType, event: CGEvent) {
+        guard event.getIntegerValueField(.eventSourceUserData) != FeishuSpeechSyntheticEventTag.value,
+              Self.isInterferingPhysicalInput(type: type, event: event) else {
+            return
+        }
+        lock.lock()
+        rawValue &+= 1
+        lock.unlock()
+    }
+
+    private static func isInterferingPhysicalInput(type: CGEventType, event: CGEvent) -> Bool {
+        switch type {
+        case .keyDown,
+             .leftMouseDown, .rightMouseDown, .otherMouseDown,
+             .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
+            return true
+        case .flagsChanged:
+            let virtualKey = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
+            return virtualKey != functionKeyCode
+        default:
+            return false
+        }
+    }
 }
 
 @MainActor
@@ -146,6 +186,7 @@ final class CurrentFocusAppendSession: CurrentFocusProvisionalOutputSession {
     private var suspension: Suspension?
     private var isClosed = false
     private var isMonitoring = false
+    private var armedInputInterferenceEpoch: UInt64?
 
     init(
         generation: UInt64,
@@ -176,7 +217,9 @@ final class CurrentFocusAppendSession: CurrentFocusProvisionalOutputSession {
                 self?.suspend(.deliveryUncertain)
             }
             inputMonitor.startMonitoring(suspendForInput)
-            if !inputMonitor.armMonitoringFailClosed(suspendForInput) {
+            if inputMonitor.armMonitoringFailClosed(suspendForInput) {
+                armedInputInterferenceEpoch = inputMonitor.interferenceEpoch
+            } else {
                 suspend(.deliveryUncertain)
             }
         }
@@ -204,11 +247,18 @@ final class CurrentFocusAppendSession: CurrentFocusProvisionalOutputSession {
         guard sampleDestinationAndSecurity() else {
             return applyOutcome(for: suspension ?? .deliveryUncertain)
         }
+        guard inputInterferenceEpochIsUnchanged() else {
+            suspend(.deliveryUncertain)
+            return .deliveryUncertain
+        }
 
         switch eventPoster.postReplacement(
             deleteCharacterCount: deleteCharacterCount,
             insertText: insertText,
-            to: boundProcessIdentifier
+            to: boundProcessIdentifier,
+            whileInterferenceEpochIsUnchanged: { [weak self] in
+                self?.inputInterferenceEpochIsUnchanged() ?? false
+            }
         ) {
         case .posted:
             break
@@ -298,6 +348,11 @@ final class CurrentFocusAppendSession: CurrentFocusProvisionalOutputSession {
             }
         }
         return true
+    }
+
+    private func inputInterferenceEpochIsUnchanged() -> Bool {
+        guard let inputMonitor, let armedInputInterferenceEpoch else { return true }
+        return inputMonitor.interferenceEpoch == armedInputInterferenceEpoch
     }
 
     private func usableFinalValue(_ value: String?) -> String? {
@@ -536,6 +591,7 @@ final class SystemCurrentFocusProvisionalOutputSessionFactory: CurrentFocusProvi
 
 @MainActor
 private final class NoopCurrentFocusInputMonitor: CurrentFocusInputMonitoring {
+    var interferenceEpoch: UInt64 { 0 }
     func startMonitoring(_: @escaping @MainActor () -> Void) {}
     func armMonitoringFailClosed(_: @escaping @MainActor () -> Void) -> Bool { true }
     func stopMonitoring() {}
@@ -546,6 +602,10 @@ final class WorkspaceCurrentFocusInputMonitor: CurrentFocusInputMonitoring {
     private var localMonitor: Any?
     private var globalMonitor: Any?
     private var pendingStartResult: Bool?
+
+    var interferenceEpoch: UInt64 {
+        CurrentFocusInputInterferenceEpoch.shared.value
+    }
 
     func startMonitoring(_ handler: @escaping @MainActor () -> Void) {
         pendingStartResult = installMonitoring(handler)

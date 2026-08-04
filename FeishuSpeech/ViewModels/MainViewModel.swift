@@ -1003,13 +1003,17 @@ class MainViewModel: ObservableObject {
             return false
         }
 
-        if let rejection = classifySnapshot(text) {
+        if let rejection = classifySnapshotForAllRoutes(text) {
             logReservedIneligibleResponse(context, eligibility: rejection)
             return false
         }
         guard prepareContinuousOutputIfNeeded(identity: identity) else { return true }
         guard cursorSession != nil || currentFocusAppendSession != nil else {
             logIneligibleResponse(context, eligibility: "noContinuousOwner")
+            return false
+        }
+        if let rejection = classifySnapshotForActiveRoute(text) {
+            logReservedIneligibleResponse(context, eligibility: rejection)
             return false
         }
 
@@ -1167,7 +1171,17 @@ class MainViewModel: ObservableObject {
         return .eligible(packetIndex: packetIndex)
     }
 
-    private func classifySnapshot(_ text: String) -> String? {
+    private func classifySnapshotForActiveRoute(_ text: String) -> String? {
+        let isSafe = if cursorSession != nil {
+            TextInputSimulator.isSafeForAutomaticKeyboardText(text)
+        } else {
+            TextInputSimulator.isSafeForAutomaticKeyboardEventText(text)
+        }
+        guard isSafe else { return "unsafeText" }
+        return nil
+    }
+
+    private func classifySnapshotForAllRoutes(_ text: String) -> String? {
         guard !isContentless(text) else { return "contentless" }
         guard TextInputSimulator.isSafeForAutomaticKeyboardText(text) else { return "unsafeText" }
         return nil

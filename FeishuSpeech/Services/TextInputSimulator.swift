@@ -135,6 +135,12 @@ protocol FinalTextCurrentFocusEventPosting: AnyObject {
         insertText: String,
         to processIdentifier: pid_t
     ) -> FinalTextCurrentFocusPostResult
+    func postReplacement(
+        deleteCharacterCount: Int,
+        insertText: String,
+        to processIdentifier: pid_t,
+        whileInterferenceEpochIsUnchanged: () -> Bool
+    ) -> FinalTextCurrentFocusPostResult
 }
 
 extension FinalTextCurrentFocusEventPosting {
@@ -145,6 +151,20 @@ extension FinalTextCurrentFocusEventPosting {
     ) -> FinalTextCurrentFocusPostResult {
         guard deleteCharacterCount == 0 else { return .deliveryFailed }
         return postUnicodeText(insertText, to: processIdentifier)
+    }
+
+    func postReplacement(
+        deleteCharacterCount: Int,
+        insertText: String,
+        to processIdentifier: pid_t,
+        whileInterferenceEpochIsUnchanged: () -> Bool
+    ) -> FinalTextCurrentFocusPostResult {
+        guard whileInterferenceEpochIsUnchanged() else { return .deliveryFailed }
+        return postReplacement(
+            deleteCharacterCount: deleteCharacterCount,
+            insertText: insertText,
+            to: processIdentifier
+        )
     }
 }
 
@@ -283,18 +303,32 @@ final class SystemFinalTextCurrentFocusEventPoster: FinalTextCurrentFocusEventPo
         insertText: String,
         to processIdentifier: pid_t
     ) -> FinalTextCurrentFocusPostResult {
+        postReplacement(
+            deleteCharacterCount: deleteCharacterCount,
+            insertText: insertText,
+            to: processIdentifier,
+            whileInterferenceEpochIsUnchanged: { true }
+        )
+    }
+
+    func postReplacement(
+        deleteCharacterCount: Int,
+        insertText: String,
+        to processIdentifier: pid_t,
+        whileInterferenceEpochIsUnchanged: () -> Bool
+    ) -> FinalTextCurrentFocusPostResult {
         guard processIdentifier > 0,
               deleteCharacterCount >= 0,
               deleteCharacterCount > 0 || !insertText.isEmpty,
-              TextInputSimulator.isSafeForAutomaticKeyboardText(insertText) else {
+              TextInputSimulator.isSafeForAutomaticKeyboardEventText(insertText) else {
             return .deliveryFailed
         }
         guard let source = backend.makeEventSource(stateID: .privateState) else {
             return .deliveryFailed
         }
 
-        var events: [any FinalTextUnicodeEventHandle] = []
-        events.reserveCapacity((deleteCharacterCount * 2) + (insertText.isEmpty ? 0 : 2))
+        var backspacePairs: [[any FinalTextUnicodeEventHandle]] = []
+        backspacePairs.reserveCapacity(deleteCharacterCount)
         for _ in 0 ..< deleteCharacterCount {
             guard let keyDown = backend.makeKeyboardEvent(
                 source: source,
@@ -309,10 +343,10 @@ final class SystemFinalTextCurrentFocusEventPoster: FinalTextCurrentFocusEventPo
             ) else {
                 return .deliveryFailed
             }
-            events.append(keyDown)
-            events.append(keyUp)
+            backspacePairs.append([keyDown, keyUp])
         }
 
+        var insertionPair: [any FinalTextUnicodeEventHandle] = []
         if !insertText.isEmpty {
             let utf16 = Array(insertText.utf16)
             guard let keyDown = backend.makeUnicodeEvent(
@@ -328,15 +362,20 @@ final class SystemFinalTextCurrentFocusEventPoster: FinalTextCurrentFocusEventPo
             ) else {
                 return .deliveryFailed
             }
-            events.append(keyDown)
-            events.append(keyUp)
+            insertionPair = [keyDown, keyUp]
         }
 
+        let events = backspacePairs.flatMap { $0 } + insertionPair
         events.forEach { backend.setUserData(FeishuSpeechSyntheticEventTag.value, for: $0) }
         guard !secureInputStateProvider.isSecureInputEnabled() else {
             return .securityRejected
         }
-        events.forEach { backend.postUnicodeEvent($0, to: processIdentifier) }
+        for pair in backspacePairs {
+            guard whileInterferenceEpochIsUnchanged() else { return .deliveryFailed }
+            pair.forEach { backend.postUnicodeEvent($0, to: processIdentifier) }
+        }
+        guard whileInterferenceEpochIsUnchanged() else { return .deliveryFailed }
+        insertionPair.forEach { backend.postUnicodeEvent($0, to: processIdentifier) }
         return .posted
     }
 }
@@ -463,6 +502,10 @@ enum TextInputSimulator {
             if value == 0x0A { return false }
             return value < 0x20 || value == 0x7F || (0x80 ... 0x9F).contains(value)
         }
+    }
+
+    static func isSafeForAutomaticKeyboardEventText(_ text: String) -> Bool {
+        isSafeForAutomaticPaste(text)
     }
 
     static func insertText(_ text: String) {

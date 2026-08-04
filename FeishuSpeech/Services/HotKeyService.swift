@@ -70,6 +70,12 @@ class HotKeyService: ObservableObject {
         let eventMask = (1 << CGEventType.keyDown.rawValue) |
                         (1 << CGEventType.keyUp.rawValue) |
                         (1 << CGEventType.flagsChanged.rawValue) |
+                        (1 << CGEventType.leftMouseDown.rawValue) |
+                        (1 << CGEventType.rightMouseDown.rawValue) |
+                        (1 << CGEventType.otherMouseDown.rawValue) |
+                        (1 << CGEventType.leftMouseDragged.rawValue) |
+                        (1 << CGEventType.rightMouseDragged.rawValue) |
+                        (1 << CGEventType.otherMouseDragged.rawValue) |
                         (1 << CGEventType.tapDisabledByTimeout.rawValue) |
                         (1 << CGEventType.tapDisabledByUserInput.rawValue)
 
@@ -193,6 +199,7 @@ class HotKeyService: ObservableObject {
     
     private func handleEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         let rawType = type.rawValue
+        CurrentFocusInputInterferenceEpoch.shared.observePreDispatch(type: type, event: event)
         
         if rawType == CGEventType.tapDisabledByTimeout.rawValue {
             logger.warning("Event tap disabled by timeout, re-enabling")
