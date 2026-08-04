@@ -1420,6 +1420,187 @@ final class StreamingMainViewModelTests: XCTestCase {
         XCTAssertEqual(context.output.copiedTexts, [])
     }
 
+    func test_releaseDrainsInFlightPacketThenAppliesAuthoritativeFinalOnAXRoute() async {
+        let session = ReviewControllableStreamingSession(
+            packetOutcomes: [
+                .event(.partial("held snapshot")),
+                .event(.partial("tail snapshot"))
+            ],
+            holdSendCallNumber: 2,
+            finishOutcome: .event(.final("authoritative final"))
+        )
+        let provider = RetryCoordinatorStreamingProvider(
+            factoryErrors: [],
+            sessions: [session]
+        )
+        let context = makeReviewContext(
+            capability: .live,
+            provider: provider,
+            retrySleeper: { _ in }
+        )
+        let identity = StreamingSessionIdentity(generation: 4_030)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        context.recorder.emit(Data(repeating: 0xD0, count: 12_800))
+        await waitUntil {
+            await session.isHoldingSend &&
+                context.accessibility.setSelectedTextCalls == ["held snapshot"]
+        }
+
+        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        await session.releaseHeldIfNeeded()
+        await waitUntil { context.viewModel.status == .idle }
+
+        XCTAssertEqual(
+            context.accessibility.setSelectedTextCalls,
+            ["held snapshot", "tail snapshot", "authoritative final"],
+            "Fn-up closes capture, but its in-flight packet and action-2 final remain output-eligible"
+        )
+        let finishCallCount = await session.finishCallCount
+        XCTAssertEqual(finishCallCount, 1)
+
+        context.viewModel.handleStreamingEventForTesting(
+            .partial("stale after cleanup"),
+            identity: identity
+        )
+        context.viewModel.handleStreamingEventForTesting(
+            .final("old-generation final"),
+            identity: StreamingSessionIdentity(generation: identity.generation - 1)
+        )
+        XCTAssertEqual(
+            context.accessibility.setSelectedTextCalls,
+            ["held snapshot", "tail snapshot", "authoritative final"],
+            "true terminal cleanup must still suppress stale and old-generation callbacks"
+        )
+    }
+
+    func test_releaseFinalizesKeyboardReplacementWithAuthoritativeActionTwoTextExactlyOnce() async {
+        let context = makeAppendContext(
+            capability: .finalOnly,
+            autoInsert: true,
+            rebindCapability: nil,
+            packetEvents: [.partial("held snapshot")],
+            finishEvent: .final("authoritative final"),
+            appendFinalOutcomes: [.exactCommitted]
+        )
+        let identity = StreamingSessionIdentity(generation: 4_031)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await context.provider.makeSessionCallCount == 1 }
+        context.recorder.emit(Data(repeating: 0xD1, count: 6_400))
+        await waitUntil { context.appendSession.appliedTexts == ["held snapshot"] }
+
+        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        await waitUntil { context.viewModel.status == .idle }
+
+        XCTAssertEqual(context.appendSession.appliedTexts, ["held snapshot"])
+        XCTAssertEqual(context.appendSession.finalizeCallCount, 1)
+        XCTAssertEqual(
+            context.appendSession.finalTexts,
+            ["authoritative final"],
+            "action 2 must replace the owned held snapshot instead of being discarded"
+        )
+        XCTAssertEqual(context.appendSession.lastAcceptedTexts, ["held snapshot"])
+    }
+
+    func test_releaseDuringRecoverableBackoffReplaysCapturedPacketAndFinishesSuccessor() async {
+        let failed = RetryCoordinatorStreamingSession(
+            packetEvents: [.failed(.backend(code: 10024))]
+        )
+        let successor = RetryCoordinatorStreamingSession(
+            packetEvents: [.partial("recovered snapshot")],
+            finishEvent: .final("recovered final")
+        )
+        let sleeper = ControlledCoordinatorRetrySleeper()
+        let context = makeRetryContext(
+            capability: .live,
+            sessions: [failed, successor],
+            sleeper: sleeper
+        )
+        let identity = StreamingSessionIdentity(generation: 4_032)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        context.recorder.emit(Data(repeating: 0xD2, count: 6_400))
+        await waitUntil { await sleeper.callCount == 1 }
+
+        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        await sleeper.releaseNext()
+        await waitUntil { await context.provider.makeSessionCallCount == 2 }
+        let providerCallCount = await context.provider.makeSessionCallCount
+        XCTAssertEqual(
+            providerCallCount,
+            2,
+            "release during a recoverable retry must retain authority to recognize captured audio"
+        )
+        guard providerCallCount == 2 else { return }
+
+        await waitUntil { await successor.finishCallCount == 1 }
+        XCTAssertEqual(
+            context.accessibility.setSelectedTextCalls,
+            ["recovered snapshot", "recovered final"]
+        )
+        let successorSendCallCount = await successor.sendCallCount
+        XCTAssertEqual(successorSendCallCount, 1, "the captured journal packet must be replayed")
+        XCTAssertEqual(context.viewModel.status, .idle)
+    }
+
+    func test_successfulPacketAfterRepeatedBackend10024ResetsRetryBackoffStreak() async {
+        let firstFailure = RetryCoordinatorStreamingSession(
+            packetEvents: [.failed(.backend(code: 10024))]
+        )
+        let secondFailure = RetryCoordinatorStreamingSession(
+            packetEvents: [.failed(.backend(code: 10024))]
+        )
+        let recoveredThenFailed = RetryCoordinatorStreamingSession(
+            packetEvents: [
+                .partial("recovered snapshot"),
+                .failed(.backend(code: 10024))
+            ]
+        )
+        let resumed = RetryCoordinatorStreamingSession(
+            packetEvents: [
+                .partial("historical replay"),
+                .partial("resumed snapshot")
+            ]
+        )
+        let sleeper = ControlledCoordinatorRetrySleeper()
+        let context = makeRetryContext(
+            capability: .live,
+            sessions: [firstFailure, secondFailure, recoveredThenFailed, resumed],
+            sleeper: sleeper
+        )
+        let identity = StreamingSessionIdentity(generation: 4_033)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        context.recorder.emit(Data(repeating: 0xD3, count: 6_400))
+        await waitUntil { await sleeper.callCount == 1 }
+        await sleeper.releaseNext()
+        await waitUntil { await sleeper.callCount == 2 }
+        await sleeper.releaseNext()
+        await waitUntil {
+            await recoveredThenFailed.sendCallCount == 1 &&
+                context.accessibility.setSelectedTextCalls == ["recovered snapshot"]
+        }
+
+        context.recorder.emit(Data(repeating: 0xD4, count: 6_400))
+        await waitUntil { await sleeper.callCount == 3 }
+        let retryDelays = await sleeper.delays
+        XCTAssertEqual(
+            retryDelays,
+            [250_000_000, 500_000_000, 250_000_000],
+            "a successful packet ACK must reset the retry/backoff streak"
+        )
+
+        await sleeper.releaseNext()
+        await waitUntil { await resumed.sendCallCount == 2 }
+        XCTAssertEqual(
+            context.accessibility.setSelectedTextCalls,
+            ["recovered snapshot", "resumed snapshot"],
+            "recovery must resume output after repeated backend 10024 responses"
+        )
+        await context.viewModel.resetService()
+    }
+
     func test_retryOwnsOnlyThePreviouslyFailedJournalIndexAndNeverReownsHistory() async {
         let first = RetryCoordinatorStreamingSession(
             packetEvents: [.partial("same"), .failed(.network)]
