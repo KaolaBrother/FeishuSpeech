@@ -965,6 +965,89 @@ final class CurrentFocusAppendSessionTests: XCTestCase {
         XCTAssertEqual(context.activationMonitor.stopCallCount, 1)
     }
 
+    func test_authoritativeFinalReconcilesExactGraphemeTailBeforeClosingSafetyMonitors() {
+        let context = makeContext(inputMonitorInitialEpoch: 73)
+        let heldSnapshot = "hello 👨‍👩‍👧‍👦 cat"
+        let authoritativeFinal = "hello 👨‍👩‍👧‍👦 car"
+
+        XCTAssertEqual(
+            context.session.applyOpaqueHypothesis(
+                heldSnapshot,
+                generation: generation,
+                source: .livePacket
+            ),
+            .insertedFirst
+        )
+        context.poster.resetTransactionTracking()
+        var safetyWasArmedDuringFinalReplacement = false
+        context.poster.afterEpochValidationBeforeFirstSyntheticPost = {
+            safetyWasArmedDuringFinalReplacement =
+                context.inputMonitor.isCompletelyArmed &&
+                context.activationMonitor.stopCallCount == 0
+        }
+
+        let outcome = context.session.finalize(
+            finalText: authoritativeFinal,
+            lastAcceptedText: heldSnapshot,
+            generation: generation
+        )
+
+        XCTAssertEqual(outcome, .exactCommitted)
+        XCTAssertTrue(
+            safetyWasArmedDuringFinalReplacement,
+            "fixed-PID activation and physical-interference monitoring must remain armed while final replacement posts"
+        )
+        XCTAssertEqual(
+            context.poster.replacementRequests,
+            [
+                ReplacementRequest(
+                    deleteCharacterCount: 1,
+                    insertText: "r",
+                    processIdentifier: boundProcessIdentifier
+                )
+            ],
+            "the authoritative final must reuse Swift-Character prefix reconciliation"
+        )
+        XCTAssertEqual(context.poster.destructiveBackspaceCount, 1)
+        XCTAssertEqual(context.poster.insertionPairCount, 1)
+        XCTAssertEqual(context.poster.atomicGuardedReplacementCallCount, 1)
+        XCTAssertEqual(context.activationMonitor.stopCallCount, 1)
+        XCTAssertEqual(context.inputMonitor.stopCallCount, 1)
+        XCTAssertFalse(context.inputMonitor.isCompletelyArmed)
+    }
+
+    func test_equalAuthoritativeFinalClosesArmedOwnerWithoutDuplicateKeyboardEvents() {
+        let context = makeContext(inputMonitorInitialEpoch: 79)
+        let snapshot = "already exact 👩🏽‍💻"
+
+        XCTAssertEqual(
+            context.session.applyOpaqueHypothesis(
+                snapshot,
+                generation: generation,
+                source: .livePacket
+            ),
+            .insertedFirst
+        )
+        context.poster.resetTransactionTracking()
+        XCTAssertTrue(context.inputMonitor.isCompletelyArmed)
+        XCTAssertEqual(context.activationMonitor.stopCallCount, 0)
+
+        let outcome = context.session.finalize(
+            finalText: snapshot,
+            lastAcceptedText: snapshot,
+            generation: generation
+        )
+
+        XCTAssertEqual(outcome, .exactCommitted)
+        XCTAssertEqual(context.poster.replacementRequests, [])
+        XCTAssertEqual(context.poster.atomicGuardedReplacementCallCount, 0)
+        XCTAssertEqual(context.poster.destructiveBackspaceCount, 0)
+        XCTAssertEqual(context.poster.insertionPairCount, 0)
+        XCTAssertEqual(context.activationMonitor.stopCallCount, 1)
+        XCTAssertEqual(context.inputMonitor.stopCallCount, 1)
+        XCTAssertFalse(context.inputMonitor.isCompletelyArmed)
+    }
+
     func test_finalizeNeverPostsAReleaseTimeExtension() {
         let context = makeContext()
         _ = context.session.applyOpaqueHypothesis("base", generation: generation, source: .livePacket)

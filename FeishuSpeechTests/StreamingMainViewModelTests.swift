@@ -1601,6 +1601,117 @@ final class StreamingMainViewModelTests: XCTestCase {
         await context.viewModel.resetService()
     }
 
+    func test_hangingFactoryTimesOutAsRecoverableAndSuccessorLeavesSilentActiveState() async {
+        let successor = RetryCoordinatorStreamingSession(
+            packetEvents: [.partial("successor output")]
+        )
+        let provider = ReviewTimeoutThenSuccessProvider(successor: successor)
+        let recorder = CoordinatorAudioRecorder()
+        let accessibility = CoordinatorAccessibilityClient(capability: .live)
+        let output = CoordinatorFinalTextOutput()
+        let overlayPresenter = CoordinatorOverlayPresenter()
+        let viewModel = MainViewModel(
+            audioRecorder: recorder,
+            settings: AppSettings(
+                appId: "configured-app",
+                appSecret: "configured-secret",
+                autoInsert: true,
+                playSound: false
+            ),
+            hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
+            streamingProvider: provider,
+            accessibilityClient: accessibility,
+            finalTextOutput: output,
+            overlayPresenter: overlayPresenter,
+            streamingDrainPolicy: StreamingDrainPolicy(
+                operationTimeoutNanoseconds: 1_000_000,
+                postReleaseDrainTimeoutNanoseconds: 50_000_000
+            ),
+            streamingRetryDelay: { _ in 0 },
+            streamingRetrySleeper: { _ in }
+        )
+        recorder.resetTracking()
+        let identity = StreamingSessionIdentity(generation: 4_034)
+
+        viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await provider.makeSessionCallCount == 2 }
+
+        let cancellationCount = await provider.firstFactoryCancellationCount
+        XCTAssertEqual(cancellationCount, 1, "the timed-out factory attempt must be cancelled once")
+        XCTAssertEqual(viewModel.activeSessionIdentityForTesting, identity)
+        XCTAssertEqual(viewModel.status, .streaming)
+        XCTAssertEqual(recorder.forceCleanupCallCount, 0)
+
+        recorder.emit(Data(repeating: 0xD5, count: 6_400))
+        await waitUntil { await successor.sendCallCount == 1 }
+        XCTAssertEqual(accessibility.setSelectedTextCalls, ["successor output"])
+        await viewModel.resetService()
+    }
+
+    func test_postReleaseDrainExpiryPreservesOutputAndSuppressesLatePacketCompletion() async {
+        let session = ReviewNonCooperativeLatePacketSession(
+            firstEvent: .partial("preserved output"),
+            lateEvent: .partial("late replacement")
+        )
+        let provider = RetryCoordinatorStreamingProvider(
+            factoryErrors: [],
+            sessions: [session]
+        )
+        let recorder = CoordinatorAudioRecorder()
+        let accessibility = CoordinatorAccessibilityClient(capability: .live)
+        let output = CoordinatorFinalTextOutput()
+        let overlayPresenter = CoordinatorOverlayPresenter()
+        let viewModel = MainViewModel(
+            audioRecorder: recorder,
+            settings: AppSettings(
+                appId: "configured-app",
+                appSecret: "configured-secret",
+                autoInsert: true,
+                playSound: false
+            ),
+            hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
+            streamingProvider: provider,
+            accessibilityClient: accessibility,
+            finalTextOutput: output,
+            overlayPresenter: overlayPresenter,
+            streamingDrainPolicy: StreamingDrainPolicy(
+                operationTimeoutNanoseconds: 100_000_000,
+                postReleaseDrainTimeoutNanoseconds: 2_000_000
+            ),
+            streamingRetryDelay: { _ in 0 },
+            streamingRetrySleeper: { _ in }
+        )
+        recorder.resetTracking()
+        let identity = StreamingSessionIdentity(generation: 4_035)
+
+        viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        recorder.emit(Data(repeating: 0xD6, count: 12_800))
+        await waitUntil {
+            await session.isHoldingLatePacket &&
+                accessibility.setSelectedTextCalls == ["preserved output"]
+        }
+
+        viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        await waitUntil { viewModel.activeSessionIdentityForTesting == nil }
+
+        XCTAssertEqual(accessibility.setSelectedTextCalls, ["preserved output"])
+        XCTAssertEqual(accessibility.rangeText, "preserved output")
+        XCTAssertEqual(
+            overlayPresenter.completionFeedbacks,
+            [.emptyFinalPreservedPartial],
+            "drain expiry with committed text must be observable and must not report ordinary success"
+        )
+
+        await session.releaseLatePacketIfNeeded()
+        await settle(iterations: 50)
+        XCTAssertEqual(
+            accessibility.setSelectedTextCalls,
+            ["preserved output"],
+            "a noncooperative completion after drain cleanup must be generation-suppressed"
+        )
+        XCTAssertNil(viewModel.activeSessionIdentityForTesting)
+    }
+
     func test_retryOwnsOnlyThePreviouslyFailedJournalIndexAndNeverReownsHistory() async {
         let first = RetryCoordinatorStreamingSession(
             packetEvents: [.partial("same"), .failed(.network)]
@@ -3964,6 +4075,94 @@ private actor ReviewFactoryPlanProvider: SpeechStreamingSessionProviding {
             throw errors.removeFirst()
         }
         return successor
+    }
+}
+
+private actor ReviewTimeoutThenSuccessProvider: SpeechStreamingSessionProviding {
+    private let successor: any SpeechStreamingSession
+    private var firstContinuation: CheckedContinuation<any SpeechStreamingSession, Error>?
+    private var firstFactoryWasCancelled = false
+    private(set) var makeSessionCallCount = 0
+    private(set) var firstFactoryCancellationCount = 0
+
+    init(successor: any SpeechStreamingSession) {
+        self.successor = successor
+    }
+
+    func makeStreamingSession(
+        appId: String,
+        appSecret: String
+    ) async throws -> any SpeechStreamingSession {
+        _ = appId
+        _ = appSecret
+        makeSessionCallCount += 1
+        guard makeSessionCallCount == 1 else { return successor }
+
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<any SpeechStreamingSession, Error>) in
+                if firstFactoryWasCancelled {
+                    continuation.resume(throwing: CancellationError())
+                } else {
+                    firstContinuation = continuation
+                }
+            }
+        } onCancel: {
+            Task {
+                await self.cancelFirstFactoryIfNeeded()
+            }
+        }
+    }
+
+    private func cancelFirstFactoryIfNeeded() {
+        guard !firstFactoryWasCancelled else { return }
+        firstFactoryWasCancelled = true
+        firstFactoryCancellationCount += 1
+        firstContinuation?.resume(throwing: CancellationError())
+        firstContinuation = nil
+    }
+}
+
+private actor ReviewNonCooperativeLatePacketSession: SpeechStreamingSession {
+    private let firstEvent: StreamingRecognitionEvent
+    private let lateEvent: StreamingRecognitionEvent
+    private var lateContinuation: CheckedContinuation<StreamingRecognitionEvent, Error>?
+    private(set) var sendCallCount = 0
+    private(set) var finishCallCount = 0
+    private(set) var cancelCallCount = 0
+
+    var isHoldingLatePacket: Bool {
+        lateContinuation != nil
+    }
+
+    init(
+        firstEvent: StreamingRecognitionEvent,
+        lateEvent: StreamingRecognitionEvent
+    ) {
+        self.firstEvent = firstEvent
+        self.lateEvent = lateEvent
+    }
+
+    func sendAudioPacket(_ pcm16: Data) async throws -> StreamingRecognitionEvent {
+        _ = pcm16
+        sendCallCount += 1
+        guard sendCallCount > 1 else { return firstEvent }
+        return try await withCheckedThrowingContinuation { continuation in
+            lateContinuation = continuation
+        }
+    }
+
+    func finish() async throws -> StreamingRecognitionEvent {
+        finishCallCount += 1
+        return .cancelled
+    }
+
+    func cancel() async {
+        cancelCallCount += 1
+    }
+
+    func releaseLatePacketIfNeeded() {
+        lateContinuation?.resume(returning: lateEvent)
+        lateContinuation = nil
     }
 }
 
