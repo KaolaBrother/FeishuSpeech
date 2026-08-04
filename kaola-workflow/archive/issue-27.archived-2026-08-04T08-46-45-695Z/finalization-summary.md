@@ -69,3 +69,10 @@ None swept. All diagnostic and review findings were reproduced, fixed, and close
 - Developer ID signing and notarization are outside this local Release.
 
 ## Status: ARCHIVED AFTER FINAL GIT GATE
+
+## Post-UAT Closure — 2026-08-04
+
+- The owner tested Release 1.0 build 8 with real credentials and reported that the behavior is now working as designed.
+- Longer-term robustness observation may continue during ordinary use, but the owner reported no remaining closure blocker and explicitly accepted ending the issue.
+- GitHub issue #27 was closed, its active roadmap source was removed, and the generated roadmap was refreshed.
+- The installed `/Applications/FeishuSpeech.app` remains the accepted build-8 test release; this closure step did not rebuild, replace, or launch it.
