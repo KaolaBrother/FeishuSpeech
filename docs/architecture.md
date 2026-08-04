@@ -449,7 +449,10 @@ recording overlay.
 Issue #26's 272/272 lifecycle-free evidence predates the issue #27 correction and must not be used
 as proof of snapshot reconciliation. Issue #27 requires focused and full-suite evidence for
 duplicate, extension, shorter, revision, replay, Unicode grapheme, ordered transaction, suspension,
-and release-sealing cases. Automated evidence still cannot prove target-control acceptance.
+and release-sealing cases. The final issue #27 candidate at Release 1.0 build 7 passes 300/300 full
+tests, strict SwiftLint, and Debug and Release builds. Production is `ec4ddd6`, final
+production-gate tests run through `cd1132c`, and the behavior/security documentation provenance is
+`6e5d262`. Automated evidence still cannot prove target-control acceptance.
 
 Credential-bearing Feishu behavior and cross-application Accessibility compatibility remain live
 UAT. Installed build 5 recorded 66 HTTP-200 transactions over 13.55 seconds while visible output

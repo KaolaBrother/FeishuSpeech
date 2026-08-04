@@ -374,7 +374,9 @@ evidence, including baseline capture, continuous lock hold across each complete 
 advance through the same gate, tap-disable loss-of-observability, and fail-closed monitor arming.
 Production is `ec4ddd6`; `cd1132c` directly exercises `SystemFinalTextCurrentFocusEventPoster`
 through the real `CurrentFocusInputInterferenceEpoch` gate and is the final production-gate test
-provenance.
+provenance. The Release 1.0 build 7 candidate passes the complete 300/300 test bundle, strict
+SwiftLint, and Debug and Release builds; behavior/security documentation through `6e5d262`
+describes that validated contract.
 
 `AudioRecorderRecoveryTests.swift` remains excluded from the test target because it is a recorded
 pre-existing AudioRecorder-owned blocker outside the #11/#12/#21 API recovery bundle.

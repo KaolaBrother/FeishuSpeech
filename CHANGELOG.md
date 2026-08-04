@@ -69,7 +69,12 @@
 - Token 缓存时间从 7000s 降至 6000s，增加安全余量
 - 移除测试中引用已删除 `.armed` 状态的用例
 
+### Verification
+
+- issue #27 的最终候选 Release 1.0 build 7 已通过 300/300 完整测试、strict SwiftLint、Debug 与 Release 构建；生产实现为 `ec4ddd6`，最终 production-gate 测试到 `cd1132c`，行为/安全文档到 `6e5d262`。这些本地门槛不证明目标控件实际接受 PID-targeted 事件。
+
 ### Verification pending
+
 - 最新 build-5 安装版 UAT 已证明一次 13.55 秒 hold 内有 66 个 HTTP-200 transaction，但可见输出在一个词后停滞；这将故障收窄到传输之后，不能证明响应内容形态或目标接受。新的 journal-index ledger、重放一次所有权、release 禁止输出与隐私安全 receipt 仍需安装版 Release owner UAT，不声明真实端到端成功。
 - `CGEventPostToPid` 没有目标控件接受确认；本地 `.posted` 仅证明完整 PID-bound replacement transaction 已提交，不能证明目标完成了可见替换。当前修正仍须安装版 owner UAT，若无可见输出应报告 PARTIAL，不能通过全局 HID、重复事件、回滚或不确定后的剪贴板回退扩展行为。
 - 真实飞书凭据下的后续 action、终止请求空音频编码、首次 token 刷新同序列重试、PCM/tail 兼容性和慢网行为仍需安装版 Release UAT。issue #26 的本地拼接策略已由 build 6 证据否定；issue #27 将响应按可相同、变长、缩短或修订的完整不透明 snapshot 替换，仍不推断稳定词或做文本归一化。

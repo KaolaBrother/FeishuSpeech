@@ -3,9 +3,10 @@
 Status: issue #27 snapshot replacement and the final atomic HID interference gate are implemented
 locally in production `ec4ddd6`; `8ebf31e`/`81dbfc8` provide earlier atomic race/seam evidence,
 and `cd1132c` directly exercises `SystemFinalTextCurrentFocusEventPoster` through the real
-`CurrentFocusInputInterferenceEpoch` gate. Final workflow gates and installed Release
-credential-bearing/cross-application UAT remain pending. Earlier `47d90ed`/`d138624` checks are
-intermediate, pre-atomic provenance only.
+`CurrentFocusInputInterferenceEpoch` gate. Release 1.0 build 7 passes the final 300/300 test suite,
+strict SwiftLint, and Debug and Release builds; installed Release credential-bearing and
+cross-application UAT remains pending. Earlier `47d90ed`/`d138624` checks are intermediate,
+pre-atomic provenance only.
 
 ## 1. Outcome
 
@@ -722,8 +723,9 @@ release-only sealing. Earlier atomic race coverage `8ebf31e` and unified seam co
 support the current LF/action-control and HID interference contract; production `ec4ddd6` and
 `cd1132c`'s direct exercise of `SystemFinalTextCurrentFocusEventPoster` through the real
 `CurrentFocusInputInterferenceEpoch` gate establish the final production-gate provenance.
-`47d90ed`/`d138624` are intermediate pre-atomic steps. Final workflow gates and installed Release
-verification remain pending.
+`47d90ed`/`d138624` are intermediate pre-atomic steps. Behavior/security documentation through
+`6e5d262` records that contract, and Release 1.0 build 7 passes 300/300 tests, strict SwiftLint,
+and Debug and Release builds. Installed Release verification remains pending.
 
 General-availability closure remains intentionally separate: the owner will self-test the installed
 Release with real Feishu credentials and the live target-application matrix above. Until the

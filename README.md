@@ -69,6 +69,8 @@ cp -R build/Build/Products/Release/FeishuSpeech.app /Applications/
 
 > build 6 的隐私安全诊断已确认重复来自把每个新 packet index 的完整 snapshot 错当成 delta 拼接，而非 replay、重连或 transport 失败。当前契约改为完整 snapshot 替换；`CGEventPostToPid` 仍没有目标接受确认，Release owner UAT 仍是必需门槛。
 
+Release 1.0 build 7 已通过 300/300 完整测试、strict SwiftLint 以及 Debug/Release 构建验证；这些自动化结果证明本地实现与构建门槛，不替代上述安装版可见输出 UAT。
+
 ## 常见问题
 
 ### 辅助功能权限无法授权
