@@ -924,7 +924,11 @@ class MainViewModel: ObservableObject {
             )
             guard isCurrentAttempt(identity, attemptIdentifier), !Task.isCancelled else { return false }
             if case .failed(let failure) = event {
-                guard isRecoverable(failure) else {
+                guard isRecoverable(
+                    failure,
+                    identity: identity,
+                    attemptIdentifier: attemptIdentifier
+                ) else {
                     await handleStreamingFailure(identity: identity, error: failure)
                     return false
                 }
@@ -937,7 +941,11 @@ class MainViewModel: ObservableObject {
             }
             return false
         } catch {
-            if isRecoverable(error) {
+            if isRecoverable(
+                error,
+                identity: identity,
+                attemptIdentifier: attemptIdentifier
+            ) {
                 await cancelCurrentAttemptOnce(session)
                 return await waitForRetryIfAdmitted(
                     identity: identity,
@@ -956,7 +964,11 @@ class MainViewModel: ObservableObject {
         attemptIdentifier: UInt64,
         error: Error
     ) async -> Bool {
-        guard isRecoverable(error) else {
+        guard isRecoverable(
+            error,
+            identity: identity,
+            attemptIdentifier: attemptIdentifier
+        ) else {
             await handleStreamingFailure(identity: identity, error: error)
             return false
         }
@@ -1120,7 +1132,15 @@ class MainViewModel: ObservableObject {
                 return value
             } catch {
                 if gate.claimSettlement() {
-                    continuation.yield(.failure(streamFailure(for: error)))
+                    continuation.yield(
+                        .failure(
+                            classifiedStreamFailure(
+                                streamFailure(for: error),
+                                identity: context.identity,
+                                attemptIdentifier: context.attemptIdentifier
+                            )
+                        )
+                    )
                     continuation.finish()
                 }
                 throw error
@@ -1153,7 +1173,25 @@ class MainViewModel: ObservableObject {
         }
         task.cancel()
         timeout.cancel()
-        return result ?? .failure(.cancelled)
+        return finalizeWatchedOperationResult(
+            result,
+            identity: context.identity,
+            attemptIdentifier: context.attemptIdentifier
+        )
+    }
+
+    private func finalizeWatchedOperationResult<AdmittedValue: Sendable>(
+        _ result: WatchedOperationResult<AdmittedValue>?,
+        identity: StreamingSessionIdentity,
+        attemptIdentifier: UInt64
+    ) -> WatchedOperationResult<AdmittedValue> {
+        if let result {
+            return result
+        }
+        if retryAdmissionOpen, isCurrentAttempt(identity, attemptIdentifier) {
+            return .failure(.timeout)
+        }
+        return .failure(.cancelled)
     }
 
     private func streamFailure(for error: Error) -> StreamFailure {
@@ -1161,6 +1199,9 @@ class MainViewModel: ObservableObject {
             return failure
         }
         if error is CancellationError {
+            return .cancelled
+        }
+        if let urlError = error as? URLError, urlError.code == .cancelled {
             return .cancelled
         }
         guard let apiError = error as? FeishuAPIService.APIError else {
@@ -1227,9 +1268,24 @@ class MainViewModel: ObservableObject {
         )
     }
 
-    private func isRecoverable(_ error: Error) -> Bool {
+    private func isRecoverable(
+        _ error: Error,
+        identity: StreamingSessionIdentity,
+        attemptIdentifier: UInt64
+    ) -> Bool {
+        if isAttemptScopedTransportCancel(
+            error,
+            identity: identity,
+            attemptIdentifier: attemptIdentifier
+        ) {
+            return true
+        }
         if let failure = error as? StreamFailure {
-            return isRecoverable(failure)
+            return isRecoverable(
+                failure,
+                identity: identity,
+                attemptIdentifier: attemptIdentifier
+            )
         }
         guard let apiError = error as? FeishuAPIService.APIError else {
             return false
@@ -1245,7 +1301,18 @@ class MainViewModel: ObservableObject {
         }
     }
 
-    private func isRecoverable(_ failure: StreamFailure) -> Bool {
+    private func isRecoverable(
+        _ failure: StreamFailure,
+        identity: StreamingSessionIdentity,
+        attemptIdentifier: UInt64
+    ) -> Bool {
+        if isAttemptScopedTransportCancel(
+            failure,
+            identity: identity,
+            attemptIdentifier: attemptIdentifier
+        ) {
+            return true
+        }
         switch failure {
         case .network, .timeout:
             return true
@@ -1257,6 +1324,41 @@ class MainViewModel: ObservableObject {
              .responseIdentityMismatch, .cancelled:
             return false
         }
+    }
+
+    private func classifiedStreamFailure(
+        _ failure: StreamFailure,
+        identity: StreamingSessionIdentity,
+        attemptIdentifier: UInt64
+    ) -> StreamFailure {
+        if isAttemptScopedTransportCancel(
+            failure,
+            identity: identity,
+            attemptIdentifier: attemptIdentifier
+        ) {
+            return .timeout
+        }
+        return failure
+    }
+
+    private func isAttemptScopedTransportCancel(
+        _ error: Error,
+        identity: StreamingSessionIdentity,
+        attemptIdentifier: UInt64
+    ) -> Bool {
+        guard retryAdmissionOpen, isCurrentAttempt(identity, attemptIdentifier) else {
+            return false
+        }
+        if error is CancellationError {
+            return true
+        }
+        if let urlError = error as? URLError, urlError.code == .cancelled {
+            return true
+        }
+        if let failure = error as? StreamFailure, failure == .cancelled {
+            return true
+        }
+        return false
     }
 
     private func interpretAppendFinalOutcome(

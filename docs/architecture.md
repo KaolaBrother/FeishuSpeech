@@ -23,7 +23,11 @@ The production hot-key state is `idle -> pending -> streaming -> sealing -> idle
 journal, one generation-scoped snapshot/replay ledger, at most one active Feishu session, and at
 most one cursor writer. A recoverable attempt
 failure leaves the hold generation and capture alive, aborts an established failed stream once,
-backs off, and replays the journal through a fresh serial session. Fn release or the 60-second cap
+backs off, and replays the journal through a fresh serial session. In-attempt transport cancel
+(`CancellationError`, `URLError.cancelled`, or transport-origin `StreamFailure.cancelled` while
+retry is open and the attempt is current) classifies as recoverable timeout. Generation cancel
+(`closeRetryAdmission`, identity invalidate, reset, sleep/wake, or the session-operation admission
+guard) stays terminal `.cancelled`. Fn release or the 60-second cap
 enters `sealing` and closes capture, but keeps the same generation's response/retry authority alive.
 After the recorder crosses its callback barrier and flushes at most one audio tail, a 60-second
 post-release drain budget covers queued/tail packets, recoverable fresh-session replay, and the
