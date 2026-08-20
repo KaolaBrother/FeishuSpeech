@@ -273,7 +273,7 @@ class MainViewModel: ObservableObject {
     private var currentFocusAppendSession: (any CurrentFocusProvisionalOutputSession)?
     private var attemptedFirstPartialRebind = false
     private var attemptedUnboundAppendArm = false
-    private var packetJournal: [Data] = []
+    private var holdPacketJournal = HoldPacketJournal()
     private var responseOutputLedger = ResponseOutputLedger()
     private var retryFailureStreak = 0
     private var nextAttemptIdentifier: UInt64 = 0
@@ -283,6 +283,7 @@ class MainViewModel: ObservableObject {
     private var streamingAttemptPhase = StreamingAttemptPhase.idle
     private var sessionCreationTask: Task<any SpeechStreamingSession, Error>?
     private var retrySleepTask: Task<Void, Error>?
+    private var captureDrainTask: Task<Void, Never>?
     private var consumerTask: Task<Void, Never>?
     private var sealingTask: Task<Void, Never>?
     private var pendingRecorderBarrier: PendingRecorderBarrier?
@@ -481,6 +482,14 @@ class MainViewModel: ObservableObject {
         activeSessionIdentity
     }
 
+    var journalCountForTesting: Int {
+        holdPacketJournal.count
+    }
+
+    var holdPacketJournalForTesting: HoldPacketJournal {
+        holdPacketJournal
+    }
+
     func handleStreamingEventForTesting(
         _ event: StreamingRecognitionEvent,
         identity: StreamingSessionIdentity
@@ -507,7 +516,8 @@ class MainViewModel: ObservableObject {
         stopSoundPlayed = false
         attemptedFirstPartialRebind = false
         attemptedUnboundAppendArm = false
-        packetJournal.removeAll(keepingCapacity: true)
+        holdPacketJournal.cancelWaiters()
+        holdPacketJournal = HoldPacketJournal()
         responseOutputLedger.begin(generation: identity.generation)
         retryFailureStreak = 0
         nextAttemptIdentifier = 0
@@ -545,8 +555,11 @@ class MainViewModel: ObservableObject {
         }
         startMaxDurationTimer(identity: identity)
 
+        captureDrainTask = Task(priority: .userInitiated) { [weak self] in
+            await self?.drainCapturedAudio(identity: identity, ingress: ingress)
+        }
         consumerTask = Task(priority: .userInitiated) { [weak self] in
-            await self?.consumeAudio(identity: identity, ingress: ingress)
+            await self?.consumeAudio(identity: identity)
         }
     }
 
@@ -659,6 +672,11 @@ class MainViewModel: ObservableObject {
         closeRetryAdmission()
         invalidateActiveIdentityAndCursor()
         activeIngress?.fail(.cancelled)
+        holdPacketJournal.cancelWaiters()
+        captureDrainTask?.cancel()
+        captureDrainTask = nil
+        consumerTask?.cancel()
+        consumerTask = nil
         clearInteractionReferences()
         stopMaxDurationTimer()
         hideOverlay()
@@ -666,12 +684,54 @@ class MainViewModel: ObservableObject {
         hotKeyService.setError(message)
     }
 
-    private func consumeAudio(
+    private func drainCapturedAudio(
         identity: StreamingSessionIdentity,
         ingress: ByteBoundedAudioIngress
     ) async {
         var iterator = ingress.stream.makeAsyncIterator()
+        do {
+            while isActive(identity), !Task.isCancelled {
+                let packet = try await iterator.next()
+                guard isActive(identity), !Task.isCancelled else {
+                    holdPacketJournal.cancelWaiters()
+                    return
+                }
+                guard let packet else {
+                    holdPacketJournal.markCaptureComplete()
+                    return
+                }
+                holdPacketJournal.append(packet)
+            }
+            holdPacketJournal.cancelWaiters()
+        } catch let ingressError as AudioIngressError {
+            holdPacketJournal.cancelWaiters()
+            logger.warning(
+                """
+                Capture drain ended without capture complete \
+                generation=\(identity.generation, privacy: .public)
+                """
+            )
+            guard isActive(identity) else { return }
+            if case .ingressOverflow = ingressError {
+                await terminateAbnormally(
+                    message: RecordingFailure.ingressOverflow.localizedDescription,
+                    reportsError: true
+                )
+            }
+        } catch {
+            holdPacketJournal.cancelWaiters()
+            logger.warning(
+                """
+                Capture drain ended without capture complete \
+                generation=\(identity.generation, privacy: .public)
+                """
+            )
+        }
+    }
 
+    private func consumeAudio(
+        identity: StreamingSessionIdentity
+    ) async {
         while isActive(identity), !Task.isCancelled {
             switch await createStreamingSession(identity: identity) {
             case .retry:
@@ -681,7 +741,6 @@ class MainViewModel: ObservableObject {
             case .ready(let session, let attemptIdentifier):
                 let shouldRetry = await runStreamingAttempt(
                     session,
-                    iterator: &iterator,
                     identity: identity,
                     attemptIdentifier: attemptIdentifier
                 )
@@ -758,7 +817,6 @@ class MainViewModel: ObservableObject {
 
     private func runStreamingAttempt(
         _ session: any SpeechStreamingSession,
-        iterator: inout AsyncThrowingStream<Data, Error>.Iterator,
         identity: StreamingSessionIdentity,
         attemptIdentifier: UInt64
     ) async -> Bool {
@@ -768,28 +826,64 @@ class MainViewModel: ObservableObject {
         }
         currentAttemptCancellationTask = nil
         activeStreamingSession = session
+        let snapshotAtReady = holdPacketJournal.count
+        var sent = 0
 
         do {
-            streamingAttemptPhase = packetJournal.isEmpty ? .consumingLiveAudio : .replayingJournal
-            try await replayJournal(
-                with: session,
-                identity: identity,
-                attemptIdentifier: attemptIdentifier
-            )
-            streamingAttemptPhase = .consumingLiveAudio
-            let receivedTerminalEvent = try await consumePackets(
-                iterator: &iterator,
-                with: session,
-                identity: identity,
-                attemptIdentifier: attemptIdentifier
-            )
-            guard isCurrentAttempt(identity, attemptIdentifier), !Task.isCancelled else { return false }
-            guard !receivedTerminalEvent else { return false }
-            return await finishConsumedAudio(
-                with: session,
-                identity: identity,
-                attemptIdentifier: attemptIdentifier
-            )
+            while isCurrentAttempt(identity, attemptIdentifier), !Task.isCancelled {
+                streamingAttemptPhase = sent < snapshotAtReady
+                    ? .replayingJournal
+                    : .consumingLiveAudio
+                let wait = await holdPacketJournal.waitForPacket(atOrAfter: sent)
+                guard isCurrentAttempt(identity, attemptIdentifier), !Task.isCancelled else {
+                    await cancelCurrentAttemptOnce(session)
+                    return false
+                }
+                switch wait {
+                case let .packet(packetIndex, packet):
+                    let source: CurrentFocusHypothesisSource = packetIndex < snapshotAtReady
+                        ? .replayCatchUp
+                        : .livePacket
+                    let processed = try await performSessionOperation(
+                        identity: identity,
+                        attemptIdentifier: attemptIdentifier,
+                        operation: "packet",
+                        body: {
+                            try await session.sendAudioPacket(packet)
+                        },
+                        admitSuccess: { event in
+                            let shouldStop = self.processPacketOperationEvent(
+                                event,
+                                identity: identity,
+                                attemptIdentifier: attemptIdentifier,
+                                context: (source: source, packetIndex: packetIndex)
+                            )
+                            return ProcessedPacketResult(event: event, shouldStop: shouldStop)
+                        }
+                    )
+                    guard isCurrentAttempt(identity, attemptIdentifier), !Task.isCancelled else {
+                        return false
+                    }
+                    if case .failed(let failure) = processed.event {
+                        throw failure
+                    }
+                    sent += 1
+                    if processed.shouldStop {
+                        return false
+                    }
+                case .captureComplete:
+                    return await finishConsumedAudio(
+                        with: session,
+                        identity: identity,
+                        attemptIdentifier: attemptIdentifier
+                    )
+                case .cancelled:
+                    await cancelCurrentAttemptOnce(session)
+                    return false
+                }
+            }
+            await cancelCurrentAttemptOnce(session)
+            return false
         } catch {
             await cancelCurrentAttemptOnce(session)
             return await waitForRetryIfAdmitted(
@@ -797,79 +891,6 @@ class MainViewModel: ObservableObject {
                 attemptIdentifier: attemptIdentifier,
                 error: error
             )
-        }
-    }
-
-    private func consumePackets(
-        iterator: inout AsyncThrowingStream<Data, Error>.Iterator,
-        with session: any SpeechStreamingSession,
-        identity: StreamingSessionIdentity,
-        attemptIdentifier: UInt64
-    ) async throws -> Bool {
-        while let packet = try await iterator.next() {
-            guard isCurrentAttempt(identity, attemptIdentifier), !Task.isCancelled else { return true }
-            packetJournal.append(packet)
-            let packetIndex = packetJournal.index(before: packetJournal.endIndex)
-            let processed = try await performSessionOperation(
-                identity: identity,
-                attemptIdentifier: attemptIdentifier,
-                operation: "packet",
-                body: {
-                    try await session.sendAudioPacket(packet)
-                },
-                admitSuccess: { event in
-                    let shouldStop = self.processPacketOperationEvent(
-                        event,
-                        identity: identity,
-                        attemptIdentifier: attemptIdentifier,
-                        context: (source: .livePacket, packetIndex: packetIndex)
-                    )
-                    return ProcessedPacketResult(event: event, shouldStop: shouldStop)
-                }
-            )
-            guard isCurrentAttempt(identity, attemptIdentifier), !Task.isCancelled else { return true }
-            if case .failed(let failure) = processed.event {
-                throw failure
-            }
-            if processed.shouldStop {
-                return true
-            }
-        }
-        return false
-    }
-
-    private func replayJournal(
-        with session: any SpeechStreamingSession,
-        identity: StreamingSessionIdentity,
-        attemptIdentifier: UInt64
-    ) async throws {
-        guard !packetJournal.isEmpty else { return }
-
-        for (packetIndex, packet) in packetJournal.enumerated() {
-            guard isCurrentAttempt(identity, attemptIdentifier), !Task.isCancelled else {
-                throw CancellationError()
-            }
-            let processed = try await performSessionOperation(
-                identity: identity,
-                attemptIdentifier: attemptIdentifier,
-                operation: "packet",
-                body: {
-                    try await session.sendAudioPacket(packet)
-                },
-                admitSuccess: { event in
-                    let shouldStop = self.processPacketOperationEvent(
-                        event,
-                        identity: identity,
-                        attemptIdentifier: attemptIdentifier,
-                        context: (source: .replayCatchUp, packetIndex: packetIndex)
-                    )
-                    return ProcessedPacketResult(event: event, shouldStop: shouldStop)
-                }
-            )
-            if case .failed(let failure) = processed.event {
-                throw failure
-            }
-            if processed.shouldStop { return }
         }
     }
 
@@ -1200,7 +1221,7 @@ class MainViewModel: ObservableObject {
             Streaming lifecycle generation=\(identity.generation, privacy: .public) \
             attempt=\(attemptIdentifier, privacy: .public) \
             phase=\(phase, privacy: .public) captureClosed=\(self.captureClosed, privacy: .public) \
-            journalPackets=\(self.packetJournal.count, privacy: .public) \
+            journalPackets=\(self.holdPacketJournal.count, privacy: .public) \
             retryStreak=\(self.retryFailureStreak, privacy: .public)
             """
         )
@@ -1975,6 +1996,7 @@ class MainViewModel: ObservableObject {
         let preservationState = outputPreservationState
         let session = activeStreamingSession
         let consumer = consumerTask
+        let captureDrain = captureDrainTask
 
         responseOutputLedger.closeAdmission()
         closeRetryAdmission()
@@ -1982,11 +2004,14 @@ class MainViewModel: ObservableObject {
         postReleaseDrainDeadline = nil
         invalidateActiveIdentityAndCursor()
         activeIngress?.fail(.cancelled)
+        holdPacketJournal.cancelWaiters()
+        captureDrainTask = nil
         consumerTask = nil
         sealingTask = nil
         pendingRecorderBarrier = nil
         clearInteractionReferences()
         stopMaxDurationTimer()
+        captureDrain?.cancel()
         consumer?.cancel()
         hideOverlay()
         audioRecorder.forceCleanup()
@@ -2031,6 +2056,7 @@ class MainViewModel: ObservableObject {
         postReleaseDrainTask = nil
         postReleaseDrainDeadline = nil
         invalidateActiveIdentityAndCursor(preserveCommittedCursorState: true)
+        captureDrainTask = nil
         consumerTask = nil
         sealingTask = nil
         activeIngress = nil
@@ -2038,7 +2064,7 @@ class MainViewModel: ObservableObject {
         usesCurrentFocusFinalOutput = false
         attemptedFirstPartialRebind = false
         attemptedUnboundAppendArm = false
-        packetJournal.removeAll(keepingCapacity: true)
+        holdPacketJournal.cancelWaiters()
         responseOutputLedger.reset()
         retryFailureStreak = 0
         activeAttemptIdentifier = nil
@@ -2062,6 +2088,7 @@ class MainViewModel: ObservableObject {
         let session = activeStreamingSession
         let existingCancellationTask = currentAttemptCancellationTask
         let consumer = consumerTask
+        let captureDrain = captureDrainTask
         let barrier = pendingRecorderBarrier
 
         closeRetryAdmission()
@@ -2070,10 +2097,13 @@ class MainViewModel: ObservableObject {
         postReleaseDrainDeadline = nil
         invalidateActiveIdentityAndCursor()
         ingress?.fail(.cancelled)
+        holdPacketJournal.cancelWaiters()
+        captureDrainTask = nil
         consumerTask = nil
         sealingTask = nil
         clearInteractionReferences()
         stopMaxDurationTimer()
+        captureDrain?.cancel()
         consumer?.cancel()
         hideOverlay()
         audioRecorder.forceCleanup()
@@ -2122,7 +2152,7 @@ class MainViewModel: ObservableObject {
         usesCurrentFocusFinalOutput = false
         attemptedFirstPartialRebind = false
         attemptedUnboundAppendArm = false
-        packetJournal.removeAll(keepingCapacity: true)
+        holdPacketJournal.cancelWaiters()
         responseOutputLedger.reset()
         retryFailureStreak = 0
         activeAttemptIdentifier = nil
@@ -2151,6 +2181,7 @@ class MainViewModel: ObservableObject {
         sessionCreationTask = nil
         retrySleepTask?.cancel()
         retrySleepTask = nil
+        holdPacketJournal.cancelWaiters()
     }
 
     private func publishCompletionFeedback(_ feedback: RecordingState) {
@@ -2328,6 +2359,9 @@ class MainViewModel: ObservableObject {
         postReleaseDrainDeadline = nil
         invalidateActiveIdentityAndCursor()
         activeIngress?.fail(.cancelled)
+        holdPacketJournal.cancelWaiters()
+        captureDrainTask?.cancel()
+        captureDrainTask = nil
         consumerTask?.cancel()
         consumerTask = nil
         sealingTask?.cancel()
