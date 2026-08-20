@@ -2,16 +2,18 @@
 
 Document system boundaries, major components, data flow, and deployment shape.
 
-## Cursor-bound streaming speech architecture (issues #25/#26/#27)
+## Cursor-bound streaming speech architecture (issues #25/#26/#27/#28)
 
 Issue #25 accepted the initial design, issue #26 implemented the generation-bound streaming
-pipeline, and issue #27 corrects held response assembly to complete snapshot replacement:
+pipeline, issue #27 corrects held response assembly to complete snapshot replacement, and
+issue #28 splits capture from recognition so PCM is journaled even while Feishu factory hangs:
 
 ```text
 HotKeyService
   -> MainViewModel (@MainActor generation owner)
-      -> streaming AudioRecorder -> byte-bounded PCM ingress
-          -> ordered packet journal + snapshot/replay ledger -> one fresh FeishuStreamingSession actor per attempt
+      -> capture line: AudioRecorder -> byte-bounded PCM ingress -> HoldPacketJournal
+      -> recognition line: factory / one send loop over HoldPacketJournal
+          -> snapshot/replay ledger -> one fresh FeishuStreamingSession actor per attempt
       -> optional CursorTextSession (@MainActor) -> original AX editable element
       -> CurrentFocusAppendSession -> PID-bound grapheme-aware keyboard replacement
 ```
@@ -43,9 +45,15 @@ exceed 1,920,000 bytes. Explicit non-replay users still release exact capacity o
 real audio callback queue barrier, an established stream may pad its final non-empty tail to the
 3,200-byte (100 ms) local minimum without charging generated silence as captured audio.
 Overflow fails the hold explicitly; the pipeline never drops, reorders, re-chunks, or sends PCM
-packets in parallel. The sole consumer appends every drained packet to the hold journal before its
-first send. A fresh attempt replays those exact packet elements in order while the same capture and
-ingress continue accepting audio.
+packets in parallel. After `beginStreaming` starts capture, a dedicated capture-drain task is the
+sole ingress iterator: it appends every drained packet to a generation-scoped `HoldPacketJournal`
+and never awaits factory, packet send, or finish. Recognition is a second unstructured `Task` that
+waits on the journal (`waitForPacket(atOrAfter:)`), using one send loop from `sent = 0`. A fresh
+attempt still sends those exact packet elements from index 0 while the same capture and ingress
+continue accepting audio. `markCaptureComplete()` runs only after a successful `ingress.finish`;
+iterator throw / `ingress.fail` cancels waiters and does not emit action=2. Production still uses
+`retainsDeliveredPacketsForReplay: true`, so occupancy includes retained delivered bytes and peak
+PCM is about 2× (ingress retain + journal). Overlay copy stays `正在聆听…` / `正在完成识别…`.
 
 ### Streaming transport boundary
 
