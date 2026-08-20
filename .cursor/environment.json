@@ -1,0 +1,6 @@
+{
+  "name": "FeishuSpeech (SwiftLint + Kaola-Workflow)",
+  "user": "ubuntu",
+  "install": "bash ./.cursor/install.sh",
+  "start": "bash ./.cursor/start.sh"
+}
