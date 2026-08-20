@@ -1097,6 +1097,7 @@ class MainViewModel: ObservableObject {
         let remainingBudget = remainingDrainNanoseconds()
         guard remainingBudget != 0 else { return .failure(.timeout) }
         let timeoutNanoseconds = streamingDrainPolicy.operationTimeout(
+            for: context.operation,
             remainingDrainNanoseconds: remainingBudget
         )
         let gate = StreamingOperationRaceGate()

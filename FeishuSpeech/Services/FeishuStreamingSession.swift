@@ -122,8 +122,9 @@ private nonisolated struct StreamingRecognitionData: Decodable, Sendable {
 
 actor FeishuStreamingSession: SpeechStreamingSession {
     typealias RefreshToken = @Sendable () async throws -> String
-    typealias RequestSender = @Sendable (URLRequest) async throws -> DirectHTTPResponse
+    typealias RequestSender = @Sendable (AttemptHTTPRequest) async throws -> DirectHTTPResponse
     typealias DiagnosticSink = @Sendable (StreamingResponseDiagnostic) -> Void
+    typealias TransportInvalidation = @Sendable () -> Void
 
     private enum TerminalState {
         case none
@@ -135,6 +136,7 @@ actor FeishuStreamingSession: SpeechStreamingSession {
     private let refreshToken: RefreshToken
     private let requestSender: RequestSender
     private let diagnosticSink: DiagnosticSink
+    private let invalidateTransport: TransportInvalidation
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
@@ -158,7 +160,8 @@ actor FeishuStreamingSession: SpeechStreamingSession {
         initialToken: String,
         refreshToken: @escaping RefreshToken,
         requestSender: @escaping RequestSender,
-        diagnosticSink: DiagnosticSink? = nil
+        diagnosticSink: DiagnosticSink? = nil,
+        invalidateTransport: @escaping TransportInvalidation = {}
     ) {
         let resolvedStreamID = streamID ?? Self.makeStreamID()
         precondition(Self.isValidStreamID(resolvedStreamID), "Invalid streaming session identifier")
@@ -168,6 +171,7 @@ actor FeishuStreamingSession: SpeechStreamingSession {
         self.refreshToken = refreshToken
         self.requestSender = requestSender
         self.diagnosticSink = diagnosticSink ?? logStreamingResponseDiagnostic
+        self.invalidateTransport = invalidateTransport
     }
 
     func sendAudioPacket(_ audio: Data) async throws -> StreamingRecognitionEvent {
@@ -255,6 +259,7 @@ actor FeishuStreamingSession: SpeechStreamingSession {
     }
 
     func cancel() async {
+        invalidateTransport()
         guard !didReceiveCancel else { return }
         didReceiveCancel = true
 
@@ -314,7 +319,9 @@ actor FeishuStreamingSession: SpeechStreamingSession {
         let requestSender = self.requestSender
         let requestTask = Task<DirectHTTPResponse, Error> {
             do {
-                let response = try await requestSender(request)
+                let response = try await requestSender(
+                    AttemptHTTPRequest(request: request, phase: .abort)
+                )
                 signal.resolve(true)
                 return response
             } catch {
@@ -383,7 +390,12 @@ actor FeishuStreamingSession: SpeechStreamingSession {
         )
 
         let requestTask = Task<DirectHTTPResponse, Error> {
-            try await requestSender(request)
+            try await requestSender(
+                AttemptHTTPRequest(
+                    request: request,
+                    phase: Self.phase(forAction: action)
+                )
+            )
         }
         activeRequestTask = requestTask
         activeRequestAction = action
@@ -485,6 +497,17 @@ actor FeishuStreamingSession: SpeechStreamingSession {
             throw StreamFailure.invalidRequest
         }
         return request
+    }
+
+    private static func phase(forAction action: Int) -> AttemptHTTPPhase {
+        switch action {
+        case 2:
+            return .finish
+        case 3:
+            return .abort
+        default:
+            return .packet
+        }
     }
 
     private func ensureActive() throws {

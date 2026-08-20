@@ -16,8 +16,9 @@
 - 新增 `MainViewModelTests` 覆盖 `MonitoringState` 失败映射、恢复清除和 cleanup 订阅释放路径（issues #22/#23/#24）
 
 ### Fixed
-- 修复按住 Fn 期间传输层 `CancellationError` / `URLError.cancelled` 被当成整次 hold 取消的问题：retry 仍开放且 attempt 仍当前时映射为可恢复 timeout，采集继续；reset/sleep/`closeRetryAdmission` 仍是终止性 generation-cancel（issue #29）
 - 修复按住 Fn 后飞书 factory 未就绪时采集被拖住的问题：麦克风入口现在由独立 capture 线排空并写入 `HoldPacketJournal`，识别线单独等待 journal；factory 挂起或可恢复失败时仍 journal 已说 PCM，且不因此 `forceCleanup`。识别用一条 send loop 从 index 0 发送，action=2 仅在成功 `ingress.finish` 且 `sent == count` 时发出。入口溢出仍终止本次 hold。Overlay/菜单文案不变（issue #28）
+- 修复 streaming 使用 `URLSession.shared` 且无法在 slice 到期取消的问题：每个 attempt 现有独立 `URLSession`（`waitsForConnectivity = false`），factory/packet/finish 各有 transport-owned slice timer；到期 `invalidateAndCancel`。streaming 不再用 `NWPathMonitor` 硬门控。整文件识别仍走独立 `executeURLRequest`（issue #30）
+- 修复按住 Fn 期间传输层 `CancellationError` / `URLError.cancelled` 被当成整次 hold 取消的问题：retry 仍开放且 attempt 仍当前时映射为可恢复 timeout，采集继续；reset/sleep/`closeRetryAdmission` 仍是终止性 generation-cancel（issue #29）
 - 修复松开 Fn 时尾部识别被截断：Fn-up 现在只关闭采集；当前 generation 继续等待 recorder callback barrier、排空 queued/tail packet、在可恢复失败后串行重连并回放 journal，最后把安全非空的 `action=2` snapshot 作为权威最终值替换原 AX owned range 或固定 PID 的键盘 owned tail，完成后才关闭输出 owner（issue #27）
 - 修复偶发“显示活动但长期无输出”的韧性缺口：连续失败 streak 在任意 packet/replay ACK 后重置；session factory、packet send、finish 各受 30 秒 attempt-scoped watchdog 保护；recorder barrier 完成后的 drain 总预算为 60 秒。重复业务码 `10024` 在预算内继续恢复，超时/取消/旧 attempt 的迟到结果不能取得输出 authority（issue #27）
 - Drain 到期现在按实际交付状态区分结果：可靠提交保留已有文字，交付不确定显示中性 preservation 提示，没有安全输出才显示固定流式失败；AX final 只有 verified commit 才算成功。所有路径保持固定目标、Secure Input、物理干扰 epoch、unsafe control 与 transcript-free diagnostics 边界（issue #27）

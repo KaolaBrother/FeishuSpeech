@@ -132,7 +132,7 @@ final class FeishuStreamingSessionTests: XCTestCase {
         let session = FeishuStreamingSession(
             initialToken: "warm-token",
             refreshToken: { "unused-refresh" },
-            requestSender: { request in try await transport.send(request) }
+            requestSender: { attempt in try await transport.send(attempt.request) }
         )
 
         let first = try await session.sendAudioPacket(Data(repeating: 0x11, count: 6_400))
@@ -171,7 +171,7 @@ final class FeishuStreamingSessionTests: XCTestCase {
             streamID: "fixed_stream_001",
             initialToken: "token",
             refreshToken: { "unused" },
-            requestSender: { request in try await transport.send(request) }
+            requestSender: { attempt in try await transport.send(attempt.request) }
         )
 
         let first = Task { try await session.sendAudioPacket(Data(repeating: 1, count: 6_400)) }
@@ -205,7 +205,7 @@ final class FeishuStreamingSessionTests: XCTestCase {
             streamID: "fixed_stream_007",
             initialToken: "token",
             refreshToken: { "unused" },
-            requestSender: { request in try await transport.send(request) }
+            requestSender: { attempt in try await transport.send(attempt.request) }
         )
 
         let firstPacket = Task {
@@ -267,7 +267,7 @@ final class FeishuStreamingSessionTests: XCTestCase {
             streamID: "fixed_stream_008",
             initialToken: "token",
             refreshToken: { "unused" },
-            requestSender: { request in try await transport.send(request) }
+            requestSender: { attempt in try await transport.send(attempt.request) }
         )
         _ = try await session.sendAudioPacket(Data(repeating: 0x33, count: 6_400))
 
@@ -325,7 +325,7 @@ final class FeishuStreamingSessionTests: XCTestCase {
             streamID: "fixed_stream_014",
             initialToken: "token",
             refreshToken: { "unused" },
-            requestSender: { request in try await transport.send(request) }
+            requestSender: { attempt in try await transport.send(attempt.request) }
         )
         _ = try await session.sendAudioPacket(Data(repeating: 0x34, count: 6_400))
 
@@ -384,7 +384,7 @@ final class FeishuStreamingSessionTests: XCTestCase {
             streamID: "fixed_stream_017",
             initialToken: "PRIVATE_TOKEN",
             refreshToken: { "unused" },
-            requestSender: { request in try await transport.send(request) }
+            requestSender: { attempt in try await transport.send(attempt.request) }
         )
 
         _ = try await session.sendAudioPacket(Data(repeating: 0x37, count: 6_400))
@@ -426,7 +426,7 @@ final class FeishuStreamingSessionTests: XCTestCase {
             streamID: "fixed_stream_018",
             initialToken: "PRIVATE_TOKEN",
             refreshToken: { "unused" },
-            requestSender: { request in try await transport.send(request) }
+            requestSender: { attempt in try await transport.send(attempt.request) }
         )
 
         do {
@@ -459,7 +459,7 @@ final class FeishuStreamingSessionTests: XCTestCase {
             streamID: "fixed_stream_019",
             initialToken: "PRIVATE_TOKEN",
             refreshToken: { "unused" },
-            requestSender: { request in try await transport.send(request) }
+            requestSender: { attempt in try await transport.send(attempt.request) }
         )
 
         _ = try await session.sendAudioPacket(Data(repeating: 0x3A, count: 6_400))
@@ -492,7 +492,7 @@ final class FeishuStreamingSessionTests: XCTestCase {
             streamID: "fixed_stream_015",
             initialToken: "token",
             refreshToken: { "unused" },
-            requestSender: { request in try await transport.send(request) }
+            requestSender: { attempt in try await transport.send(attempt.request) }
         )
 
         _ = try await session.sendAudioPacket(Data(repeating: 0x36, count: 6_400))
@@ -517,7 +517,7 @@ final class FeishuStreamingSessionTests: XCTestCase {
             streamID: "fixed_stream_002",
             initialToken: "stale-token",
             refreshToken: { try await refreshes.next() },
-            requestSender: { request in try await transport.send(request) }
+            requestSender: { attempt in try await transport.send(attempt.request) }
         )
 
         let accepted = try await session.sendAudioPacket(Data(repeating: 0x41, count: 6_400))
@@ -546,7 +546,7 @@ final class FeishuStreamingSessionTests: XCTestCase {
                 streamID: "fixed_stream_009",
                 initialToken: "stale-token",
                 refreshToken: { try await refreshes.next() },
-                requestSender: { request in try await transport.send(request) }
+                requestSender: { attempt in try await transport.send(attempt.request) }
             )
 
             do {
@@ -575,7 +575,7 @@ final class FeishuStreamingSessionTests: XCTestCase {
             streamID: "fixed_stream_010",
             initialToken: "token",
             refreshToken: { try await genericRefreshes.next() },
-            requestSender: { request in try await genericTransport.send(request) }
+            requestSender: { attempt in try await genericTransport.send(attempt.request) }
         )
 
         do {
@@ -601,7 +601,7 @@ final class FeishuStreamingSessionTests: XCTestCase {
             streamID: "fixed_stream_011",
             initialToken: "token",
             refreshToken: { "unused" },
-            requestSender: { request in try await omittedTransport.send(request) }
+            requestSender: { attempt in try await omittedTransport.send(attempt.request) }
         )
 
         do {
@@ -628,7 +628,7 @@ final class FeishuStreamingSessionTests: XCTestCase {
             streamID: "fixed_stream_013",
             initialToken: "token",
             refreshToken: { "unused" },
-            requestSender: { request in try await omittedTransport.send(request) }
+            requestSender: { attempt in try await omittedTransport.send(attempt.request) }
         )
 
         do {
@@ -687,7 +687,7 @@ final class FeishuStreamingSessionTests: XCTestCase {
             streamID: "fixed_stream_003",
             initialToken: "PRIVATE_TOKEN",
             refreshToken: { try await refreshes.next() },
-            requestSender: { request in try await transport.send(request) }
+            requestSender: { attempt in try await transport.send(attempt.request) }
         )
 
         _ = try await session.sendAudioPacket(Data(repeating: 0x51, count: 6_400))
@@ -715,7 +715,7 @@ final class FeishuStreamingSessionTests: XCTestCase {
             streamID: "fixed_stream_004",
             initialToken: "token",
             refreshToken: { "unused" },
-            requestSender: { request in try await inactiveTransport.send(request) }
+            requestSender: { attempt in try await inactiveTransport.send(attempt.request) }
         )
 
         let localFinish = try await inactive.finish()
@@ -733,7 +733,7 @@ final class FeishuStreamingSessionTests: XCTestCase {
             streamID: "fixed_stream_005",
             initialToken: "token",
             refreshToken: { "unused" },
-            requestSender: { request in try await activeTransport.send(request) }
+            requestSender: { attempt in try await activeTransport.send(attempt.request) }
         )
         _ = try await active.sendAudioPacket(Data(repeating: 0x61, count: 6_400))
 
@@ -753,7 +753,7 @@ final class FeishuStreamingSessionTests: XCTestCase {
             streamID: "fixed_stream_006",
             initialToken: "PRIVATE_TOKEN",
             refreshToken: { "unused" },
-            requestSender: { request in try await transport.send(request) }
+            requestSender: { attempt in try await transport.send(attempt.request) }
         )
 
         do {
@@ -793,7 +793,7 @@ final class FeishuStreamingSessionTests: XCTestCase {
             streamID: "fixed_stream_016",
             initialToken: "PRIVATE_TOKEN",
             refreshToken: { "unused" },
-            requestSender: { request in try await transport.send(request) },
+            requestSender: { attempt in try await transport.send(attempt.request) },
             diagnosticSink: { diagnostics.record($0) }
         )
 
@@ -827,7 +827,7 @@ final class FeishuStreamingSessionTests: XCTestCase {
             streamID: "fixed_stream_016",
             initialToken: "PRIVATE_TOKEN",
             refreshToken: { "unused" },
-            requestSender: { request in try await transport.send(request) },
+            requestSender: { attempt in try await transport.send(attempt.request) },
             diagnosticSink: { diagnostics.record($0) }
         )
 

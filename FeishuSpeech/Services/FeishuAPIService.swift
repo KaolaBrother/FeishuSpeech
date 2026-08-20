@@ -354,9 +354,17 @@ actor FeishuAPIService: SpeechStreamingSessionProviding {
 
     private let decoder = JSONDecoder()
     private let encoder = JSONEncoder()
+    private let streamingDrainPolicy: StreamingDrainPolicy
 
-    private init() {
+    private init(streamingDrainPolicy: StreamingDrainPolicy = StreamingDrainPolicy()) {
+        self.streamingDrainPolicy = streamingDrainPolicy
         startNetworkMonitoring()
+    }
+
+    nonisolated static func makeStreamingSessionConfiguration(
+        resourceTimeout: TimeInterval
+    ) -> URLSessionConfiguration {
+        TransportAttemptContext.makeStreamingSessionConfiguration(resourceTimeout: resourceTimeout)
     }
 
     private func startNetworkMonitoring() {
@@ -534,23 +542,35 @@ actor FeishuAPIService: SpeechStreamingSessionProviding {
         appId: String,
         appSecret: String
     ) async throws -> any SpeechStreamingSession {
-        try ensureNetworkAvailable()
-        let initialToken = try await getAccessToken(appId: appId, appSecret: appSecret)
-
-        return FeishuStreamingSession(
-            initialToken: initialToken,
-            refreshToken: { [weak self] in
-                guard let self else { throw APIError.authenticationUnavailable }
-                return try await self.refreshStreamingAccessToken(
-                    appId: appId,
-                    appSecret: appSecret
-                )
-            },
-            requestSender: { [weak self] request in
-                guard let self else { throw APIError.connectionFailed }
-                return try await self.sendStreamingRequest(request)
-            }
-        )
+        let context = TransportAttemptContext(policy: streamingDrainPolicy)
+        do {
+            let initialToken = try await getAccessToken(
+                appId: appId,
+                appSecret: appSecret,
+                attempt: context
+            )
+            return FeishuStreamingSession(
+                initialToken: initialToken,
+                refreshToken: { [weak self] in
+                    guard let self else { throw APIError.authenticationUnavailable }
+                    return try await self.refreshStreamingAccessToken(
+                        appId: appId,
+                        appSecret: appSecret,
+                        attempt: context
+                    )
+                },
+                requestSender: { [weak self] attempt in
+                    guard let self else { throw APIError.connectionFailed }
+                    return try await self.sendStreamingRequest(attempt, context: context)
+                },
+                invalidateTransport: {
+                    context.invalidate()
+                }
+            )
+        } catch {
+            context.invalidate()
+            throw error
+        }
     }
 
     private func performRecognition(audioData: Data, appId: String, appSecret: String) async throws -> String {
@@ -638,7 +658,11 @@ actor FeishuAPIService: SpeechStreamingSessionProviding {
         try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
     }
 
-    private func getAccessToken(appId: String, appSecret: String) async throws -> String {
+    private func getAccessToken(
+        appId: String,
+        appSecret: String,
+        attempt: TransportAttemptContext? = nil
+    ) async throws -> String {
         if let cached = cachedToken, let expiry = tokenExpiry, Date() < expiry {
             logger.info("Using cached token")
             return cached
@@ -651,12 +675,12 @@ actor FeishuAPIService: SpeechStreamingSessionProviding {
             "app_secret": appSecret
         ]
         let requestBody = try JSONSerialization.data(withJSONObject: body)
-
-        let response = try await sendRequest(
+        let request = try makeURLRequest(
             path: authPath,
             headers: ["Content-Type": "application/json"],
             body: requestBody
         )
+        let response = try await sendTokenRequest(request, attempt: attempt)
 
         logger.info("Auth response status: \(response.statusCode)")
 
@@ -680,22 +704,41 @@ actor FeishuAPIService: SpeechStreamingSessionProviding {
 
     private func refreshStreamingAccessToken(
         appId: String,
-        appSecret: String
+        appSecret: String,
+        attempt: TransportAttemptContext
     ) async throws -> String {
         cachedToken = nil
         tokenExpiry = nil
-        try ensureNetworkAvailable()
-        return try await getAccessToken(appId: appId, appSecret: appSecret)
+        return try await getAccessToken(appId: appId, appSecret: appSecret, attempt: attempt)
     }
 
-    private func sendStreamingRequest(_ request: URLRequest) async throws -> DirectHTTPResponse {
-        try ensureNetworkAvailable()
+    private func sendTokenRequest(
+        _ request: URLRequest,
+        attempt: TransportAttemptContext?
+    ) async throws -> DirectHTTPResponse {
 #if DEBUG
         if let requestSenderForTesting {
             return try await requestSenderForTesting(request)
         }
 #endif
+        if let attempt {
+            return try await attempt.send(
+                AttemptHTTPRequest(request: request, phase: .factoryToken)
+            )
+        }
         return try await executeURLRequest(request)
+    }
+
+    private func sendStreamingRequest(
+        _ attempt: AttemptHTTPRequest,
+        context: TransportAttemptContext
+    ) async throws -> DirectHTTPResponse {
+#if DEBUG
+        if let requestSenderForTesting {
+            return try await requestSenderForTesting(attempt.request)
+        }
+#endif
+        return try await context.send(attempt)
     }
 
     private func ensureNetworkAvailable() throws {
@@ -752,6 +795,7 @@ actor FeishuAPIService: SpeechStreamingSessionProviding {
         headers: [String: String],
         body: Data
     ) async throws -> DirectHTTPResponse {
+        try ensureNetworkAvailable()
         let request = try makeURLRequest(path: path, headers: headers, body: body)
 #if DEBUG
         if let requestSenderForTesting {

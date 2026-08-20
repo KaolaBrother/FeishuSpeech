@@ -20,6 +20,13 @@ The production Fn interaction never calls the compatibility-only whole-file endp
 streaming failures may create a fresh streaming session and replay the current hold's ordered PCM
 journal, but never fall back to whole-file recognition.
 
+Streaming tenant-token and `stream_recognize` POSTs use a per-attempt `URLSession` (not
+`URLSession.shared`) with phase-aligned slice timers. Factory slice 8 s, packet 14 s, finish 15 s;
+the coordinator backstop is 18 / 30 / min(drain, 45) seconds. `NWPathMonitor` is not a hard gate on
+the streaming path (D2): App Secret may be posted over HTTPS while the path is unsatisfied; it is
+not sent if TLS to `open.feishu.cn` fails. Legacy `file_recognize` still uses `executeURLRequest`
+and may keep the path-monitor gate.
+
 ### Authentication startup and public failures
 
 The streaming provider must obtain a tenant token before it constructs a session or sends any
