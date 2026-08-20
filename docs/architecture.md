@@ -80,7 +80,9 @@ per-attempt `URLSession` (`waitsForConnectivity = false`) with a transport-owned
 `invalidateAndCancel`s a hung `data(for:)`. Coordinator outer backstops are factory 18 s, packet 30 s,
 and finish min(drain, 45 s). Streaming no longer hard-gates on `NWPathMonitor`; a tenant-token POST
 may proceed while the path is unsatisfied, and is not sent if TLS to `open.feishu.cn` fails.
-Whole-file `recognizeSpeech` keeps the separate `executeURLRequest` path.
+When the URLSession slice produces no HTTP response, the same watched operation falls back once to
+an attempt-scoped keep-alive `NWConnection` (`preferNoProxies`, SNI `open.feishu.cn`). Completed HTTP
+does not hop. Whole-file `recognizeSpeech` keeps the separate `executeURLRequest` path.
 index used by the coordinator ledger: already-owned historical indices never own output again,
 while a previously failed unowned index may claim once when replay first succeeds. Every successful
 packet acknowledgement, including replay acknowledgement, resets the failure streak to zero;

@@ -146,6 +146,19 @@ nonisolated struct StreamingDrainPolicy: Equatable, Sendable {
         }
     }
 
+    func directSliceNanoseconds(for phase: AttemptHTTPPhase) -> UInt64 {
+        switch phase {
+        case .factoryToken:
+            return directFactorySliceNanoseconds
+        case .packet:
+            return directPacketSliceNanoseconds
+        case .finish:
+            return directFinishSliceNanoseconds
+        case .abort:
+            return 1_000_000_000
+        }
+    }
+
     func retryDelay(
         _ requestedNanoseconds: UInt64,
         remainingDrainNanoseconds: UInt64?

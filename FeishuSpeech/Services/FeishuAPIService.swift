@@ -85,7 +85,7 @@ private final class CancelBox: @unchecked Sendable {
     }
 }
 
-private nonisolated final class DirectFeishuHTTPClient {
+nonisolated final class DirectFeishuHTTPClient {
     private let host: String
     private let ipAddress: String
     private let path: String
@@ -216,18 +216,18 @@ private nonisolated final class DirectFeishuHTTPClient {
         }
     }
 
-    fileprivate static func parseCompleteResponse(_ responseData: Data) throws -> DirectHTTPResponse? {
+    static func parseCompleteResponse(_ responseData: Data) throws -> DirectHTTPResponse? {
         try parseResponse(responseData, allowCloseDelimited: false)
     }
 
-    fileprivate static func parseResponse(_ responseData: Data) throws -> DirectHTTPResponse {
+    static func parseResponse(_ responseData: Data) throws -> DirectHTTPResponse {
         guard let response = try parseResponse(responseData, allowCloseDelimited: true) else {
             throw FeishuAPIService.APIError.invalidResponse
         }
         return response
     }
 
-    fileprivate static func parseBufferedResponseBeforeTimeout(_ responseData: Data) throws -> DirectHTTPResponse {
+    static func parseBufferedResponseBeforeTimeout(_ responseData: Data) throws -> DirectHTTPResponse {
         guard let response = try parseCompleteResponse(responseData) else {
             throw FeishuAPIService.APIError.timeout
         }

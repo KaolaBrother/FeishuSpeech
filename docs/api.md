@@ -25,7 +25,9 @@ Streaming tenant-token and `stream_recognize` POSTs use a per-attempt `URLSessio
 the coordinator backstop is 18 / 30 / min(drain, 45) seconds. `NWPathMonitor` is not a hard gate on
 the streaming path (D2): App Secret may be posted over HTTPS while the path is unsatisfied; it is
 not sent if TLS to `open.feishu.cn` fails. Legacy `file_recognize` still uses `executeURLRequest`
-and may keep the path-monitor gate.
+and may keep the path-monitor gate. A URLSession connect-class / no-response outcome hops once to
+keep-alive Network.framework (`preferNoProxies`, SNI `open.feishu.cn`) inside the same watched
+operation. Completed HTTP 401/407/403/unparseable 400 does not hop.
 
 ### Authentication startup and public failures
 

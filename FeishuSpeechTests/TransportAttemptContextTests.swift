@@ -79,9 +79,11 @@ final class TransportAttemptContextTests: XCTestCase {
             )
             XCTFail("hung data(for:) must lose the URLSession slice")
         } catch let error as FeishuAPIService.APIError {
-            guard case .timeout = error else {
-                XCTFail("expected timeout, got \(error)")
-                return
+            switch error {
+            case .timeout, .connectionFailed, .networkError:
+                break
+            default:
+                XCTFail("URLSession slice miss must stay connect-class, got \(error)")
             }
         } catch {
             XCTFail("expected timeout, got \(error)")

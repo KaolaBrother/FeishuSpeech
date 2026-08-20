@@ -1,6 +1,6 @@
 import Foundation
+import Network
 import os.log
-
 private nonisolated let logger = Logger(
     subsystem: "com.feishuspeech.app",
     category: "TransportAttempt"
@@ -23,6 +23,8 @@ nonisolated final class TransportAttemptContext: @unchecked Sendable {
     private let policy: StreamingDrainPolicy
     private let lock = NSLock()
     private var session: URLSession
+    private var keepAlive: DirectFeishuKeepAliveSession?
+    private var stickyDirect = false
     private var isInvalidated = false
 
     init(policy: StreamingDrainPolicy, session: URLSession? = nil) {
@@ -79,9 +81,13 @@ nonisolated final class TransportAttemptContext: @unchecked Sendable {
             return
         }
         isInvalidated = true
+        stickyDirect = false
         let session = session
+        let keepAlive = keepAlive
+        self.keepAlive = nil
         lock.unlock()
         session.invalidateAndCancel()
+        keepAlive?.forceCancel()
         logger.info("transport=urlsession invalidated")
     }
 
@@ -91,17 +97,38 @@ nonisolated final class TransportAttemptContext: @unchecked Sendable {
             lock.unlock()
             throw CancellationError()
         }
+        let useDirect = stickyDirect
         let session = session
         lock.unlock()
+
+        if useDirect {
+            return try await sendDirect(attempt)
+        }
+        if attempt.phase == .abort {
+            return try await sendURLSessionSlice(
+                attempt.request,
+                session: session,
+                sliceNanoseconds: policy.urlSessionSliceNanoseconds(for: attempt.phase)
+            )
+        }
 
         var request = attempt.request
         let slice = policy.urlSessionSliceNanoseconds(for: attempt.phase)
         request.timeoutInterval = TimeInterval(slice) / 1_000_000_000
-        return try await sendURLSessionSlice(
-            request,
-            session: session,
-            sliceNanoseconds: slice
-        )
+        do {
+            return try await sendURLSessionSlice(
+                request,
+                session: session,
+                sliceNanoseconds: slice
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            if Task.isCancelled {
+                throw CancellationError()
+            }
+            return try await sendDirect(attempt)
+        }
     }
 
     private func sendURLSessionSlice(
@@ -151,11 +178,37 @@ nonisolated final class TransportAttemptContext: @unchecked Sendable {
         case .success(let response):
             return response
         case .failure(let error):
-            invalidate()
+            session.invalidateAndCancel()
             throw mapTransportError(error)
         case nil:
-            invalidate()
+            session.invalidateAndCancel()
             throw FeishuAPIService.APIError.timeout
+        }
+    }
+
+    private func sendDirect(_ attempt: AttemptHTTPRequest) async throws -> DirectHTTPResponse {
+        lock.lock()
+        if isInvalidated {
+            lock.unlock()
+            throw CancellationError()
+        }
+        let keepAlive = keepAlive ?? DirectFeishuKeepAliveSession()
+        self.keepAlive = keepAlive
+        lock.unlock()
+
+        do {
+            let response = try await keepAlive.send(
+                attempt.request,
+                deadlineNanoseconds: policy.directSliceNanoseconds(for: attempt.phase)
+            )
+            lock.lock()
+            stickyDirect = true
+            lock.unlock()
+            logger.info("transport=direct")
+            return response
+        } catch {
+            invalidate()
+            throw mapTransportError(error)
         }
     }
 
@@ -193,6 +246,12 @@ nonisolated func mapTransportError(_ error: Error) -> Error {
         default:
             return FeishuAPIService.APIError.connectionFailed
         }
+    }
+    if let nwError = error as? NWError {
+        if case .posix(let code) = nwError, code == .ETIMEDOUT {
+            return FeishuAPIService.APIError.timeout
+        }
+        return FeishuAPIService.APIError.connectionFailed
     }
     return FeishuAPIService.APIError.networkError("")
 }
