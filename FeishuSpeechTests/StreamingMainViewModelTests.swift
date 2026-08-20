@@ -3635,6 +3635,277 @@ final class StreamingMainViewModelTests: XCTestCase {
         XCTAssertEqual(context.output.copiedTexts, [])
     }
 
+    // MARK: - Issue #28 capture-line journal (does not wait on Feishu factory)
+    //
+    // Expected MainViewModel DEBUG accessors (implementer adds; tests only consume them):
+    //   var journalCountForTesting: Int
+    //   var holdPacketJournalForTesting: HoldPacketJournal
+
+    func test_hangingFactoryStillJournalsSpokenPCMWithoutForceCleanup() async {
+        let session = RetryCoordinatorStreamingSession(packetEvents: [.partial("late connect")])
+        let provider = ReviewNonCooperativeLateFactoryProvider(lateSession: session)
+        let context = makeReviewContext(
+            capability: .live,
+            provider: provider,
+            retrySleeper: { _ in }
+        )
+        let identity = StreamingSessionIdentity(generation: 2_801)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await provider.isHoldingFactory }
+
+        context.recorder.emit(Data(repeating: 0xA1, count: 6_400))
+        await waitUntil { context.viewModel.journalCountForTesting > 0 }
+
+        XCTAssertGreaterThan(context.viewModel.journalCountForTesting, 0)
+        XCTAssertEqual(context.recorder.forceCleanupCallCount, 0)
+        XCTAssertEqual(context.viewModel.activeSessionIdentityForTesting, identity)
+        XCTAssertEqual(context.viewModel.status, .streaming)
+        await context.viewModel.resetService()
+    }
+
+    func test_recoverableFactoryErrorStillJournalsSpokenPCMWithoutForceCleanup() async {
+        let session = RetryCoordinatorStreamingSession(packetEvents: [.partial("connected")])
+        let sleeper = ControlledCoordinatorRetrySleeper()
+        let context = makeRetryContext(
+            capability: .live,
+            factoryErrors: [.timeout],
+            sessions: [session],
+            sleeper: sleeper
+        )
+        let identity = StreamingSessionIdentity(generation: 2_802)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await sleeper.callCount == 1 }
+
+        context.recorder.emit(Data(repeating: 0xA2, count: 6_400))
+        await waitUntil { context.viewModel.journalCountForTesting > 0 }
+
+        XCTAssertGreaterThan(context.viewModel.journalCountForTesting, 0)
+        XCTAssertEqual(context.recorder.forceCleanupCallCount, 0)
+        XCTAssertEqual(context.viewModel.activeSessionIdentityForTesting, identity)
+        XCTAssertFalse(isError(context.viewModel.status))
+        await context.viewModel.resetService()
+    }
+
+    func test_delayedFactoryReadySendsJournalIndexZeroThenLiveTailWithoutReowningHistory() async {
+        let first = RetryCoordinatorStreamingSession(
+            packetEvents: [.partial("owned"), .failed(.network)]
+        )
+        let replacement = RetryCoordinatorStreamingSession(
+            packetEvents: [
+                .partial("changed historical replay"),
+                .partial("live tail")
+            ]
+        )
+        let provider = DelayedReadyThenSessionsProvider(sessions: [first, replacement])
+        let sleeper = ControlledCoordinatorRetrySleeper()
+        let context = makeReviewContext(
+            capability: .live,
+            provider: provider,
+            retrySleeper: { nanoseconds in
+                try await sleeper.sleep(nanoseconds: nanoseconds)
+            }
+        )
+        let identity = StreamingSessionIdentity(generation: 2_803)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await provider.isHoldingFactory }
+        context.recorder.emit(Data(repeating: 0xC1, count: 6_400))
+        await waitUntil { context.viewModel.journalCountForTesting > 0 }
+        XCTAssertEqual(context.recorder.forceCleanupCallCount, 0)
+
+        await provider.releaseFirstSessionIfNeeded()
+        await waitUntil { await first.sendCallCount == 1 }
+        XCTAssertEqual(context.accessibility.setSelectedTextCalls, ["owned"])
+
+        context.recorder.emit(Data(repeating: 0xC2, count: 6_400))
+        await waitUntil { await sleeper.callCount == 1 }
+        let firstPacketBytes = await first.packetFirstBytes
+        XCTAssertEqual(
+            firstPacketBytes,
+            [0xC1, 0xC2],
+            "delayed factory ready must send journal index 0 then the live tail"
+        )
+
+        await sleeper.releaseNext()
+        await waitUntil { await replacement.sendCallCount == 2 }
+        let replacementPacketBytes = await replacement.packetFirstBytes
+        XCTAssertEqual(replacementPacketBytes, [0xC1, 0xC2])
+        XCTAssertEqual(
+            context.accessibility.setSelectedTextCalls,
+            ["owned", "live tail"],
+            "already-owned journal index 0 must not write again on full replay"
+        )
+        await context.viewModel.resetService()
+    }
+
+    func test_lastTailPacketIsSentWhenCaptureCompleteArrivesInSameWakeup() async {
+        let session = CoordinatorStreamingSession(
+            packetEvents: [.partial("full"), .partial("tail")],
+            finishEvent: .final("done")
+        )
+        let provider = ReviewNonCooperativeLateFactoryProvider(lateSession: session)
+        let context = makeReviewContext(
+            capability: .live,
+            provider: provider,
+            retrySleeper: { _ in }
+        )
+        let identity = StreamingSessionIdentity(generation: 2_804)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await provider.isHoldingFactory }
+        context.recorder.emit(Data(repeating: 0xD1, count: 6_400))
+        context.recorder.emit(Data(repeating: 0xD2, count: 4_001))
+        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        await waitUntil { context.recorder.stopStreamingCallCount == 1 }
+        await waitUntil { context.viewModel.journalCountForTesting == 2 }
+
+        await provider.releaseLateSessionIfNeeded()
+        await waitUntil { await session.finishCallCount == 1 }
+
+        let packetByteCounts = await session.packetByteCounts
+        XCTAssertEqual(
+            packetByteCounts,
+            [6_400, 4_001],
+            "the last tail packet must be sent after ingress.finish even if complete is observed in the same wakeup"
+        )
+        let sendCallCount = await session.sendCallCount
+        XCTAssertEqual(sendCallCount, 2)
+        await waitUntil { context.viewModel.activeSessionIdentityForTesting == nil }
+    }
+
+    func test_ingressFailDuringFactoryHangDoesNotMarkCaptureCompleteOrEmitActionTwo() async {
+        let session = CoordinatorStreamingSession(
+            packetEvents: [.partial("must-not-finish")],
+            finishEvent: .final("action-two")
+        )
+        let provider = ReviewNonCooperativeLateFactoryProvider(lateSession: session)
+        let context = makeReviewContext(
+            capability: .live,
+            provider: provider,
+            retrySleeper: { _ in }
+        )
+        let identity = StreamingSessionIdentity(generation: 2_805)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await provider.isHoldingFactory }
+        context.recorder.emit(Data(repeating: 0xE1, count: 6_400))
+        await waitUntil { context.viewModel.journalCountForTesting > 0 }
+
+        context.recorder.failActiveIngress(.captureFailed)
+        await provider.releaseLateSessionIfNeeded()
+        await settle(iterations: 50)
+
+        let finishCallCount = await session.finishCallCount
+        XCTAssertEqual(finishCallCount, 0, "ingress.fail must not emit action=2")
+        let journalWait = await context.viewModel.holdPacketJournalForTesting.waitForPacket(
+            atOrAfter: context.viewModel.journalCountForTesting
+        )
+        XCTAssertFalse(
+            journalWaitMatches(journalWait, .captureComplete),
+            "iterator throw / ingress.fail must not mark capture complete"
+        )
+        XCTAssertTrue(
+            journalWaitMatches(journalWait, .cancelled),
+            "failed ingress must cancel journal waiters"
+        )
+        await context.viewModel.resetService()
+    }
+
+    func test_overflowDuringFactoryHangStillTerminalsBecauseOccupancyIncludesRetainedDelivered() async {
+        let session = CoordinatorStreamingSession(
+            packetEvents: [.partial("should-not-connect")],
+            finishEvent: .final("should-not-finish")
+        )
+        let provider = ReviewNonCooperativeLateFactoryProvider(lateSession: session)
+        let context = makeReviewContext(
+            capability: .live,
+            provider: provider,
+            retrySleeper: { _ in }
+        )
+        let identity = StreamingSessionIdentity(generation: 2_806)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await provider.isHoldingFactory }
+        XCTAssertNil(context.recorder.emit(Data(repeating: 0xF1, count: 1_920_000)))
+        await waitUntil { context.viewModel.journalCountForTesting > 0 }
+
+        XCTAssertEqual(
+            context.recorder.emit(Data([0xFF])),
+            .ingressOverflow,
+            "occupancy must still charge retained delivered bytes after capture drain"
+        )
+        await waitUntil { context.viewModel.activeSessionIdentityForTesting == nil }
+
+        let finishCallCount = await session.finishCallCount
+        XCTAssertEqual(finishCallCount, 0)
+        XCTAssertEqual(context.viewModel.status, .error("录音失败：音频处理速度不足"))
+        await context.viewModel.resetService()
+    }
+
+    func test_sealingDuringFactoryHangIgnoresSuccessorFnPress() async {
+        let session = RetryCoordinatorStreamingSession(packetEvents: [.partial("held")])
+        let provider = ReviewNonCooperativeLateFactoryProvider(lateSession: session)
+        let context = makeReviewContext(
+            capability: .live,
+            provider: provider,
+            retrySleeper: { _ in }
+        )
+        let identity = StreamingSessionIdentity(generation: 2_807)
+        let successor = StreamingSessionIdentity(generation: 2_808)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await provider.isHoldingFactory }
+        context.recorder.emit(Data(repeating: 0xA3, count: 6_400))
+        await waitUntil { context.viewModel.journalCountForTesting > 0 }
+
+        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        HotKeyService.shared.forceState(.sealing(sessionID: identity))
+        HotKeyService.shared.handleFnPressedForTesting(flags: [])
+        XCTAssertEqual(HotKeyService.shared.state, .sealing(sessionID: identity))
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: successor))
+        await settle(iterations: 20)
+
+        XCTAssertEqual(context.viewModel.activeSessionIdentityForTesting, identity)
+        XCTAssertEqual(context.recorder.startStreamingCallCount, 1)
+        XCTAssertNotEqual(context.viewModel.status, .idle)
+        await context.viewModel.resetService()
+    }
+
+    func test_factoryHangKeepsListeningOverlayAndMenuCopyWithoutReconnectWording() async {
+        let session = RetryCoordinatorStreamingSession(packetEvents: [.partial("silent reconnect")])
+        let provider = ReviewNonCooperativeLateFactoryProvider(lateSession: session)
+        let context = makeReviewContext(
+            capability: .live,
+            provider: provider,
+            retrySleeper: { _ in }
+        )
+        let identity = StreamingSessionIdentity(generation: 2_809)
+
+        XCTAssertEqual(RecordingState.streaming.text, "正在聆听…")
+        XCTAssertEqual(RecordingState.finalOnly.text, "正在聆听，松开后输入…")
+        XCTAssertEqual(RecordingState.sealing.text, "正在完成识别…")
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await provider.isHoldingFactory }
+        context.recorder.emit(Data(repeating: 0xA4, count: 6_400))
+        await waitUntil { context.viewModel.journalCountForTesting > 0 }
+
+        XCTAssertEqual(context.viewModel.status, .streaming)
+        XCTAssertEqual(context.viewModel.status.text, "正在聆听…")
+        XCTAssertEqual(context.overlayPresenter.visibleStatus, .streaming)
+        XCTAssertFalse(
+            containsReconnectCopy(visibleFeedback(context.viewModel)),
+            "overlay and menu stay on streaming status; no reconnect copy"
+        )
+        XCTAssertFalse(containsReconnectCopy(RecordingState.streaming.text))
+        XCTAssertFalse(containsReconnectCopy(RecordingState.sealing.text))
+        XCTAssertFalse(containsReconnectCopy(RecordingState.finalOnly.text))
+        await context.viewModel.resetService()
+    }
+
     private func makeContext(
         capability: CoordinatorAccessibilityClient.Capability,
         rebindCapability: CoordinatorAccessibilityClient.Capability? = nil,
@@ -3999,6 +4270,22 @@ final class StreamingMainViewModelTests: XCTestCase {
 
     private func visibleFeedback(_ viewModel: MainViewModel) -> String {
         String(describing: viewModel.status) + viewModel.status.text + (viewModel.overlayMessage ?? "")
+    }
+
+    private func containsReconnectCopy(_ text: String) -> Bool {
+        let fragments = ["重连", "重新连接", "正在连接", "reconnect", "Reconnect", "reconnecting"]
+        return fragments.contains { text.contains($0) }
+    }
+
+    private func journalWaitMatches(_ lhs: JournalWaitResult, _ rhs: JournalWaitResult) -> Bool {
+        switch (lhs, rhs) {
+        case let (.packet(leftIndex, leftData), .packet(rightIndex, rightData)):
+            return leftIndex == rightIndex && leftData == rightData
+        case (.captureComplete, .captureComplete), (.cancelled, .cancelled):
+            return true
+        default:
+            return false
+        }
     }
 
     private func isError(_ state: RecordingState) -> Bool {
@@ -4624,6 +4911,49 @@ private actor ReviewNonCooperativeLateFactoryProvider: SpeechStreamingSessionPro
     }
 }
 
+private actor DelayedReadyThenSessionsProvider: SpeechStreamingSessionProviding {
+    private var sessions: [any SpeechStreamingSession]
+    private var continuation: CheckedContinuation<any SpeechStreamingSession, Error>?
+    private(set) var makeSessionCallCount = 0
+
+    var isHoldingFactory: Bool {
+        continuation != nil
+    }
+
+    init(sessions: [any SpeechStreamingSession]) {
+        self.sessions = sessions
+    }
+
+    func makeStreamingSession(
+        appId: String,
+        appSecret: String
+    ) async throws -> any SpeechStreamingSession {
+        _ = appId
+        _ = appSecret
+        makeSessionCallCount += 1
+        if makeSessionCallCount == 1 {
+            return try await withCheckedThrowingContinuation { continuation in
+                self.continuation = continuation
+            }
+        }
+        guard !sessions.isEmpty else {
+            throw FeishuAPIService.APIError.networkError("")
+        }
+        return sessions.removeFirst()
+    }
+
+    func releaseFirstSessionIfNeeded() {
+        guard let continuation else { return }
+        guard !sessions.isEmpty else {
+            continuation.resume(throwing: FeishuAPIService.APIError.networkError(""))
+            self.continuation = nil
+            return
+        }
+        continuation.resume(returning: sessions.removeFirst())
+        self.continuation = nil
+    }
+}
+
 private actor ReviewNonCooperativeLatePacketSession: SpeechStreamingSession {
     private let firstEvent: StreamingRecognitionEvent
     private let lateEvent: StreamingRecognitionEvent
@@ -4995,8 +5325,13 @@ private final class CoordinatorAudioRecorder: AudioRecorder {
         isRecording = false
     }
 
-    func emit(_ data: Data) {
+    @discardableResult
+    func emit(_ data: Data) -> AudioIngressError? {
         ingress?.append(data)
+    }
+
+    func failActiveIngress(_ error: AudioIngressError) {
+        ingress?.fail(error)
     }
 
     func releaseStopBarrier() {
