@@ -2912,7 +2912,6 @@ final class StreamingMainViewModelTests: XCTestCase {
             ("authentication", .authentication),
             ("malformedResponse", .malformedResponse),
             ("responseIdentityMismatch", .responseIdentityMismatch),
-            ("cancelled", .cancelled),
             ("backendOther", .backend(code: 10023)),
             ("http400", .httpStatus(400)),
             ("http401", .httpStatus(401)),
@@ -3904,6 +3903,122 @@ final class StreamingMainViewModelTests: XCTestCase {
         XCTAssertFalse(containsReconnectCopy(RecordingState.sealing.text))
         XCTAssertFalse(containsReconnectCopy(RecordingState.finalOnly.text))
         await context.viewModel.resetService()
+    }
+
+    // MARK: - Issue #29 attempt-cancel vs generation-cancel
+
+    func test_attemptCancelFactoryCancellationErrorKeepsCaptureAndAdmitsSuccessor() async {
+        let successor = RetryCoordinatorStreamingSession(packetEvents: [.partial("recovered")])
+        let provider = ReviewFactoryPlanProvider(
+            errors: [CancellationError()],
+            successor: successor
+        )
+        let sleeper = ImmediateReviewRetrySleeper()
+        let context = makeReviewContext(
+            capability: .live,
+            provider: provider,
+            retrySleeper: { nanoseconds in
+                await sleeper.sleep(nanoseconds: nanoseconds)
+            }
+        )
+        let identity = StreamingSessionIdentity(generation: 2_901)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        context.recorder.emit(Data(repeating: 0xB1, count: 6_400))
+        await waitUntil { await provider.makeSessionCallCount >= 2 }
+
+        let providerCallCount = await provider.makeSessionCallCount
+        let sleeperCallCount = await sleeper.callCount
+        XCTAssertGreaterThanOrEqual(providerCallCount, 2)
+        XCTAssertEqual(sleeperCallCount, 1)
+        XCTAssertEqual(context.recorder.forceCleanupCallCount, 0)
+        XCTAssertEqual(context.viewModel.activeSessionIdentityForTesting, identity)
+        XCTAssertFalse(isError(context.viewModel.status))
+        await context.viewModel.resetService()
+    }
+
+    func test_attemptCancelFactoryURLErrorCancelledKeepsCaptureAndAdmitsSuccessor() async {
+        let successor = RetryCoordinatorStreamingSession(packetEvents: [.partial("recovered")])
+        let provider = ReviewFactoryPlanProvider(
+            errors: [URLError(.cancelled)],
+            successor: successor
+        )
+        let sleeper = ImmediateReviewRetrySleeper()
+        let context = makeReviewContext(
+            capability: .live,
+            provider: provider,
+            retrySleeper: { nanoseconds in
+                await sleeper.sleep(nanoseconds: nanoseconds)
+            }
+        )
+        let identity = StreamingSessionIdentity(generation: 2_902)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        context.recorder.emit(Data(repeating: 0xB2, count: 6_400))
+        await waitUntil { await provider.makeSessionCallCount >= 2 }
+
+        let providerCallCount = await provider.makeSessionCallCount
+        XCTAssertGreaterThanOrEqual(providerCallCount, 2)
+        XCTAssertEqual(context.recorder.forceCleanupCallCount, 0)
+        XCTAssertEqual(context.viewModel.activeSessionIdentityForTesting, identity)
+        await context.viewModel.resetService()
+    }
+
+    func test_attemptCancelStreamFailureCancelledAdmitsSuccessorWithoutForceCleanup() async {
+        let failed = RetryCoordinatorStreamingSession(packetEvents: [.failed(.cancelled)])
+        let successor = RetryCoordinatorStreamingSession(packetEvents: [.partial("recovered")])
+        let provider = RetryCoordinatorStreamingProvider(
+            factoryErrors: [],
+            sessions: [failed, successor]
+        )
+        let sleeper = ImmediateReviewRetrySleeper()
+        let context = makeReviewContext(
+            capability: .live,
+            provider: provider,
+            retrySleeper: { nanoseconds in
+                await sleeper.sleep(nanoseconds: nanoseconds)
+            }
+        )
+        let identity = StreamingSessionIdentity(generation: 2_903)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        context.recorder.emit(Data(repeating: 0xB3, count: 6_400))
+        await waitUntil { await provider.makeSessionCallCount >= 2 }
+
+        let providerCallCount = await provider.makeSessionCallCount
+        let sleeperCallCount = await sleeper.callCount
+        XCTAssertGreaterThanOrEqual(providerCallCount, 2)
+        XCTAssertEqual(sleeperCallCount, 1)
+        XCTAssertEqual(context.recorder.forceCleanupCallCount, 0)
+        XCTAssertEqual(context.viewModel.activeSessionIdentityForTesting, identity)
+        XCTAssertFalse(isError(context.viewModel.status))
+        await context.viewModel.resetService()
+    }
+
+    func test_generationCancelResetAfterAttemptStillTerminalsWithoutSuccessor() async {
+        let successor = RetryCoordinatorStreamingSession(packetEvents: [.partial("must-not-run")])
+        let provider = ReviewNonCooperativeLateFactoryProvider(lateSession: successor)
+        let context = makeReviewContext(
+            capability: .live,
+            provider: provider,
+            retrySleeper: { _ in }
+        )
+        let identity = StreamingSessionIdentity(generation: 2_904)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { await provider.isHoldingFactory }
+        context.recorder.emit(Data(repeating: 0xB4, count: 6_400))
+        await waitUntil { context.viewModel.journalCountForTesting > 0 }
+
+        await context.viewModel.resetService()
+        await provider.releaseLateSessionIfNeeded()
+        await settle(iterations: 20)
+
+        XCTAssertNil(context.viewModel.activeSessionIdentityForTesting)
+        let providerCallCount = await provider.makeSessionCallCount
+        XCTAssertEqual(providerCallCount, 1)
+        let successorSendCount = await successor.sendCallCount
+        XCTAssertEqual(successorSendCount, 0)
     }
 
     private func makeContext(
