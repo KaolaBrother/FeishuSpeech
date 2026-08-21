@@ -70,3 +70,10 @@ All five items in `mission-list.md` are `done`: capture journal, cancel mapping,
 None. GitHub PR #32 is the existing review request; this finalize sinks by merge and closes #28–#31.
 
 ## Status: ARCHIVED AFTER FINAL GIT GATE
+
+## Sink Findings
+
+post_rebase_tests: skipped
+
+archived_paths:
+- kaola-workflow/archive/bundle-28-29-30-31/finalization-summary.md
