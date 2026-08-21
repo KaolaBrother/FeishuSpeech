@@ -1426,7 +1426,8 @@ final class StreamingMainViewModelTests: XCTestCase {
             ["stable", "revised"],
             "historical replay is packet-suppressed, duplicate recovery snapshots are text-suppressed, and the first changed new index advances once"
         )
-        XCTAssertEqual(context.appendSession.appliedSources, ["live", "live"])
+        // Backoff-queued new index is journaled before the next attempt is ready, so it is replayCatchUp.
+        XCTAssertEqual(context.appendSession.appliedSources, ["live", "replay"])
 
         await context.viewModel.resetService()
     }
@@ -3835,11 +3836,14 @@ final class StreamingMainViewModelTests: XCTestCase {
             .ingressOverflow,
             "occupancy must still charge retained delivered bytes after capture drain"
         )
-        await waitUntil { context.viewModel.activeSessionIdentityForTesting == nil }
+        await waitUntilOverflowDrainTerminates {
+            context.viewModel.activeSessionIdentityForTesting == nil
+        }
 
         let finishCallCount = await session.finishCallCount
         XCTAssertEqual(finishCallCount, 0)
         XCTAssertEqual(context.viewModel.status, .error("录音失败：音频处理速度不足"))
+        XCTAssertNil(context.viewModel.activeSessionIdentityForTesting)
         await context.viewModel.resetService()
     }
 
@@ -4491,6 +4495,16 @@ final class StreamingMainViewModelTests: XCTestCase {
             await Task.yield()
         }
         XCTFail("timed out waiting for streaming coordinator state")
+    }
+
+    private func waitUntilOverflowDrainTerminates(_ predicate: @escaping () async -> Bool) async {
+        for _ in 0..<2_500 {
+            if await predicate() {
+                return
+            }
+            await Task.yield()
+        }
+        XCTFail("timed out waiting for overflow drain to terminate")
     }
 
     private func settle(iterations: Int = 10) async {

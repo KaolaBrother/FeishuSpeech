@@ -16,6 +16,9 @@
 - 新增 `MainViewModelTests` 覆盖 `MonitoringState` 失败映射、恢复清除和 cleanup 订阅释放路径（issues #22/#23/#24）
 
 ### Fixed
+- 菜单栏 extra 改为仅图标：icon+「就绪」文案在刘海屏上会落进 notch，菜单里看不到应用（issues #28–#31）
+- keep-alive 粘性连接的 leftover 按完整 HTTP 帧切分（Content-Length 或 chunked trailer），不再用解码后的 `body.count`，避免第二条 POST 读到分帧残渣（issue #31）
+- Release 配置关闭 code coverage 插桩，避免已安装菜单栏应用空闲占用约 9% CPU（issues #28–#31）
 - 修复 VPN/PAC 下 URLSession 无 HTTP 响应时无法绕过代理的问题：同一 watched factory/packet/finish 操作在 URLSession slice 失败后回退一次 attempt-scoped keep-alive `NWConnection`（`preferNoProxies`，SNI `open.feishu.cn`）。已完成的 HTTP 不 hop；下一 attempt 仍从 URLSession 开始（issue #31）
 - 修复按住 Fn 后飞书 factory 未就绪时采集被拖住的问题：麦克风入口现在由独立 capture 线排空并写入 `HoldPacketJournal`，识别线单独等待 journal；factory 挂起或可恢复失败时仍 journal 已说 PCM，且不因此 `forceCleanup`。识别用一条 send loop 从 index 0 发送，action=2 仅在成功 `ingress.finish` 且 `sent == count` 时发出。入口溢出仍终止本次 hold。Overlay/菜单文案不变（issue #28）
 - 修复 streaming 使用 `URLSession.shared` 且无法在 slice 到期取消的问题：每个 attempt 现有独立 `URLSession`（`waitsForConnectivity = false`），factory/packet/finish 各有 transport-owned slice timer；到期 `invalidateAndCancel`。streaming 不再用 `NWPathMonitor` 硬门控。整文件识别仍走独立 `executeURLRequest`（issue #30）

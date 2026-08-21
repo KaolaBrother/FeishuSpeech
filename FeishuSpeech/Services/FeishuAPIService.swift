@@ -217,14 +217,20 @@ nonisolated final class DirectFeishuHTTPClient {
     }
 
     static func parseCompleteResponse(_ responseData: Data) throws -> DirectHTTPResponse? {
+        try parseResponse(responseData, allowCloseDelimited: false)?.response
+    }
+
+    static func parseCompleteResponseKeepingRemainder(
+        _ responseData: Data
+    ) throws -> (response: DirectHTTPResponse, remainder: Data)? {
         try parseResponse(responseData, allowCloseDelimited: false)
     }
 
     static func parseResponse(_ responseData: Data) throws -> DirectHTTPResponse {
-        guard let response = try parseResponse(responseData, allowCloseDelimited: true) else {
+        guard let parsed = try parseResponse(responseData, allowCloseDelimited: true) else {
             throw FeishuAPIService.APIError.invalidResponse
         }
-        return response
+        return parsed.response
     }
 
     static func parseBufferedResponseBeforeTimeout(_ responseData: Data) throws -> DirectHTTPResponse {
@@ -234,7 +240,10 @@ nonisolated final class DirectFeishuHTTPClient {
         return response
     }
 
-    private static func parseResponse(_ responseData: Data, allowCloseDelimited: Bool) throws -> DirectHTTPResponse? {
+    private static func parseResponse(
+        _ responseData: Data,
+        allowCloseDelimited: Bool
+    ) throws -> (response: DirectHTTPResponse, remainder: Data)? {
         let delimiter = Data("\r\n\r\n".utf8)
         guard let headerRange = responseData.range(of: delimiter),
               let headerText = String(data: responseData[..<headerRange.lowerBound], encoding: .utf8) else {
@@ -250,12 +259,14 @@ nonisolated final class DirectFeishuHTTPClient {
         let rawBody = responseData[headerRange.upperBound...]
         let headers = parseHeaders(headerText)
         let body: Data
+        let consumedBodyCount: Int
 
         if headers["transfer-encoding"]?.lowercased().contains("chunked") == true {
             guard let decodedBody = try decodeChunkedBodyIfComplete(Data(rawBody)) else {
                 return nil
             }
-            body = decodedBody
+            body = decodedBody.decoded
+            consumedBodyCount = decodedBody.consumed
         } else if let contentLengthText = headers["content-length"] {
             guard let contentLength = Int(contentLengthText.trimmingCharacters(in: .whitespacesAndNewlines)),
                   contentLength >= 0 else {
@@ -265,13 +276,19 @@ nonisolated final class DirectFeishuHTTPClient {
                 return nil
             }
             body = Data(rawBody.prefix(contentLength))
+            consumedBodyCount = contentLength
         } else if allowCloseDelimited {
             body = Data(rawBody)
+            consumedBodyCount = rawBody.count
         } else {
             return nil
         }
 
-        return DirectHTTPResponse(statusCode: statusCode, body: body)
+        let remainderStart = headerRange.upperBound + consumedBodyCount
+        let remainder = remainderStart < responseData.endIndex
+            ? Data(responseData[remainderStart...])
+            : Data()
+        return (DirectHTTPResponse(statusCode: statusCode, body: body), remainder)
     }
 
     private static func parseHeaders(_ headerText: String) -> [String: String] {
@@ -288,7 +305,7 @@ nonisolated final class DirectFeishuHTTPClient {
         return headers
     }
 
-    private static func decodeChunkedBodyIfComplete(_ data: Data) throws -> Data? {
+    private static func decodeChunkedBodyIfComplete(_ data: Data) throws -> (decoded: Data, consumed: Int)? {
         var decoded = Data()
         var index = data.startIndex
         let lineDelimiter = Data("\r\n".utf8)
@@ -309,8 +326,12 @@ nonisolated final class DirectFeishuHTTPClient {
 
             if chunkSize == 0 {
                 let trailerBytes = data[index...]
-                if trailerBytes.starts(with: lineDelimiter) || trailerBytes.range(of: trailerDelimiter) != nil {
-                    return decoded
+                if trailerBytes.starts(with: lineDelimiter) {
+                    let consumedEnd = index + lineDelimiter.count
+                    return (decoded, data.distance(from: data.startIndex, to: consumedEnd))
+                }
+                if let trailerRange = trailerBytes.range(of: trailerDelimiter) {
+                    return (decoded, data.distance(from: data.startIndex, to: trailerRange.upperBound))
                 }
                 return nil
             }
@@ -430,6 +451,12 @@ actor FeishuAPIService: SpeechStreamingSessionProviding {
 
     nonisolated static func parseCompleteDirectHTTPResponseForTesting(_ data: Data) throws -> DirectHTTPResponse? {
         try DirectFeishuHTTPClient.parseCompleteResponse(data)
+    }
+
+    nonisolated static func parseCompleteDirectHTTPResponseKeepingRemainderForTesting(
+        _ data: Data
+    ) throws -> (response: DirectHTTPResponse, remainder: Data)? {
+        try DirectFeishuHTTPClient.parseCompleteResponseKeepingRemainder(data)
     }
 
     nonisolated static func parseClosedDirectHTTPResponseForTesting(_ data: Data) throws -> DirectHTTPResponse {

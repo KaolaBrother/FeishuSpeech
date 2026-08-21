@@ -251,15 +251,6 @@ nonisolated final class DirectFeishuKeepAliveSession: @unchecked Sendable {
     private static func parseResponseKeepingRemainder(
         _ responseData: Data
     ) throws -> (response: DirectHTTPResponse, remainder: Data)? {
-        guard let response = try DirectFeishuHTTPClient.parseCompleteResponse(responseData) else {
-            return nil
-        }
-        let delimiter = Data("\r\n\r\n".utf8)
-        guard let headerRange = responseData.range(of: delimiter) else {
-            return (response, Data())
-        }
-        let consumed = headerRange.upperBound + response.body.count
-        let remainderStart = min(consumed, responseData.endIndex)
-        return (response, Data(responseData[remainderStart...]))
+        try DirectFeishuHTTPClient.parseCompleteResponseKeepingRemainder(responseData)
     }
 }

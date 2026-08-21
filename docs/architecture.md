@@ -75,20 +75,21 @@ action and sequence once.
 The coordinator, not the transport actor, owns retry. Recoverable failures create a fresh stream
 after consecutive-failure exponential backoff (250 ms base, doubling to a 4-second cap; jitter produces a
 200 ms minimum). It serially replays the journal from zero. Each response carries the stable packet
-index used for output ownership. Streaming factory, token refresh, and `stream_recognize` POSTs use a
+index used for output ownership. Already-owned historical indices never own output again,
+while a previously failed unowned index may claim once when replay first succeeds. Every successful
+packet acknowledgement, including replay acknowledgement, resets the failure streak to zero;
+monotonic attempt identity remains separate.
+
+Streaming factory, token refresh, and `stream_recognize` POSTs use a
 per-attempt `URLSession` (`waitsForConnectivity = false`) with a transport-owned slice timer that
 `invalidateAndCancel`s a hung `data(for:)`. Coordinator outer backstops are factory 18 s, packet 30 s,
 and finish min(drain, 45 s). Streaming no longer hard-gates on `NWPathMonitor`; a tenant-token POST
 may proceed while the path is unsatisfied, and is not sent if TLS to `open.feishu.cn` fails.
 When the URLSession slice produces no HTTP response, the same watched operation falls back once to
-an attempt-scoped keep-alive `NWConnection` (`preferNoProxies`, SNI `open.feishu.cn`). Completed HTTP
-does not hop. Whole-file `recognizeSpeech` keeps the separate `executeURLRequest` path.
-index used by the coordinator ledger: already-owned historical indices never own output again,
-while a previously failed unowned index may claim once when replay first succeeds. Every successful
-packet acknowledgement, including replay acknowledgement, resets the failure streak to zero;
-monotonic attempt identity remains separate. Factory, packet, and finish operations each have a
-30-second coordinator watchdog, clamped to any remaining post-release drain budget. There is no
-whole-file fallback or parallel request chain.
+an attempt-scoped keep-alive `NWConnection` (`preferNoProxies`, SNI `open.feishu.cn`). Keep-alive
+leftover is sliced at the raw framed message end (Content-Length or complete chunked trailers), not
+decoded `body.count`. Completed HTTP does not hop. Whole-file `recognizeSpeech` keeps the separate
+`executeURLRequest` path. There is no whole-file fallback or parallel request chain.
 
 Each successful response exposes one complete opaque recognition snapshot. Packet-index replay
 ownership is independent: each eligible journal index may be admitted once, but an equal snapshot

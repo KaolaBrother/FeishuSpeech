@@ -35,10 +35,7 @@ final class TransportAttemptContextTests: XCTestCase {
         configuration.protocolClasses = [CompletedHTTPURLProtocol.self]
         let session = URLSession(configuration: configuration)
         let context = TransportAttemptContext(
-            policy: StreamingDrainPolicy(
-                operationTimeoutNanoseconds: 2_000_000_000,
-                postReleaseDrainTimeoutNanoseconds: 60_000_000_000
-            ),
+            policy: StreamingDrainPolicy(),
             session: session
         )
         let request = URLRequest(url: URL(string: "https://open.feishu.cn/token")!)
@@ -128,7 +125,7 @@ private final class CompletedHTTPURLProtocol: URLProtocol {
         )!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: Data(#"{"code":0}"#.utf8))
-        client?.urlProtocol(self, didFinishLoading: self)
+        client?.urlProtocolDidFinishLoading(self)
     }
 
     override func stopLoading() {}

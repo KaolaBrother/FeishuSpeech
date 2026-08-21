@@ -182,6 +182,48 @@ final class FeishuAPIServiceTests: XCTestCase {
         XCTAssertEqual(String(data: response.body, encoding: .utf8), "hello")
     }
 
+    func test_directHTTPParserKeepingRemainder_whenContentLengthCompleteFollowedBySecondMessage_remainderIsSecondMessage() throws {
+        let first = httpResponse(headers: ["Content-Length": "5"], body: "hello")
+        let second = httpResponse(headers: ["Content-Length": "5"], body: "world")
+        var data = first
+        data.append(second)
+
+        let parsed: (response: DirectHTTPResponse, remainder: Data) = try XCTUnwrap(
+            FeishuAPIService.parseCompleteDirectHTTPResponseKeepingRemainderForTesting(data)
+        )
+
+        XCTAssertEqual(parsed.response.statusCode, 200)
+        XCTAssertEqual(String(data: parsed.response.body, encoding: .utf8), "hello")
+        XCTAssertEqual(parsed.remainder, second)
+    }
+
+    func test_directHTTPParserKeepingRemainder_whenChunkedCompleteFollowedByContentLengthMessage_remainderIsSecondMessage() throws {
+        let first = httpResponse(
+            headers: ["Transfer-Encoding": "chunked"],
+            body: "5\r\nhello\r\n0\r\n\r\n"
+        )
+        let second = httpResponse(headers: ["Content-Length": "5"], body: "world")
+        var data = first
+        data.append(second)
+
+        let parsed: (response: DirectHTTPResponse, remainder: Data) = try XCTUnwrap(
+            FeishuAPIService.parseCompleteDirectHTTPResponseKeepingRemainderForTesting(data)
+        )
+
+        XCTAssertEqual(parsed.response.statusCode, 200)
+        XCTAssertEqual(String(data: parsed.response.body, encoding: .utf8), "hello")
+        XCTAssertEqual(parsed.remainder, second)
+    }
+
+    func test_directHTTPParserKeepingRemainder_whenChunkedBodyLacksTerminalChunk_returnsNil() throws {
+        let parsed: (response: DirectHTTPResponse, remainder: Data)? =
+            try FeishuAPIService.parseCompleteDirectHTTPResponseKeepingRemainderForTesting(
+                httpResponse(headers: ["Transfer-Encoding": "chunked"], body: "5\r\nhello\r\n")
+            )
+
+        XCTAssertNil(parsed)
+    }
+
     func test_timeoutFallback_parsesCompleteBufferedContentLengthResponse() throws {
         let response = try FeishuAPIService.parseTimeoutBufferedDirectHTTPResponseForTesting(
             httpResponse(headers: ["Content-Length": "11"], body: "hello world")

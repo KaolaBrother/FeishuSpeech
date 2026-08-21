@@ -12,11 +12,10 @@ struct FeishuSpeechApp: App {
                     appDelegate.setViewModel(viewModel)
                 }
         } label: {
-            HStack(spacing: 4) {
-                Image(systemName: viewModel.status.icon)
-                    .foregroundStyle(viewModel.status.color)
-                Text(viewModel.statusText)
-            }
+            // Icon-only: icon+status text is wide enough to land in the MacBook
+            // notch and vanish from the visible extra strip.
+            Image(systemName: viewModel.status.icon)
+                .foregroundStyle(viewModel.status.color)
         }
         .menuBarExtraStyle(.menu)
         

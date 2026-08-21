@@ -27,7 +27,9 @@ the streaming path (D2): App Secret may be posted over HTTPS while the path is u
 not sent if TLS to `open.feishu.cn` fails. Legacy `file_recognize` still uses `executeURLRequest`
 and may keep the path-monitor gate. A URLSession connect-class / no-response outcome hops once to
 keep-alive Network.framework (`preferNoProxies`, SNI `open.feishu.cn`) inside the same watched
-operation. Completed HTTP 401/407/403/unparseable 400 does not hop.
+operation. Keep-alive leftover on that sticky socket is the bytes after one complete framed
+message (Content-Length body, or decoded chunked payload plus last-chunk and trailers), not
+`response.body.count`. Completed HTTP 401/407/403/unparseable 400 does not hop.
 
 ### Authentication startup and public failures
 
