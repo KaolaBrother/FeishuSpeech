@@ -1,0 +1,5 @@
+{"ts":"2026-08-21T06:50:27Z","agent_type":"tdd-guide","agent_id":"","cwd":"/Users/ylpromax5/Workspace/feishuspeech","model":"","model_planned":"sonnet"}
+{"ts":"2026-08-21T07:03:20Z","agent_type":"implementer","agent_id":"","cwd":"/Users/ylpromax5/Workspace/feishuspeech","model":"","model_planned":"sonnet"}
+{"ts":"2026-08-21T07:11:03Z","agent_type":"code-reviewer","agent_id":"","cwd":"/Users/ylpromax5/Workspace/feishuspeech","model":"","model_planned":"opus"}
+{"ts":"2026-08-21T07:11:04Z","agent_type":"security-reviewer","agent_id":"","cwd":"/Users/ylpromax5/Workspace/feishuspeech","model":"","model_planned":"opus"}
+{"ts":"2026-08-21T07:20:21Z","agent_type":"doc-updater","agent_id":"","cwd":"/Users/ylpromax5/Workspace/feishuspeech","model":"","model_planned":"sonnet"}
