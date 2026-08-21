@@ -1,0 +1,10 @@
+{
+  "project": "bundle-34-35",
+  "sweptClasses": [
+    {
+      "reasonClass": "manual:uat-crash",
+      "sample": "Fn SIGTRAP in NSHostingView overlay constraints after recording start; overlay sources unchanged vs origin/main; filed as independent follow-up",
+      "count": 1
+    }
+  ]
+}
