@@ -23,7 +23,7 @@ nonisolated final class DirectFeishuKeepAliveSession: DirectKeepAliveTransport, 
 
     private let lock = NSLock()
     private let queue = DispatchQueue(label: "com.feishuspeech.direct-keepalive")
-    private var connection: NWConnection?
+    private var socket: BoundTLSSocket?
     private var didBecomeReady = false
     private var leftover = Data()
     private var receiveBuffer = Data()
@@ -31,7 +31,13 @@ nonisolated final class DirectFeishuKeepAliveSession: DirectKeepAliveTransport, 
     private var isDead = false
     private var isReceiving = false
 
-    static func makeParameters() -> NWParameters {
+    static func physicalInterface(from path: NWPath) -> NWInterface? {
+        path.availableInterfaces.first { interface in
+            interface.type == .wifi || interface.type == .wiredEthernet
+        }
+    }
+
+    static func makeParameters(requiredInterface: NWInterface? = nil) -> NWParameters {
         let tlsOptions = NWProtocolTLS.Options()
         sec_protocol_options_set_tls_server_name(
             tlsOptions.securityProtocolOptions,
@@ -40,7 +46,55 @@ nonisolated final class DirectFeishuKeepAliveSession: DirectKeepAliveTransport, 
         let parameters = NWParameters(tls: tlsOptions)
         parameters.preferNoProxies = true
         parameters.prohibitedInterfaceTypes = [.other]
+        if let requiredInterface {
+            parameters.requiredInterface = requiredInterface
+        }
         return parameters
+    }
+
+    static func snapshotPhysicalInterface(
+        timeoutNanoseconds: UInt64 = 300_000_000
+    ) -> NWInterface? {
+        let monitor = NWPathMonitor()
+        let queue = DispatchQueue(label: "com.feishuspeech.direct-path")
+        let lock = NSLock()
+        var interface: NWInterface?
+        let semaphore = DispatchSemaphore(value: 0)
+        monitor.pathUpdateHandler = { path in
+            lock.lock()
+            interface = physicalInterface(from: path)
+            lock.unlock()
+            semaphore.signal()
+        }
+        monitor.start(queue: queue)
+        _ = semaphore.wait(timeout: .now() + .nanoseconds(Int(timeoutNanoseconds)))
+        monitor.cancel()
+        lock.lock()
+        defer { lock.unlock() }
+        return interface
+    }
+
+    private static func pathKindName(for type: NWInterface.InterfaceType?) -> String {
+        switch type {
+        case .wifi:
+            return "wifi"
+        case .wiredEthernet:
+            return "wired"
+        case .other:
+            return "other"
+        case .none:
+            return "none"
+        default:
+            return "unknown"
+        }
+    }
+
+    private static func pathKindName(for path: NWPath?) -> String {
+        guard let path else { return "none" }
+        if path.usesInterfaceType(.wifi) { return "wifi" }
+        if path.usesInterfaceType(.wiredEthernet) { return "wired" }
+        if path.usesInterfaceType(.other) { return "other" }
+        return "unknown"
     }
 
     func send(
@@ -65,11 +119,11 @@ nonisolated final class DirectFeishuKeepAliveSession: DirectKeepAliveTransport, 
     func forceCancel() {
         lock.lock()
         isDead = true
-        let connection = connection
+        let socket = socket
         let pending = inFlight
         inFlight = nil
         lock.unlock()
-        connection?.forceCancel()
+        socket?.close()
         pending?.continuation.resume(throwing: CancellationError())
     }
 
@@ -82,78 +136,96 @@ nonisolated final class DirectFeishuKeepAliveSession: DirectKeepAliveTransport, 
                 return
             }
             inFlight = InFlight(continuation: continuation, request: request)
-            if didBecomeReady, let connection, connection.state == .ready {
+            if didBecomeReady, socket != nil {
                 lock.unlock()
-                sendHTTP(request, on: connection)
+                sendHTTP(request)
                 return
             }
-            if connection == nil {
-                startConnectionLocked()
-            }
+            let needsConnect = socket == nil
             lock.unlock()
-        }
-    }
-
-    private func startConnectionLocked() {
-        let parameters = Self.makeParameters()
-        let connection = NWConnection(
-            host: NWEndpoint.Host(feishuDirectHost),
-            port: 443,
-            using: parameters
-        )
-        self.connection = connection
-        connection.stateUpdateHandler = { [weak self] state in
-            self?.handleState(state)
-        }
-        connection.start(queue: queue)
-        logger.info("transport=direct connecting")
-    }
-
-    private func handleState(_ state: NWConnection.State) {
-        switch state {
-        case .ready:
+            let physical = needsConnect ? Self.snapshotPhysicalInterface() : nil
             lock.lock()
-            let wasReady = didBecomeReady
-            didBecomeReady = true
-            let pending = inFlight
-            let connection = connection
+            if isDead {
+                let pending = inFlight
+                inFlight = nil
+                lock.unlock()
+                pending?.continuation.resume(throwing: CancellationError())
+                return
+            }
+            if socket == nil {
+                let interface = physical
+                lock.unlock()
+                guard let interface else {
+                    failInFlight(FeishuAPIService.APIError.connectionFailed)
+                    return
+                }
+                startConnection(requiredInterface: interface)
+                return
+            }
             lock.unlock()
-            if !wasReady {
-                logger.info("transport=direct")
-            }
-            if let pending, let connection {
-                sendHTTP(pending.request, on: connection)
-            }
-        case .waiting(let error):
-            lock.lock()
-            let ready = didBecomeReady
-            lock.unlock()
-            if !ready {
-                failInFlight(mapTransportError(error))
-            } else {
-                failAttempt(mapTransportError(error))
-            }
-        case .failed(let error):
-            failAttempt(mapTransportError(error))
-        case .cancelled:
-            failAttempt(CancellationError())
-        default:
-            break
         }
     }
 
-    private func sendHTTP(_ request: URLRequest, on connection: NWConnection) {
+    private func startConnection(requiredInterface: NWInterface) {
+        let kind = Self.pathKindName(for: requiredInterface.type)
+        logger.notice("transport=direct connecting path=\(kind, privacy: .public)")
+        let interfaceName = requiredInterface.name
+        queue.async { [weak self] in
+            guard let self else { return }
+            do {
+                let socket = try BoundTLSSocket.connect(
+                    host: feishuDirectHost,
+                    interfaceName: interfaceName
+                )
+                self.lock.lock()
+                if self.isDead {
+                    self.lock.unlock()
+                    socket.close()
+                    return
+                }
+                let onTunnel = socket.localIPv4?.hasPrefix("198.18.") == true
+                if onTunnel {
+                    self.lock.unlock()
+                    socket.close()
+                    logger.notice("transport=direct rejected tunnel local")
+                    self.failAttempt(FeishuAPIService.APIError.connectionFailed)
+                    return
+                }
+                self.socket = socket
+                self.didBecomeReady = true
+                let pending = self.inFlight
+                self.lock.unlock()
+                logger.notice("transport=direct path=\(kind, privacy: .public) tunnel=false")
+                if let pending {
+                    self.sendHTTP(pending.request)
+                }
+            } catch {
+                self.failAttempt(mapTransportError(error))
+            }
+        }
+    }
+
+    private func sendHTTP(_ request: URLRequest) {
         guard let encoded = Self.encode(request) else {
             failInFlight(FeishuAPIService.APIError.invalidResponse)
             return
         }
-        connection.send(content: encoded, completion: .contentProcessed { [weak self] error in
-            if let error {
-                self?.failAttempt(mapTransportError(error))
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            let socket = self.socket
+            self.lock.unlock()
+            guard let socket else {
+                self.failAttempt(FeishuAPIService.APIError.connectionFailed)
                 return
             }
-            self?.receiveIfNeeded()
-        })
+            do {
+                try socket.write(encoded)
+                self.receiveIfNeeded()
+            } catch {
+                self.failAttempt(mapTransportError(error))
+            }
+        }
     }
 
     private func receiveIfNeeded() {
@@ -163,46 +235,39 @@ nonisolated final class DirectFeishuKeepAliveSession: DirectKeepAliveTransport, 
             return
         }
         isReceiving = true
-        let connection = connection
         lock.unlock()
-        guard let connection else { return }
-        receiveLoop(on: connection)
+        receiveLoop()
     }
 
-    private func receiveLoop(on connection: NWConnection) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1_024) { [weak self] data, _, isComplete, error in
-            guard let self else { return }
-            if let data, !data.isEmpty {
-                self.lock.lock()
-                self.receiveBuffer.append(data)
-                let snapshot = self.receiveBuffer
-                self.lock.unlock()
-                do {
-                    if let parsed = try Self.parseResponseKeepingRemainder(snapshot) {
-                        self.lock.lock()
-                        self.receiveBuffer = parsed.remainder
-                        self.leftover = parsed.remainder
-                        let pending = self.inFlight
-                        self.inFlight = nil
-                        self.isReceiving = false
-                        self.lock.unlock()
-                        pending?.continuation.resume(returning: parsed.response)
-                        return
-                    }
-                } catch {
-                    self.failAttempt(mapTransportError(error))
-                    return
-                }
-            }
-            if let error {
-                self.failAttempt(mapTransportError(error))
+    private func receiveLoop() {
+        lock.lock()
+        let socket = socket
+        lock.unlock()
+        guard let socket else { return }
+        do {
+            let data = try socket.read(maxLength: 64 * 1_024)
+            if data.isEmpty {
+                failAttempt(FeishuAPIService.APIError.connectionFailed)
                 return
             }
-            if isComplete {
-                self.failAttempt(FeishuAPIService.APIError.connectionFailed)
+            lock.lock()
+            receiveBuffer.append(data)
+            let snapshot = receiveBuffer
+            lock.unlock()
+            if let parsed = try Self.parseResponseKeepingRemainder(snapshot) {
+                lock.lock()
+                receiveBuffer = parsed.remainder
+                leftover = parsed.remainder
+                let pending = inFlight
+                inFlight = nil
+                isReceiving = false
+                lock.unlock()
+                pending?.continuation.resume(returning: parsed.response)
                 return
             }
-            self.receiveLoop(on: connection)
+            receiveLoop()
+        } catch {
+            failAttempt(mapTransportError(error))
         }
     }
 
@@ -221,10 +286,10 @@ nonisolated final class DirectFeishuKeepAliveSession: DirectKeepAliveTransport, 
         let pending = inFlight
         inFlight = nil
         isReceiving = false
-        let connection = connection
-        self.connection = nil
+        let socket = socket
+        self.socket = nil
         lock.unlock()
-        connection?.forceCancel()
+        socket?.close()
         pending?.continuation.resume(throwing: error)
     }
 

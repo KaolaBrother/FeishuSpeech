@@ -21,25 +21,28 @@ streaming failures may create a fresh streaming session and replay the current h
 journal, but never fall back to whole-file recognition.
 
 Streaming tenant-token and `stream_recognize` POSTs use a per-attempt `TransportAttemptContext`.
-Keep-alive Network.framework is primary: TLS SNI `open.feishu.cn`, `preferNoProxies = true`,
-`prohibitedInterfaceTypes = [.other]` (skip VPN/TUN), default peer authentication, no custom
-verify block, no `en0` bind, no CDN IP list, and no user-facing toggle. Slice budgets are
-unchanged (factory 8+7+1 < 18, packet 14+14+1 < 30, finish 15+15+1 < 45); primary uses **direct**
-slices and URLSession fallback uses **urlSession** slices. Coordinator backstop remains 18 / 30 /
-min(drain, 45) seconds. `NWPathMonitor` is not a hard gate on the streaming path (D2): App Secret
-may be posted over HTTPS while the path is unsatisfied; it is not sent if TLS to `open.feishu.cn`
-fails. Legacy `file_recognize` / `recognizeSpeech` still use `executeURLRequest` and may keep the
-path-monitor gate.
+Keep-alive is primary. The send path is `BoundTLSSocket`: bound UDP/53 DNS on the runtime
+wifi/wired interface (DHCP option 6, then recursor hostnames `dns.alidns.com` /
+`public1.114dns.com`), skip `198.18.0.0/15` via bitmask, TCP `IP_BOUND_IF` to remaining A records,
+CFStream TLS with peer name `open.feishu.cn` and chain validation on. There is no custom verify
+block, no `en0` string, no CDN IP list, no dotted-quad literals, and no user-facing toggle.
+`open.feishu.cn` is not resolved with system `getaddrinfo`. A connected socket whose local IPv4
+has prefix `198.18.` is closed without HTTP. Slice budget fields are unchanged (factory 8+7+1 <
+18, packet 14+14+1 < 30, finish 15+15+1 < 45); per-request keep-alive deadlines are **direct**
+slices. Coordinator backstop remains 18 / 30 / min(drain, 45) seconds. `NWPathMonitor` is not a
+hard gate on the streaming path (D2): App Secret may be posted over HTTPS while the path is
+unsatisfied; it is not sent if TLS to `open.feishu.cn` fails. Legacy `file_recognize` /
+`recognizeSpeech` still use `executeURLRequest` and may keep the path-monitor gate.
 
-A keep-alive connect-class / no-HTTP miss hops once to the per-attempt `URLSession`
-(`waitsForConnectivity = false`) inside the same watched operation. Completed HTTP (including 4xx)
-does not hop. `CancellationError` does not hop. Keep-alive leftover on that sticky socket is the
-bytes after one complete framed message (Content-Length body, or decoded chunked payload plus
-last-chunk and trailers), not `response.body.count`. Keep-alive success is sticky-direct for the
-rest of the attempt; URLSession fallback success is sticky-URLSession. A new attempt context
-starts on keep-alive again. Abort uses URLSession unless the attempt is already sticky-direct. A
-first-send keep-alive miss does not invalidate URLSession; a mid-attempt sticky-direct drop still
-does.
+A keep-alive connect-class / no-HTTP miss **rethrows** and does **not** hop factory/packet/finish
+to URLSession. Completed HTTP (including 4xx) does not hop. `CancellationError` does not hop.
+Keep-alive leftover on that sticky socket is the bytes after one complete framed message
+(Content-Length body, or decoded chunked payload plus last-chunk and trailers), not
+`response.body.count`. Keep-alive success is sticky-direct for the rest of the attempt. A new
+attempt context starts on keep-alive again. Abort uses keep-alive when a session is present;
+URLSession only when keep-alive is absent. A first-send keep-alive miss on the production path
+drops that session; coordinator outer retry reconnects on a new context. A mid-attempt
+sticky-direct drop still invalidates.
 
 ### Authentication startup and public failures
 
@@ -307,7 +310,8 @@ retries, destructive editing, or fallback after uncertainty.
 
 See [D-25-01](decisions/D-25-01.md), [D-26-01](decisions/D-26-01.md),
 [D-27-01](decisions/D-27-01.md), [D-28-01](decisions/D-28-01.md),
-[D-32-01](decisions/D-32-01.md), and the
+[D-32-01](decisions/D-32-01.md), [D-34-01](decisions/D-34-01.md),
+[D-18-01](decisions/D-18-01.md), and the
 [full design](streaming-speech-design.md) for state, lifecycle, failure, fallback, privacy, and test
 requirements.
 
@@ -321,7 +325,14 @@ items.
 
 The keychain service is `Siji.FeishuSpeech.credentials`. The credential account
 values are `appId` and `appSecret`, matching `CredentialAccount.appId.rawValue`
-and `CredentialAccount.appSecret.rawValue`.
+and `CredentialAccount.appSecret.rawValue`. Queries are login-keychain generic
+passwords (issue #18). Issue #35 data-protection reads are withdrawn (issue #36).
+
+`AppDelegate.applicationDidFinishLaunching` applies
+`LoginItemService.setEnabled(AppSettings.launchAtLoginPreference(from: .standard))`
+and does not call `AppSettings.load()`. `launchAtLoginPreference` reads
+`launchAtLogin` from UserDefaults only. `MainViewModel.init` still loads
+credentials once.
 
 `FeishuSpeechSettings` stores only non-credential preferences:
 
@@ -339,9 +350,15 @@ deleted.
 
 ## HTTP transport and deadline
 
-Authentication and speech requests use `URLSession` with the hostname
-`open.feishu.cn`. System DNS therefore selects a current Feishu CDN endpoint;
-the runtime path does not depend on a static IP list.
+Streaming tenant-token and `stream_recognize` POSTs resolve `open.feishu.cn` with bound
+UDP/53 on the runtime physical interface and connect with `IP_BOUND_IF` plus CFStream TLS
+(peer name `open.feishu.cn`, chain validation on). They do not use system `getaddrinfo` for
+that host and do not hop to URLSession on a keep-alive connect-class miss. There is no static
+Feishu CDN IP list.
+
+Whole-file `recognizeSpeech` / `file_recognize` still uses `executeURLRequest` on `URLSession`
+with the hostname `open.feishu.cn` (system DNS). Abort without an in-memory keep-alive also
+uses URLSession.
 
 The streaming factory obtains one token through the existing cache/fetch path without the
 whole-file retry wrapper, snapshots it into the per-hold actor, and injects one-request HTTP and
@@ -421,3 +438,8 @@ empty-audio encoding, real response text shape, same-sequence token refresh, PCM
 slow-network behavior, tenant permission/edition, and the cross-application AX/current-focus
 matrix. No transcript, audio, credential, token, stream ID, raw body/backend message, target
 content/title, or clipboard payload may be recorded during that UAT.
+
+Issues #34 and #35 did not produce a green `xcodebuild test` receipt: the adhoc test host hung in
+Keychain (`SecKeychainItemCopyContent` / `-34018`). Do not treat that hung run as suite proof.
+Live bound-DNS evidence is an unsigned validator compiled from `BoundTLSSocket.swift`, not an
+installed `/Applications` Fn-hold capture.

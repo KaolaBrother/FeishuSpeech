@@ -9,7 +9,7 @@ macOS 本地语音输入工具，使用飞书语音识别 API。
 - 🔄 可恢复流式失败不会立即报错；应用在 Fn 按住期间及松开后的 bounded drain 内持续使用新会话重试，并保留已录音频的有序回放
 - 🎯 松开 **Fn 键** 只结束录音采集；当前 generation 会继续排空在途/尾部音频、必要的重连与回放，并用 `action=2` 的权威最终 snapshot 完成本次已拥有文字的替换后再结束
 - 🔒 安全输入和密码框会拒绝输出；捕获目标路径验证原 PID 和精确 AX 元素，无 AX 目标路径在可检测的进程切换时停止，但无法感知同 PID 内的光标移动
-- 🌐 流式识别优先经直连物理路径访问飞书并跳过 VPN/TUN；无 HTTP 响应时才回退系统 URLSession
+- 🌐 流式识别的租户 token 与 `stream_recognize` 走绑定物理网卡的 keep-alive（bound UDP DNS + `IP_BOUND_IF`），跳过 VPN/TUN；连接失败不再回退系统 URLSession。整文件识别仍走系统 URLSession
 
 ## 系统要求
 
@@ -99,7 +99,7 @@ UAT 并非停在该阶段：它已成功取得 token、发送首个 `action=1` �
 
 ### 开了 VPN 后识别不稳定
 
-流式识别优先经直连物理路径访问 `open.feishu.cn` 并跳过 VPN/TUN，不绑定 `en0`。系统 URLSession 只在直连没有 HTTP 响应时回退。这不保证能穿过要求 `includeAllNetworks` 的企业 VPN，也不保证能绕过 Clash fake-ip DNS。整文件识别仍走系统 URLSession。
+流式识别在运行时 wifi/wired 网卡上解析 `open.feishu.cn`（bound UDP/53，跳过 `198.18.0.0/15`），再用 `IP_BOUND_IF` 直连，不绑定 `en0`，无 CDN IP 列表。factory/packet/finish 在直连失败时不会 hop 到系统 URLSession（URLSession 会走 VPN DNS 与 TUN）。没有可用物理路径的企业 `includeAllNetworks` VPN 仍可能失败。整文件识别仍走系统 URLSession。
 
 ### 识别卡在「识别中」很久
 
@@ -113,6 +113,10 @@ UAT 并非停在该阶段：它已成功取得 token、发送首个 `action=1` �
 ### 没有实时显示文字
 
 部分应用不提供可验证的 Accessibility 选区与范围读取能力。支持 AX 的目标会绑定原 PID 和精确 `AXUIElement`，并直接替换本次按键拥有的范围；LF 可作为多行文本数据写入，不会合成 Return。无法建立 AX 范围时，应用绑定当时的前台 PID，以一笔串行事务发送恰好所需的 grapheme-counted Backspace，再输入 replacement suffix；该键盘路由拒绝 LF 与所有 action controls。现有 HID event tap 与 synthetic writer 共用同一个锁门：monitor 安装和 baseline capture 原子完成，每个完整 key-down/key-up pair 都在连续持锁期间提交，物理事件必须先取得同一 gate 才能推进 epoch 并派发；tap timeout/user-input disable 也会推进 epoch，表示输入可观测性已丢失。AppKit local/global monitors 只作补充，任一 monitor 无法 arm 都会 fail closed。物理输入、应用切换、安全输入、目标漂移或交付不确定会永久停止本次按键的后续替换，不回滚、不重发、不切换 writer、不复制。应用不会询问光标位置，也不会在按键期间弹出新的权限请求；无 AX 路径仍无法证明同一 PID 内由应用自身造成的光标移动。`CGEventPostToPid` 没有目标接受回执，因此安装版 Release owner UAT 仍是必需门槛。
+
+### 启动时弹出钥匙串授权
+
+凭据仍在 login keychain（issue #18 / #36）。开机启动开关只读 UserDefaults，启动时不为此读取钥匙串。#35 的 data-protection 路径已撤回。
 
 ### 开机启动
 

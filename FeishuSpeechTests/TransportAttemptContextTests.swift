@@ -60,33 +60,49 @@ final class TransportAttemptContextTests: XCTestCase {
         XCTAssertEqual(keepAlive.callLog.snapshot(), ["keepAlive"])
     }
 
-    func test_keepAliveConnectClassErrorHopsOnceToURLSession() async throws {
-        let connectClassErrors: [Error] = [
-            FeishuAPIService.APIError.connectionFailed,
-            FeishuAPIService.APIError.timeout,
-            FeishuAPIService.APIError.networkError("probe")
+    func test_keepAliveConnectClassErrorDoesNotHopToURLSessionForFactoryPacketOrFinish() async {
+        let connectClassErrors: [FeishuAPIService.APIError] = [
+            .connectionFailed,
+            .timeout,
+            .networkError("probe")
         ]
+        let phases: [AttemptHTTPPhase] = [.factoryToken, .packet, .finish]
         let policy = StreamingDrainPolicy()
 
-        for error in connectClassErrors {
-            let keepAlive = MockKeepAliveTransport(results: [.failure(error)])
-            let context = makeProbedContext(
-                keepAlive: keepAlive,
-                policy: policy,
-                urlStatusCode: 200
-            )
+        for expectedError in connectClassErrors {
+            for phase in phases {
+                let keepAlive = MockKeepAliveTransport(results: [.failure(expectedError)])
+                let context = makeProbedContext(
+                    keepAlive: keepAlive,
+                    policy: policy,
+                    urlStatusCode: 200
+                )
 
-            let response = try await context.send(tokenRequest())
+                do {
+                    _ = try await context.send(attemptRequest(phase: phase))
+                    XCTFail("connect-class \(expectedError) for \(phase) must rethrow, not hop")
+                } catch let thrown as FeishuAPIService.APIError {
+                    assertSameConnectClass(thrown, expectedError, phase: phase)
+                } catch {
+                    XCTFail("expected \(expectedError) for \(phase), got \(error)")
+                }
 
-            XCTAssertEqual(response.statusCode, 200, "URLSession hop must win for \(error)")
-            XCTAssertFalse(context.isInvalidatedForTesting, "completed URLSession HTTP must not invalidate")
-            XCTAssertEqual(keepAlive.recordedSendCount, 1, "keep-alive must be primary for \(error)")
-            XCTAssertEqual(
-                keepAlive.recordedDeadlineNanoseconds,
-                policy.directSliceNanoseconds(for: .factoryToken)
-            )
-            XCTAssertEqual(URLSessionTestProbe.shared.recordedStartCount, 1, "hop once for \(error)")
-            XCTAssertEqual(keepAlive.callLog.snapshot(), ["keepAlive", "urlSession"])
+                XCTAssertEqual(
+                    keepAlive.recordedSendCount,
+                    1,
+                    "keep-alive must be primary for \(expectedError) \(phase)"
+                )
+                XCTAssertEqual(
+                    keepAlive.recordedDeadlineNanoseconds,
+                    policy.directSliceNanoseconds(for: phase)
+                )
+                XCTAssertEqual(
+                    URLSessionTestProbe.shared.recordedStartCount,
+                    0,
+                    "factory/packet/finish must not hop to URLSession for \(expectedError) \(phase)"
+                )
+                XCTAssertEqual(keepAlive.callLog.snapshot(), ["keepAlive"])
+            }
         }
     }
 
@@ -152,24 +168,40 @@ final class TransportAttemptContextTests: XCTestCase {
         XCTAssertFalse(context.isInvalidatedForTesting)
     }
 
-    func test_stickyURLSessionDoesNotCallKeepAliveAgain() async throws {
+    func test_keepAliveConnectClassMissRetriesKeepAliveOnNextSend() async throws {
         let keepAlive = MockKeepAliveTransport(results: [
             .failure(FeishuAPIService.APIError.connectionFailed),
-            .failure(FeishuAPIService.APIError.connectionFailed)
+            .success(DirectHTTPResponse(statusCode: 200, body: Data()))
         ])
         let context = makeProbedContext(
             keepAlive: keepAlive,
             urlStatusCode: 200
         )
 
-        let first = try await context.send(tokenRequest())
+        do {
+            _ = try await context.send(tokenRequest())
+            XCTFail("first connect-class miss must rethrow, not hop to URLSession")
+        } catch let error as FeishuAPIService.APIError {
+            switch error {
+            case .connectionFailed:
+                break
+            default:
+                XCTFail("expected connectionFailed, got \(error)")
+            }
+        } catch {
+            XCTFail("expected connectionFailed, got \(error)")
+        }
+
+        XCTAssertEqual(keepAlive.recordedSendCount, 1)
+        XCTAssertEqual(URLSessionTestProbe.shared.recordedStartCount, 0)
+        XCTAssertEqual(keepAlive.callLog.snapshot(), ["keepAlive"])
+
         let second = try await context.send(tokenRequest())
 
-        XCTAssertEqual(first.statusCode, 200)
         XCTAssertEqual(second.statusCode, 200)
-        XCTAssertEqual(keepAlive.recordedSendCount, 1)
-        XCTAssertEqual(URLSessionTestProbe.shared.recordedStartCount, 2)
-        XCTAssertEqual(keepAlive.callLog.snapshot(), ["keepAlive", "urlSession", "urlSession"])
+        XCTAssertEqual(keepAlive.recordedSendCount, 2)
+        XCTAssertEqual(URLSessionTestProbe.shared.recordedStartCount, 0)
+        XCTAssertEqual(keepAlive.callLog.snapshot(), ["keepAlive", "keepAlive"])
         XCTAssertFalse(context.isInvalidatedForTesting)
     }
 
@@ -181,9 +213,22 @@ final class TransportAttemptContextTests: XCTestCase {
             keepAlive: firstKeepAlive,
             urlStatusCode: 200
         )
-        let first = try await firstContext.send(tokenRequest())
-        XCTAssertEqual(first.statusCode, 200)
-        XCTAssertEqual(firstKeepAlive.callLog.snapshot(), ["keepAlive", "urlSession"])
+        do {
+            _ = try await firstContext.send(tokenRequest())
+            XCTFail("first context connect-class miss must rethrow, not hop")
+        } catch let error as FeishuAPIService.APIError {
+            switch error {
+            case .connectionFailed:
+                break
+            default:
+                XCTFail("expected connectionFailed, got \(error)")
+            }
+        } catch {
+            XCTFail("expected connectionFailed, got \(error)")
+        }
+        XCTAssertEqual(firstKeepAlive.recordedSendCount, 1)
+        XCTAssertEqual(URLSessionTestProbe.shared.recordedStartCount, 0)
+        XCTAssertEqual(firstKeepAlive.callLog.snapshot(), ["keepAlive"])
 
         let nextKeepAlive = MockKeepAliveTransport(results: [
             .success(DirectHTTPResponse(statusCode: 200, body: Data()))
@@ -200,7 +245,7 @@ final class TransportAttemptContextTests: XCTestCase {
         XCTAssertEqual(nextKeepAlive.callLog.snapshot(), ["keepAlive"])
     }
 
-    func test_sliceTimerCancelsHungDataForAndInvalidates() async {
+    func test_keepAliveConnectClassMissDoesNotStartHungURLSession() async {
         let policy = StreamingDrainPolicy(
             factoryTimeoutNanoseconds: 5_000_000_000,
             packetTimeoutNanoseconds: 5_000_000_000,
@@ -226,32 +271,53 @@ final class TransportAttemptContextTests: XCTestCase {
 
         do {
             _ = try await context.send(tokenRequest())
-            XCTFail("hung data(for:) must lose the URLSession slice")
+            XCTFail("connect-class miss must rethrow, not hop to a hung URLSession")
         } catch let error as FeishuAPIService.APIError {
             switch error {
             case .timeout, .connectionFailed, .networkError:
                 break
             default:
-                XCTFail("URLSession slice miss must stay connect-class, got \(error)")
+                XCTFail("keep-alive miss must stay connect-class, got \(error)")
             }
         } catch {
-            XCTFail("expected timeout, got \(error)")
+            XCTFail("expected connect-class error, got \(error)")
         }
 
         let elapsed = ContinuousClock.now - started
         XCTAssertLessThan(
             elapsed,
             Duration.seconds(1),
-            "URLSession fallback must use urlSessionSliceNanoseconds, not the 2s direct slice"
+            "connect-class miss must not wait for a URLSession slice"
         )
-        XCTAssertTrue(context.isInvalidatedForTesting)
         XCTAssertEqual(keepAlive.recordedSendCount, 1)
         XCTAssertEqual(
             keepAlive.recordedDeadlineNanoseconds,
             policy.directSliceNanoseconds(for: .factoryToken)
         )
-        XCTAssertEqual(keepAlive.callLog.snapshot().first, "keepAlive")
-        XCTAssertTrue(keepAlive.callLog.snapshot().contains("urlSession"))
+        XCTAssertEqual(URLSessionTestProbe.shared.recordedStartCount, 0)
+        XCTAssertEqual(keepAlive.callLog.snapshot(), ["keepAlive"])
+        XCTAssertFalse(keepAlive.callLog.snapshot().contains("urlSession"))
+    }
+
+    func test_abortDoesNotHopToURLSessionWhenKeepAliveIsPresent() async throws {
+        let keepAlive = MockKeepAliveTransport(results: [
+            .success(DirectHTTPResponse(statusCode: 200, body: Data()))
+        ])
+        let context = makeProbedContext(
+            keepAlive: keepAlive,
+            urlStatusCode: 500
+        )
+
+        let response = try await context.send(attemptRequest(phase: .abort))
+
+        XCTAssertEqual(response.statusCode, 200)
+        XCTAssertEqual(keepAlive.recordedSendCount, 1)
+        XCTAssertEqual(
+            keepAlive.recordedDeadlineNanoseconds,
+            StreamingDrainPolicy().directSliceNanoseconds(for: .abort)
+        )
+        XCTAssertEqual(URLSessionTestProbe.shared.recordedStartCount, 0)
+        XCTAssertEqual(keepAlive.callLog.snapshot(), ["keepAlive"])
     }
 
     func test_sessionCancelInvalidatesCapturedContext() async {
@@ -294,10 +360,29 @@ final class TransportAttemptContextTests: XCTestCase {
     }
 
     private func tokenRequest() -> AttemptHTTPRequest {
+        attemptRequest(phase: .factoryToken)
+    }
+
+    private func attemptRequest(phase: AttemptHTTPPhase) -> AttemptHTTPRequest {
         AttemptHTTPRequest(
-            request: URLRequest(url: URL(string: "https://open.feishu.cn/token")!),
-            phase: .factoryToken
+            request: URLRequest(url: URL(string: "https://open.feishu.cn/stream")!),
+            phase: phase
         )
+    }
+
+    private func assertSameConnectClass(
+        _ thrown: FeishuAPIService.APIError,
+        _ expected: FeishuAPIService.APIError,
+        phase: AttemptHTTPPhase
+    ) {
+        switch (thrown, expected) {
+        case (.timeout, .timeout), (.connectionFailed, .connectionFailed):
+            return
+        case (.networkError(let got), .networkError(let want)):
+            XCTAssertEqual(got, want, "networkError payload mismatch for \(phase)")
+        default:
+            XCTFail("expected \(expected) for \(phase), got \(thrown)")
+        }
     }
 }
 

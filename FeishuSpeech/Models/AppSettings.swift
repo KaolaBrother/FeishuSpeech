@@ -69,6 +69,12 @@ struct AppSettings: Codable {
         return settings
     }
 
+    static func launchAtLoginPreference(from defaults: UserDefaults) -> Bool {
+        defaults.data(forKey: storageKey)
+            .flatMap { try? JSONDecoder().decode(StoredSettings.self, from: $0) }?
+            .launchAtLogin ?? false
+    }
+
     func save() {
         let defaults = UserDefaults.standard
 

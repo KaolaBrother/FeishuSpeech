@@ -81,22 +81,25 @@ packet acknowledgement, including replay acknowledgement, resets the failure str
 monotonic attempt identity remains separate.
 
 Streaming factory, token refresh, and `stream_recognize` POSTs use a per-attempt
-`TransportAttemptContext`. Keep-alive Network.framework is primary: TLS SNI `open.feishu.cn`,
-`preferNoProxies`, `prohibitedInterfaceTypes = [.other]` (skip VPN/TUN), default peer
-authentication, no custom verify block, no `en0` bind, and no CDN IP list. Slice budgets are
-unchanged (factory 8+7+1 < 18, packet 14+14+1 < 30, finish 15+15+1 < 45); primary uses **direct**
-slices and URLSession fallback uses **urlSession** slices. Coordinator outer backstops remain
-factory 18 s, packet 30 s, and finish min(drain, 45 s). Streaming no longer hard-gates on
-`NWPathMonitor`; a tenant-token POST may proceed while the path is unsatisfied, and is not sent if
-TLS to `open.feishu.cn` fails.
+`TransportAttemptContext`. Keep-alive is primary. The send path is `BoundTLSSocket`: bound UDP/53
+DNS on the runtime wifi/wired interface (DHCP option 6, then recursor hostnames `dns.alidns.com` /
+`public1.114dns.com`), skip `198.18.0.0/15` via bitmask, TCP `IP_BOUND_IF` to remaining A records,
+CFStream TLS with peer name `open.feishu.cn` and chain validation on. There is no custom verify
+block, no `en0` string, no CDN IP list, and no dotted-quad literals. `open.feishu.cn` is not
+resolved with system `getaddrinfo`. A connected socket whose local IPv4 has prefix `198.18.` is
+closed without HTTP. Slice budget fields are unchanged (factory 8+7+1 < 18, packet 14+14+1 < 30,
+finish 15+15+1 < 45); per-request keep-alive deadlines are **direct** slices. Coordinator outer
+backstops remain factory 18 s, packet 30 s, and finish min(drain, 45 s). Streaming no longer
+hard-gates on `NWPathMonitor`; a tenant-token POST may proceed while the path is unsatisfied, and
+is not sent if TLS to `open.feishu.cn` fails.
 
-A keep-alive connect-class / no-HTTP miss hops once to the per-attempt `URLSession`
-(`waitsForConnectivity = false`) inside the same watched operation. Completed HTTP, including 4xx,
-does not hop. `CancellationError` does not hop. Keep-alive leftover is sliced at the raw framed
-message end (Content-Length or complete chunked trailers), not decoded `body.count`. Keep-alive
-success is sticky-direct for the rest of the attempt; URLSession fallback success is
-sticky-URLSession. A new attempt context starts on keep-alive again. Abort uses URLSession unless
-already sticky-direct. A first-send keep-alive miss does not invalidate URLSession; a mid-attempt
+A keep-alive connect-class / no-HTTP miss **rethrows** and does **not** hop factory/packet/finish
+to URLSession. Completed HTTP, including 4xx, does not hop. `CancellationError` does not hop.
+Keep-alive leftover is sliced at the raw framed message end (Content-Length or complete chunked
+trailers), not decoded `body.count`. Keep-alive success is sticky-direct for the rest of the
+attempt. A new attempt context starts on keep-alive again. Abort uses keep-alive when a session is
+present; URLSession only when keep-alive is absent. A first-send keep-alive miss on the production
+path drops that session; coordinator outer retry reconnects on a new context. A mid-attempt
 sticky-direct drop still does. Whole-file `recognizeSpeech` keeps the separate `executeURLRequest`
 path. There is no whole-file fallback or parallel request chain.
 
@@ -296,7 +299,9 @@ Issue #18 moves Feishu App ID and App Secret storage behind `CredentialStoring`
 (see `docs/decisions/D-18-01.md`). `AppSettings.credentialStore` defaults to
 `KeychainCredentialStore`, which stores generic password items through
 Security.framework using service `Siji.FeishuSpeech.credentials` and account
-values `appId` / `appSecret`.
+values `appId` / `appSecret` in the login keychain (issue #18). Issue #35
+data-protection storage is withdrawn (issue #36): those reads returned -34018
+and blanked settings.
 
 `AppSettings` still exposes `appId` and `appSecret` to the app at runtime, but
 its custom `Codable` implementation does not encode those fields into
@@ -316,6 +321,13 @@ Loading settings performs a guarded migration from legacy credentials:
 `SettingsView` keeps credential edits in transient `@State` fields and saves via
 `MainViewModel.updateSettings(...)`, which calls `AppSettings.save()`. It does
 not use `@AppStorage` for App ID or App Secret.
+
+`AppDelegate.applicationDidFinishLaunching` applies
+`LoginItemService.setEnabled(AppSettings.launchAtLoginPreference(from: .standard))`
+and does not call `AppSettings.load()`. `launchAtLoginPreference` decodes
+`launchAtLogin` from the given UserDefaults and does not touch
+`AppSettings.credentialStore`. Missing payload is false. `MainViewModel.init`
+still loads credentials once (the remaining launch read and the migration trigger).
 
 ## AppDelegate and MainViewModel — sleep/wake lifecycle
 

@@ -24,6 +24,7 @@ nonisolated final class TransportAttemptContext: @unchecked Sendable {
     private let lock = NSLock()
     private var session: URLSession
     private var keepAlive: (any DirectKeepAliveTransport)?
+    private let usesInjectedKeepAlive: Bool
     private var stickyDirect = false
     private var stickyURLSession = false
     private var isInvalidated = false
@@ -45,6 +46,7 @@ nonisolated final class TransportAttemptContext: @unchecked Sendable {
             )
         }
         self.keepAlive = keepAlive
+        self.usesInjectedKeepAlive = keepAlive != nil
     }
 
     var capturedSession: URLSession {
@@ -105,7 +107,7 @@ nonisolated final class TransportAttemptContext: @unchecked Sendable {
             throw CancellationError()
         }
         let useDirect = stickyDirect
-        let useURLSession = stickyURLSession
+        let keepAlivePresent = keepAlive != nil
         let session = session
         lock.unlock()
 
@@ -113,35 +115,16 @@ nonisolated final class TransportAttemptContext: @unchecked Sendable {
             return try await sendDirect(attempt)
         }
 
-        let urlSessionSlice = policy.urlSessionSliceNanoseconds(for: attempt.phase)
-        if useURLSession || attempt.phase == .abort {
-            var request = attempt.request
-            if attempt.phase != .abort {
-                request.timeoutInterval = TimeInterval(urlSessionSlice) / 1_000_000_000
-            }
+        if attempt.phase == .abort && !keepAlivePresent {
+            let urlSessionSlice = policy.urlSessionSliceNanoseconds(for: attempt.phase)
             return try await sendURLSessionSlice(
-                request,
+                attempt.request,
                 session: session,
                 sliceNanoseconds: urlSessionSlice
             )
         }
 
-        do {
-            return try await sendDirect(attempt)
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch {
-            if Task.isCancelled {
-                throw CancellationError()
-            }
-            var request = attempt.request
-            request.timeoutInterval = TimeInterval(urlSessionSlice) / 1_000_000_000
-            return try await sendURLSessionSlice(
-                request,
-                session: session,
-                sliceNanoseconds: urlSessionSlice
-            )
-        }
+        return try await sendDirect(attempt)
     }
 
     private func sendURLSessionSlice(
@@ -227,9 +210,13 @@ nonisolated final class TransportAttemptContext: @unchecked Sendable {
         } catch {
             lock.lock()
             stickyDirect = false
-            self.keepAlive = nil
+            if !usesInjectedKeepAlive {
+                self.keepAlive = nil
+            }
             lock.unlock()
-            keepAlive.forceCancel()
+            if !usesInjectedKeepAlive || wasStickyDirect {
+                keepAlive.forceCancel()
+            }
             if wasStickyDirect {
                 invalidate()
             }

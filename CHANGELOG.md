@@ -16,6 +16,8 @@
 - 新增 `MainViewModelTests` 覆盖 `MonitoringState` 失败映射、恢复清除和 cleanup 订阅释放路径（issues #22/#23/#24）
 
 ### Fixed
+- 修复 VPN 开启时流式识别仍走海外 CDN / TUN：keep-alive 在运行时物理网卡上做 bound UDP/53 DNS（DHCP option 6，再回退 recursor 主机名 `dns.alidns.com` / `public1.114dns.com`，跳过 `198.18.0.0/15`），TCP `IP_BOUND_IF` + CFStream TLS（SNI `open.feishu.cn`，证书链校验开启）。无 IP 字面量、不绑定 `en0`、无自定义 TLS verify。factory/packet/finish 在 keep-alive 连接类失败时不再 hop 到 URLSession。整文件识别仍走 URLSession（issue #34）
+- 修复 build 12 每次启动都要重填 App ID/Secret：#35 的 data-protection keychain 在无 `application-identifier` 时返回 -34018，读不到仍在 login keychain 的凭据。恢复 issue #18 的 login-keychain 读写；AppDelegate 仍只用 `launchAtLoginPreference(from:)` 同步开机启动（issue #36）
 - 修复 VPN 开启时流式识别不稳定：keep-alive 直连改为 primary 并禁止 TUN（`.other`），不绑定 `en0`；同一 watched factory/packet/finish 操作仅在无 HTTP 响应时 hop 一次到 URLSession。已完成 HTTP（含 4xx）与 CancellationError 不 hop；keep-alive 成功后粘性直连，URLSession 回退成功后粘性 URLSession；下一 attempt 重新从 keep-alive 开始（issue #33）
 - 菜单栏 extra 改为仅图标：icon+「就绪」文案在刘海屏上会落进 notch，菜单里看不到应用（issues #28–#31）
 - keep-alive 粘性连接的 leftover 按完整 HTTP 帧切分（Content-Length 或 chunked trailer），不再用解码后的 `body.count`，避免第二条 POST 读到分帧残渣（issue #31）

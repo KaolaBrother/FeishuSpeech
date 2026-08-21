@@ -37,8 +37,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 PermissionManager.shared.refreshSecureInputStatus()
             }
 
-        let settings = AppSettings.load()
-        LoginItemService.setEnabled(settings.launchAtLogin)
+        LoginItemService.setEnabled(AppSettings.launchAtLoginPreference(from: .standard))
 
         registerWorkspaceWakeObservers()
     }

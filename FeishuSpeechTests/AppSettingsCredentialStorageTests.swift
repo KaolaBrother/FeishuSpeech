@@ -1,16 +1,21 @@
+import Foundation
+import Security
 import XCTest
+
 @testable import FeishuSpeech
 
 final class AppSettingsCredentialStorageTests: XCTestCase {
 
     private var credentialStore: FakeCredentialStore!
     private var keychainStore: KeychainCredentialStore!
+    private var isolatedServiceName: String!
     private let defaults = UserDefaults.standard
 
     override func setUp() {
         super.setUp()
         credentialStore = FakeCredentialStore()
-        keychainStore = KeychainCredentialStore(service: "Siji.FeishuSpeech.tests.\(UUID().uuidString)")
+        isolatedServiceName = "Siji.FeishuSpeech.tests.\(UUID().uuidString)"
+        keychainStore = KeychainCredentialStore(service: isolatedServiceName)
         try? keychainStore.delete(account: .appId)
         try? keychainStore.delete(account: .appSecret)
         AppSettings.credentialStore = credentialStore
@@ -26,7 +31,11 @@ final class AppSettingsCredentialStorageTests: XCTestCase {
         AppSettings.credentialStore = KeychainCredentialStore()
         try? keychainStore.delete(account: .appId)
         try? keychainStore.delete(account: .appSecret)
+        if let isolatedServiceName {
+            deleteGenericPasswords(service: isolatedServiceName)
+        }
         keychainStore = nil
+        isolatedServiceName = nil
         credentialStore = nil
         super.tearDown()
     }
@@ -245,6 +254,157 @@ final class AppSettingsCredentialStorageTests: XCTestCase {
             where status == errSecMissingEntitlement || status == errSecInteractionNotAllowed {
             throw XCTSkip("Keychain is unavailable in this unit-test host: \(status)")
         }
+    }
+
+    func test_keychainCredentialStoreSource_usesLoginKeychainWithoutDataProtectionFlag() throws {
+        let source = try productionSource(relativePath: "FeishuSpeech/Services/KeychainCredentialStore.swift")
+
+        XCTAssertFalse(
+            source.contains("kSecUseDataProtectionKeychain"),
+            "issue #36: data-protection queries blanked existing login-keychain credentials (-34018)"
+        )
+    }
+
+    func test_appDelegateDidFinishLaunching_doesNotLoadAppSettingsCredentials() throws {
+        let source = try productionSource(relativePath: "FeishuSpeech/App/AppDelegate.swift")
+        let method = try XCTUnwrap(
+            methodBody(named: "applicationDidFinishLaunching", in: source),
+            "AppDelegate.applicationDidFinishLaunching must exist"
+        )
+
+        XCTAssertFalse(
+            method.contains("AppSettings.load"),
+            "applicationDidFinishLaunching must not call AppSettings.load(); that opens the credential store and surfaces login-keychain ACL dialogs"
+        )
+        XCTAssertTrue(
+            method.contains("launchAtLoginPreference"),
+            "applicationDidFinishLaunching must apply launch-at-login from UserDefaults without reading credentials"
+        )
+        XCTAssertTrue(
+            method.contains("LoginItemService.setEnabled"),
+            "applicationDidFinishLaunching must still apply the launch-at-login preference"
+        )
+    }
+
+    func test_appSettingsSource_declaresLaunchAtLoginPreferenceReader() throws {
+        let source = try productionSource(relativePath: "FeishuSpeech/Models/AppSettings.swift")
+
+        XCTAssertTrue(
+            source.contains("func launchAtLoginPreference(from"),
+            "AppSettings must expose launchAtLoginPreference(from:) so launch-at-login can be read without the credential store"
+        )
+    }
+
+    func test_launchAtLoginPreference_readsEncodedPayloadWithoutTouchingCredentialStore() throws {
+        let suiteName = "Siji.FeishuSpeech.tests.launchAtLogin.\(UUID().uuidString)"
+        let suite = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { suite.removePersistentDomain(forName: suiteName) }
+
+        let inaccessible = InaccessibleCredentialStore()
+        AppSettings.credentialStore = inaccessible
+
+        suite.set(
+            Data("""
+            {"autoInsert":false,"playSound":false,"launchAtLogin":true}
+            """.utf8),
+            forKey: AppSettings.storageKey
+        )
+        XCTAssertTrue(AppSettings.launchAtLoginPreference(from: suite))
+        XCTAssertEqual(inaccessible.readCount, 0, "launch-at-login preference must not read the credential store")
+        XCTAssertEqual(inaccessible.saveCount, 0)
+        XCTAssertEqual(inaccessible.deleteCount, 0)
+
+        suite.set(
+            Data("""
+            {"autoInsert":true,"playSound":true,"launchAtLogin":false}
+            """.utf8),
+            forKey: AppSettings.storageKey
+        )
+        XCTAssertFalse(AppSettings.launchAtLoginPreference(from: suite))
+        XCTAssertEqual(inaccessible.readCount, 0)
+        XCTAssertEqual(inaccessible.saveCount, 0)
+        XCTAssertEqual(inaccessible.deleteCount, 0)
+
+        suite.removeObject(forKey: AppSettings.storageKey)
+        XCTAssertFalse(AppSettings.launchAtLoginPreference(from: suite))
+        XCTAssertEqual(inaccessible.readCount, 0)
+        XCTAssertEqual(inaccessible.saveCount, 0)
+        XCTAssertEqual(inaccessible.deleteCount, 0)
+    }
+
+    private func productionSource(relativePath: String) throws -> String {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent(relativePath)
+        return try String(contentsOf: url, encoding: .utf8)
+    }
+
+    private func methodBody(named name: String, in source: String) -> String? {
+        guard let nameRange = source.range(of: "func \(name)") else {
+            return nil
+        }
+        guard let open = source[nameRange.upperBound...].firstIndex(of: "{") else {
+            return nil
+        }
+
+        var depth = 0
+        var index = open
+        while index < source.endIndex {
+            let character = source[index]
+            if character == "{" {
+                depth += 1
+            } else if character == "}" {
+                depth -= 1
+                if depth == 0 {
+                    return String(source[open...index])
+                }
+            }
+            index = source.index(after: index)
+        }
+        return nil
+    }
+
+    private func deleteGenericPasswords(service: String) {
+        for account in [CredentialAccount.appId, CredentialAccount.appSecret] {
+            let base: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+                kSecAttrAccount as String: account.rawValue
+            ]
+            SecItemDelete(base as CFDictionary)
+            var dataProtectionQuery = base
+            dataProtectionQuery[kSecUseDataProtectionKeychain as String] = true
+            SecItemDelete(dataProtectionQuery as CFDictionary)
+        }
+    }
+}
+
+private final class InaccessibleCredentialStore: CredentialStoring {
+    enum AccessError: Error {
+        case forced
+    }
+
+    private(set) var readCount = 0
+    private(set) var saveCount = 0
+    private(set) var deleteCount = 0
+
+    func read(account: CredentialAccount) throws -> String? {
+        readCount += 1
+        _ = account
+        throw AccessError.forced
+    }
+
+    func save(_ value: String, account: CredentialAccount) throws {
+        saveCount += 1
+        _ = (value, account)
+        throw AccessError.forced
+    }
+
+    func delete(account: CredentialAccount) throws {
+        deleteCount += 1
+        _ = account
+        throw AccessError.forced
     }
 }
 
