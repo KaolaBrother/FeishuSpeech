@@ -80,16 +80,25 @@ while a previously failed unowned index may claim once when replay first succeed
 packet acknowledgement, including replay acknowledgement, resets the failure streak to zero;
 monotonic attempt identity remains separate.
 
-Streaming factory, token refresh, and `stream_recognize` POSTs use a
-per-attempt `URLSession` (`waitsForConnectivity = false`) with a transport-owned slice timer that
-`invalidateAndCancel`s a hung `data(for:)`. Coordinator outer backstops are factory 18 s, packet 30 s,
-and finish min(drain, 45 s). Streaming no longer hard-gates on `NWPathMonitor`; a tenant-token POST
-may proceed while the path is unsatisfied, and is not sent if TLS to `open.feishu.cn` fails.
-When the URLSession slice produces no HTTP response, the same watched operation falls back once to
-an attempt-scoped keep-alive `NWConnection` (`preferNoProxies`, SNI `open.feishu.cn`). Keep-alive
-leftover is sliced at the raw framed message end (Content-Length or complete chunked trailers), not
-decoded `body.count`. Completed HTTP does not hop. Whole-file `recognizeSpeech` keeps the separate
-`executeURLRequest` path. There is no whole-file fallback or parallel request chain.
+Streaming factory, token refresh, and `stream_recognize` POSTs use a per-attempt
+`TransportAttemptContext`. Keep-alive Network.framework is primary: TLS SNI `open.feishu.cn`,
+`preferNoProxies`, `prohibitedInterfaceTypes = [.other]` (skip VPN/TUN), default peer
+authentication, no custom verify block, no `en0` bind, and no CDN IP list. Slice budgets are
+unchanged (factory 8+7+1 < 18, packet 14+14+1 < 30, finish 15+15+1 < 45); primary uses **direct**
+slices and URLSession fallback uses **urlSession** slices. Coordinator outer backstops remain
+factory 18 s, packet 30 s, and finish min(drain, 45 s). Streaming no longer hard-gates on
+`NWPathMonitor`; a tenant-token POST may proceed while the path is unsatisfied, and is not sent if
+TLS to `open.feishu.cn` fails.
+
+A keep-alive connect-class / no-HTTP miss hops once to the per-attempt `URLSession`
+(`waitsForConnectivity = false`) inside the same watched operation. Completed HTTP, including 4xx,
+does not hop. `CancellationError` does not hop. Keep-alive leftover is sliced at the raw framed
+message end (Content-Length or complete chunked trailers), not decoded `body.count`. Keep-alive
+success is sticky-direct for the rest of the attempt; URLSession fallback success is
+sticky-URLSession. A new attempt context starts on keep-alive again. Abort uses URLSession unless
+already sticky-direct. A first-send keep-alive miss does not invalidate URLSession; a mid-attempt
+sticky-direct drop still does. Whole-file `recognizeSpeech` keeps the separate `executeURLRequest`
+path. There is no whole-file fallback or parallel request chain.
 
 Each successful response exposes one complete opaque recognition snapshot. Packet-index replay
 ownership is independent: each eligible journal index may be admitted once, but an equal snapshot

@@ -23,11 +23,16 @@ nonisolated final class TransportAttemptContext: @unchecked Sendable {
     private let policy: StreamingDrainPolicy
     private let lock = NSLock()
     private var session: URLSession
-    private var keepAlive: DirectFeishuKeepAliveSession?
+    private var keepAlive: (any DirectKeepAliveTransport)?
     private var stickyDirect = false
+    private var stickyURLSession = false
     private var isInvalidated = false
 
-    init(policy: StreamingDrainPolicy, session: URLSession? = nil) {
+    init(
+        policy: StreamingDrainPolicy,
+        session: URLSession? = nil,
+        keepAlive: (any DirectKeepAliveTransport)? = nil
+    ) {
         self.policy = policy
         if let session {
             self.session = session
@@ -39,6 +44,7 @@ nonisolated final class TransportAttemptContext: @unchecked Sendable {
                 )
             )
         }
+        self.keepAlive = keepAlive
     }
 
     var capturedSession: URLSession {
@@ -82,6 +88,7 @@ nonisolated final class TransportAttemptContext: @unchecked Sendable {
         }
         isInvalidated = true
         stickyDirect = false
+        stickyURLSession = false
         let session = session
         let keepAlive = keepAlive
         self.keepAlive = nil
@@ -98,36 +105,42 @@ nonisolated final class TransportAttemptContext: @unchecked Sendable {
             throw CancellationError()
         }
         let useDirect = stickyDirect
+        let useURLSession = stickyURLSession
         let session = session
         lock.unlock()
 
         if useDirect {
             return try await sendDirect(attempt)
         }
-        if attempt.phase == .abort {
-            return try await sendURLSessionSlice(
-                attempt.request,
-                session: session,
-                sliceNanoseconds: policy.urlSessionSliceNanoseconds(for: attempt.phase)
-            )
-        }
 
-        var request = attempt.request
-        let slice = policy.urlSessionSliceNanoseconds(for: attempt.phase)
-        request.timeoutInterval = TimeInterval(slice) / 1_000_000_000
-        do {
+        let urlSessionSlice = policy.urlSessionSliceNanoseconds(for: attempt.phase)
+        if useURLSession || attempt.phase == .abort {
+            var request = attempt.request
+            if attempt.phase != .abort {
+                request.timeoutInterval = TimeInterval(urlSessionSlice) / 1_000_000_000
+            }
             return try await sendURLSessionSlice(
                 request,
                 session: session,
-                sliceNanoseconds: slice
+                sliceNanoseconds: urlSessionSlice
             )
+        }
+
+        do {
+            return try await sendDirect(attempt)
         } catch is CancellationError {
             throw CancellationError()
         } catch {
             if Task.isCancelled {
                 throw CancellationError()
             }
-            return try await sendDirect(attempt)
+            var request = attempt.request
+            request.timeoutInterval = TimeInterval(urlSessionSlice) / 1_000_000_000
+            return try await sendURLSessionSlice(
+                request,
+                session: session,
+                sliceNanoseconds: urlSessionSlice
+            )
         }
     }
 
@@ -176,12 +189,16 @@ nonisolated final class TransportAttemptContext: @unchecked Sendable {
 
         switch winner {
         case .success(let response):
+            lock.lock()
+            stickyURLSession = true
+            lock.unlock()
+            logger.info("transport=urlsession")
             return response
         case .failure(let error):
-            session.invalidateAndCancel()
+            invalidate()
             throw mapTransportError(error)
         case nil:
-            session.invalidateAndCancel()
+            invalidate()
             throw FeishuAPIService.APIError.timeout
         }
     }
@@ -192,6 +209,7 @@ nonisolated final class TransportAttemptContext: @unchecked Sendable {
             lock.unlock()
             throw CancellationError()
         }
+        let wasStickyDirect = stickyDirect
         let keepAlive = keepAlive ?? DirectFeishuKeepAliveSession()
         self.keepAlive = keepAlive
         lock.unlock()
@@ -207,7 +225,17 @@ nonisolated final class TransportAttemptContext: @unchecked Sendable {
             logger.info("transport=direct")
             return response
         } catch {
-            invalidate()
+            lock.lock()
+            stickyDirect = false
+            self.keepAlive = nil
+            lock.unlock()
+            keepAlive.forceCancel()
+            if wasStickyDirect {
+                invalidate()
+            }
+            if error is CancellationError || Task.isCancelled {
+                throw CancellationError()
+            }
             throw mapTransportError(error)
         }
     }

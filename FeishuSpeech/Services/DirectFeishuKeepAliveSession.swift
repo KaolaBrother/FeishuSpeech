@@ -10,7 +10,12 @@ private nonisolated let logger = Logger(
 
 private nonisolated let feishuDirectHost = "open.feishu.cn"
 
-nonisolated final class DirectFeishuKeepAliveSession: @unchecked Sendable {
+nonisolated protocol DirectKeepAliveTransport: AnyObject, Sendable {
+    func send(_ request: URLRequest, deadlineNanoseconds: UInt64) async throws -> DirectHTTPResponse
+    func forceCancel()
+}
+
+nonisolated final class DirectFeishuKeepAliveSession: DirectKeepAliveTransport, @unchecked Sendable {
     private struct InFlight {
         let continuation: CheckedContinuation<DirectHTTPResponse, Error>
         let request: URLRequest
@@ -34,6 +39,7 @@ nonisolated final class DirectFeishuKeepAliveSession: @unchecked Sendable {
         )
         let parameters = NWParameters(tls: tlsOptions)
         parameters.preferNoProxies = true
+        parameters.prohibitedInterfaceTypes = [.other]
         return parameters
     }
 

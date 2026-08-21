@@ -16,6 +16,7 @@
 - 新增 `MainViewModelTests` 覆盖 `MonitoringState` 失败映射、恢复清除和 cleanup 订阅释放路径（issues #22/#23/#24）
 
 ### Fixed
+- 修复 VPN 开启时流式识别不稳定：keep-alive 直连改为 primary 并禁止 TUN（`.other`），不绑定 `en0`；同一 watched factory/packet/finish 操作仅在无 HTTP 响应时 hop 一次到 URLSession。已完成 HTTP（含 4xx）与 CancellationError 不 hop；keep-alive 成功后粘性直连，URLSession 回退成功后粘性 URLSession；下一 attempt 重新从 keep-alive 开始（issue #33）
 - 菜单栏 extra 改为仅图标：icon+「就绪」文案在刘海屏上会落进 notch，菜单里看不到应用（issues #28–#31）
 - keep-alive 粘性连接的 leftover 按完整 HTTP 帧切分（Content-Length 或 chunked trailer），不再用解码后的 `body.count`，避免第二条 POST 读到分帧残渣（issue #31）
 - Release 配置关闭 code coverage 插桩，避免已安装菜单栏应用空闲占用约 9% CPU（issues #28–#31）

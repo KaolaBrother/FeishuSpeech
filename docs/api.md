@@ -20,16 +20,26 @@ The production Fn interaction never calls the compatibility-only whole-file endp
 streaming failures may create a fresh streaming session and replay the current hold's ordered PCM
 journal, but never fall back to whole-file recognition.
 
-Streaming tenant-token and `stream_recognize` POSTs use a per-attempt `URLSession` (not
-`URLSession.shared`) with phase-aligned slice timers. Factory slice 8 s, packet 14 s, finish 15 s;
-the coordinator backstop is 18 / 30 / min(drain, 45) seconds. `NWPathMonitor` is not a hard gate on
-the streaming path (D2): App Secret may be posted over HTTPS while the path is unsatisfied; it is
-not sent if TLS to `open.feishu.cn` fails. Legacy `file_recognize` still uses `executeURLRequest`
-and may keep the path-monitor gate. A URLSession connect-class / no-response outcome hops once to
-keep-alive Network.framework (`preferNoProxies`, SNI `open.feishu.cn`) inside the same watched
-operation. Keep-alive leftover on that sticky socket is the bytes after one complete framed
-message (Content-Length body, or decoded chunked payload plus last-chunk and trailers), not
-`response.body.count`. Completed HTTP 401/407/403/unparseable 400 does not hop.
+Streaming tenant-token and `stream_recognize` POSTs use a per-attempt `TransportAttemptContext`.
+Keep-alive Network.framework is primary: TLS SNI `open.feishu.cn`, `preferNoProxies = true`,
+`prohibitedInterfaceTypes = [.other]` (skip VPN/TUN), default peer authentication, no custom
+verify block, no `en0` bind, no CDN IP list, and no user-facing toggle. Slice budgets are
+unchanged (factory 8+7+1 < 18, packet 14+14+1 < 30, finish 15+15+1 < 45); primary uses **direct**
+slices and URLSession fallback uses **urlSession** slices. Coordinator backstop remains 18 / 30 /
+min(drain, 45) seconds. `NWPathMonitor` is not a hard gate on the streaming path (D2): App Secret
+may be posted over HTTPS while the path is unsatisfied; it is not sent if TLS to `open.feishu.cn`
+fails. Legacy `file_recognize` / `recognizeSpeech` still use `executeURLRequest` and may keep the
+path-monitor gate.
+
+A keep-alive connect-class / no-HTTP miss hops once to the per-attempt `URLSession`
+(`waitsForConnectivity = false`) inside the same watched operation. Completed HTTP (including 4xx)
+does not hop. `CancellationError` does not hop. Keep-alive leftover on that sticky socket is the
+bytes after one complete framed message (Content-Length body, or decoded chunked payload plus
+last-chunk and trailers), not `response.body.count`. Keep-alive success is sticky-direct for the
+rest of the attempt; URLSession fallback success is sticky-URLSession. A new attempt context
+starts on keep-alive again. Abort uses URLSession unless the attempt is already sticky-direct. A
+first-send keep-alive miss does not invalidate URLSession; a mid-attempt sticky-direct drop still
+does.
 
 ### Authentication startup and public failures
 
@@ -296,7 +306,8 @@ pair with no visible text remains a PARTIAL result and does not authorize global
 retries, destructive editing, or fallback after uncertainty.
 
 See [D-25-01](decisions/D-25-01.md), [D-26-01](decisions/D-26-01.md),
-[D-27-01](decisions/D-27-01.md), and the
+[D-27-01](decisions/D-27-01.md), [D-28-01](decisions/D-28-01.md),
+[D-32-01](decisions/D-32-01.md), and the
 [full design](streaming-speech-design.md) for state, lifecycle, failure, fallback, privacy, and test
 requirements.
 

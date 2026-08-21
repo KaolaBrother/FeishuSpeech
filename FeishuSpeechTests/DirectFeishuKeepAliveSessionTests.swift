@@ -11,14 +11,22 @@ private let logger = Logger(
 )
 
 final class DirectFeishuKeepAliveSessionTests: XCTestCase {
-    func test_parametersUsePreferNoProxiesAndFeishuSNIHost() {
+    func test_parametersPreferNoProxiesAndProhibitOtherInterfaceTypes() {
         logger.info("DirectFeishuKeepAliveSessionTests starting")
         let parameters = DirectFeishuKeepAliveSession.makeParameters()
         XCTAssertTrue(parameters.preferNoProxies)
+        XCTAssertEqual(
+            parameters.prohibitedInterfaceTypes?.contains(.other),
+            true,
+            "keep-alive must skip VPN/TUN by prohibiting InterfaceType.other"
+        )
+    }
 
+    func test_productionSourcePinsOpenFeishuHostWithoutEn0OrCustomVerifyBlock() {
         let production = try? String(contentsOfFile: keepAliveSourcePath, encoding: .utf8)
         XCTAssertNotNil(production)
         XCTAssertTrue(production?.contains("open.feishu.cn") == true)
+        XCTAssertFalse(production?.contains("en0") == true)
         XCTAssertFalse(production?.contains("sec_protocol_options_set_verify_block") == true)
     }
 
