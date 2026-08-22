@@ -7,13 +7,15 @@ struct SettingsView: View {
     @State private var autoInsert = true
     @State private var playSound = true
     @State private var launchAtLogin = false
+    @State private var reviewBeforeInsert = true
 
     var body: some View {
         TabView {
             GeneralSettingsView(
                 launchAtLogin: $launchAtLogin,
                 autoInsert: $autoInsert,
-                playSound: $playSound
+                playSound: $playSound,
+                reviewBeforeInsert: $reviewBeforeInsert
             )
             .tabItem {
                 Label("通用", systemImage: "gearshape")
@@ -34,7 +36,8 @@ struct SettingsView: View {
                 appSecret: appSecret,
                 autoInsert: autoInsert,
                 playSound: playSound,
-                launchAtLogin: launchAtLogin
+                launchAtLogin: launchAtLogin,
+                reviewBeforeInsert: reviewBeforeInsert
             )
         }
         .onAppear {
@@ -48,6 +51,7 @@ struct SettingsView: View {
         autoInsert = viewModel.settings.autoInsert
         playSound = viewModel.settings.playSound
         launchAtLogin = viewModel.settings.launchAtLogin
+        reviewBeforeInsert = viewModel.settings.reviewBeforeInsert
     }
 }
 
@@ -55,6 +59,7 @@ struct GeneralSettingsView: View {
     @Binding var launchAtLogin: Bool
     @Binding var autoInsert: Bool
     @Binding var playSound: Bool
+    @Binding var reviewBeforeInsert: Bool
 
     var body: some View {
         Form {
@@ -63,7 +68,19 @@ struct GeneralSettingsView: View {
             }
 
             Section("录音") {
-                Toggle("自动插入文字", isOn: $autoInsert)
+                Toggle("输入前预览", isOn: $reviewBeforeInsert)
+                Text(
+                    reviewBeforeInsert
+                        ? "按住 Fn 期间显示流式预览；松开后结算，编辑后显式输入。"
+                        : "关闭后保持现有连续输出模式；自动插入文字设置仍然生效。"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+                if !reviewBeforeInsert {
+                    Toggle("自动插入文字", isOn: $autoInsert)
+                }
                 Toggle("播放提示音", isOn: $playSound)
             }
 
@@ -71,7 +88,11 @@ struct GeneralSettingsView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("按住 Fn 键开始录音")
                     Text("松开 Fn 键自动识别")
-                    Text("识别结果将自动输入到当前光标位置")
+                    if reviewBeforeInsert {
+                        Text("确认后输入到原始光标位置")
+                    } else {
+                        Text("识别结果按兼容设置输出")
+                    }
                 }
                 .font(.callout)
                 .foregroundStyle(.secondary)

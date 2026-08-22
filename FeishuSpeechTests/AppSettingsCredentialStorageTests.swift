@@ -187,7 +187,8 @@ final class AppSettingsCredentialStorageTests: XCTestCase {
             appSecret: "encoded-app-secret",
             autoInsert: true,
             playSound: false,
-            launchAtLogin: true
+            launchAtLogin: true,
+            reviewBeforeInsert: true
         )
 
         let data = try JSONEncoder().encode(settings)
@@ -200,6 +201,55 @@ final class AppSettingsCredentialStorageTests: XCTestCase {
         XCTAssertTrue(json.contains("autoInsert"))
         XCTAssertTrue(json.contains("playSound"))
         XCTAssertTrue(json.contains("launchAtLogin"))
+        XCTAssertTrue(json.contains("reviewBeforeInsert"))
+    }
+
+    func test_legacyStoredPayload_defaultsReviewBeforeInsertToTrue() {
+        defaults.set(
+            Data("{\"autoInsert\":false,\"playSound\":true,\"launchAtLogin\":true}".utf8),
+            forKey: AppSettings.storageKey
+        )
+
+        let loaded = AppSettings.load()
+
+        XCTAssertTrue(
+            loaded.reviewBeforeInsert,
+            "payloads written before issue #38 must opt into review-first instead of decoding as false"
+        )
+        XCTAssertFalse(loaded.autoInsert)
+        XCTAssertTrue(loaded.playSound)
+        XCTAssertTrue(loaded.launchAtLogin)
+    }
+
+    func test_reviewBeforeInsert_false_roundTrips_withoutChangingCompatibilityPreferences() {
+        var settings = AppSettings(
+            appId: "",
+            appSecret: "",
+            autoInsert: false,
+            playSound: false,
+            launchAtLogin: true,
+            reviewBeforeInsert: false
+        )
+
+        settings.save()
+
+        let storedData = defaults.data(forKey: AppSettings.storageKey)
+        XCTAssertNotNil(storedData)
+        XCTAssertTrue(
+            String(data: storedData ?? Data(), encoding: .utf8)?.contains("reviewBeforeInsert") == true,
+            "the explicit compatibility choice must be persisted"
+        )
+
+        let loaded = AppSettings.load()
+
+        XCTAssertFalse(loaded.reviewBeforeInsert)
+        XCTAssertFalse(loaded.autoInsert)
+        XCTAssertFalse(loaded.playSound)
+        XCTAssertTrue(loaded.launchAtLogin)
+        settings = loaded
+        settings.reviewBeforeInsert = true
+        settings.save()
+        XCTAssertTrue(AppSettings.load().reviewBeforeInsert)
     }
 
     func test_save_withBlankCredentialDeletesThatCredential() throws {

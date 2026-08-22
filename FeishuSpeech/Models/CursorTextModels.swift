@@ -29,6 +29,19 @@ struct CursorDestinationToken {
     let originalSelection: CursorTextRange
 }
 
+nonisolated struct ReviewApplicationIdentity: Equatable, Sendable {
+    let processIdentifier: pid_t
+    let bundleIdentifier: String
+    let executableURL: URL
+    let launchDate: Date
+}
+
+struct ReviewDestinationToken {
+    let cursor: CursorDestinationToken
+    let application: ReviewApplicationIdentity
+    let capturedSecurityState: DestinationSecurityState
+}
+
 nonisolated enum CursorCapabilityRejection: Equatable, Sendable {
     case secureTarget
     case accessibilityUnavailable
@@ -91,4 +104,5 @@ nonisolated enum FinalTextInsertionResult: Equatable, Sendable {
     case securityRejected
     case destinationInvalid
     case deliveryFailed
+    case deliveryUncertain
 }

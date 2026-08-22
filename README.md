@@ -5,10 +5,12 @@ macOS 本地语音输入工具，使用飞书语音识别 API。
 ## 功能
 
 - 🎤 按住 **Fn 键** 0.3 秒开始流式识别
-- ⌨️ 按住 Fn 时持续输出：飞书响应按完整、不透明的识别 snapshot 处理；相同 snapshot 不重复输出，变长、缩短或修订都会替换本次按键拥有的暂定文字
+- 👀 默认开启「输入前预览」：按住 Fn 时，同一预览面板以只读方式显示完整、不透明的流式 snapshot；相同 snapshot 不重复刷新，变长、缩短或修订都整体替换预览
 - 🔄 可恢复流式失败不会立即报错；应用在 Fn 按住期间及松开后的 bounded drain 内持续使用新会话重试，并保留已录音频的有序回放
-- 🎯 松开 **Fn 键** 只结束录音采集；当前 generation 会继续排空在途/尾部音频、必要的重连与回放，并用 `action=2` 的权威最终 snapshot 完成本次已拥有文字的替换后再结束
-- 🔒 安全输入和密码框会拒绝输出；捕获目标路径验证原 PID 和精确 AX 元素，无 AX 目标路径在可检测的进程切换时停止，但无法感知同 PID 内的光标移动
+- ✏️ 松开 **Fn 键** 后同一面板保持只读并显示「正在完成识别…」；只有权威 `action=2` 已结算且录音队列屏障通过后，它才转为可编辑草稿
+- ✅ 只有点击「输入」或按 **Command+Return** 才会将未裁剪的编辑结果写回开始录音时捕获的原目标；「取消」、Escape 或关闭窗口不写入
+- 🔒 审阅路由会绑定原应用身份、精确 AX 元素与原选区；安全输入、密码框、目标漂移或交付不确定均 fail closed，不重定向、不自动重试
+- ⚙️ 关闭「输入前预览」可保留原有按住期间连续输出路由；「自动插入文字」的旧语义只在该兼容模式生效
 - 🌐 流式识别的租户 token 与 `stream_recognize` 走绑定物理网卡的 keep-alive（bound UDP DNS + `IP_BOUND_IF`），跳过 VPN/TUN；连接失败不再回退系统 URLSession。整文件识别仍走系统 URLSession
 
 ## 系统要求
@@ -62,15 +64,20 @@ cp -R build/Build/Products/Release/FeishuSpeech.app /Applications/
 
 1. 将光标放在任意输入框中
 2. 按住 **Fn 键** 0.3 秒（菜单栏图标变红）
-3. 继续按住并说话；packet replay 所有权与识别文字状态彼此独立：同一 journal index 只处理一次，但每个新响应都是完整 snapshot。相同 snapshot 不产生按键；支持 AX 范围的输入框直接替换本次按键拥有的范围，并可把换行作为多行文本数据写入；任意当前焦点目标只删除本次按键已输出的分歧尾部（按 Swift `Character` 计数的 Backspace），再输入不含 LF/action controls 的替换后缀，绝不合成 Return/提交/执行
-4. 松开 **Fn 键**，等待“正在完成识别…”结束；松开只关闭采集，录音队列屏障后的尾包、在途请求、可恢复重连和 `action=2` 仍属于同一 generation
-5. 当前 generation 会在所有已录音频获得确认后，以安全的非空 `action=2` snapshot 作为权威最终值：AX 路由替换原有 verified range，键盘路由继续使用固定 PID、精确 grapheme Backspace 与 replacement suffix。只有终端替换完成后才关闭输出 owner；不会重新采样光标、切换目标、Cmd+V 或复制
+3. 继续按住并说话；「输入前预览」面板会以只读方式显示最新完整 snapshot，不会在原输入框中边听边改字
+4. 松开 **Fn 键**；面板保持同一个实例并转为「正在完成识别…」。松开只关闭采集，录音队列屏障后的尾包、在途请求、可恢复重连和 `action=2` 仍属于同一 generation
+5. 权威 `action=2` 结算后，同一面板转为多行编辑器。如果 final 为空但已有可用 snapshot，它会作为草稿并标注「可能不完整」；两者都无内容时不打开空编辑器
+6. 编辑后点击「输入」或按 **Command+Return**；普通 Return 只编辑换行。点击「取消」、按 Escape 或关闭窗口会放弃草稿而不写入，纯空白草稿不能确认
 
-“自动输入”关闭、文本不安全或无法取得 owner 时仍会记录“已有可用 held 识别”，但不会把“没有自动输出”误报为“未识别到内容”或流式失败；这些路径仍然零输入、零改写、零复制。运行时诊断只记录长度/字符数、snapshot 决策、journal index 所有权和类型化结果，不显示或哈希识别文本，也不记录音频、凭据、token、stream ID、目标控件内容或剪贴板内容。
+默认审阅路由在开始音频/网络工作前捕获原应用和精确输入位置；确认时只尝试向该目标发送一次进程定向 Cmd+V。任何身份、激活、焦点、选区、Secure Input 或交付不确定都不会转向当前焦点或自动重试；非取消失败会将冻结草稿精确复制一次，供用户手动恢复。成功粘贴前会保存剪贴板全部 item/type 数据，只在粘贴后的有界机会内且 `changeCount` 仍属于本次写入时恢复；第三方剪贴板变化永不会被覆盖。
+
+审阅 UI 是独立的第三条异步轴：只读渲染为可取消的 fire-and-forget 主线程观察，不会让录音采集/音频 journal 等待界面，也不会让识别 consumer/重试/回放等待窗口。录音状态浮层仍然只显示状态，没有改成文字预览或编辑器。
+
+如果关闭「输入前预览」，则完整保留 issue #27 的连续输出兼容路由：支持 AX 范围的目标替换本次 hold 拥有的文字；通用键盘路由只替换已输出的 grapheme 尾部，并拒绝 LF/action controls。该模式才使用「自动插入文字」设置；无输出资格时仍然零输入、零改写、零复制。运行时诊断不显示或哈希识别文本，也不记录音频、凭据、token、stream ID、目标控件或剪贴板内容。
 
 > build 6 的隐私安全诊断已确认重复来自把每个新 packet index 的完整 snapshot 错当成 delta 拼接，而非 replay、重连或 transport 失败。当前契约改为完整 snapshot 替换；`CGEventPostToPid` 仍没有目标接受确认，Release owner UAT 仍是必需门槛。
 
-Release 1.0 build 8 已通过 316/316 完整测试、strict SwiftLint 以及 Debug/Release 构建验证；这些自动化结果证明本地实现与构建门槛，不替代上述真实凭据与可见输出 UAT。
+Issue #38 最终候选已通过聚焦测试 59/59，完整套件执行 408 个测试（其中 1 个跳过、0 失败），并通过 strict SwiftLint 与 Debug/Release 构建。这些自动化结果不替代真实麦克风、凭据、WindowServer、Accessibility 恢复和第三方应用 Cmd+V 接收 UAT。
 
 ## 常见问题
 
@@ -110,9 +117,11 @@ UAT 并非停在该阶段：它已成功取得 token、发送首个 `action=1` �
 仅不可恢复的 provider/流式失败会在 Fn 按住期间立即进入终止路径。可恢复失败只写隐私安全的分类诊断，不设置错误状态、不隐藏/重显浮窗，也不发送系统通知。终止性失败会先隐藏屏幕中央的录音浮窗，再对当前会话执行一次清理；
 相同错误状态不会重复发布并重新进入清理。安装版仍出现浮窗不消失时，请确认测试的是本次修正后的 Release。
 
-### 没有实时显示文字
+### 预览框没有实时显示文字
 
-部分应用不提供可验证的 Accessibility 选区与范围读取能力。支持 AX 的目标会绑定原 PID 和精确 `AXUIElement`，并直接替换本次按键拥有的范围；LF 可作为多行文本数据写入，不会合成 Return。无法建立 AX 范围时，应用绑定当时的前台 PID，以一笔串行事务发送恰好所需的 grapheme-counted Backspace，再输入 replacement suffix；该键盘路由拒绝 LF 与所有 action controls。现有 HID event tap 与 synthetic writer 共用同一个锁门：monitor 安装和 baseline capture 原子完成，每个完整 key-down/key-up pair 都在连续持锁期间提交，物理事件必须先取得同一 gate 才能推进 epoch 并派发；tap timeout/user-input disable 也会推进 epoch，表示输入可观测性已丢失。AppKit local/global monitors 只作补充，任一 monitor 无法 arm 都会 fail closed。物理输入、应用切换、安全输入、目标漂移或交付不确定会永久停止本次按键的后续替换，不回滚、不重发、不切换 writer、不复制。应用不会询问光标位置，也不会在按键期间弹出新的权限请求；无 AX 路径仍无法证明同一 PID 内由应用自身造成的光标移动。`CGEventPostToPid` 没有目标接受回执，因此安装版 Release owner UAT 仍是必需门槛。
+先确认设置 → 录音中的「输入前预览」已开启。审阅路由不会在原输入框里边听边写；它只会在独立预览面板中整体替换最新完整 snapshot。如果开始前无法安全捕获精确原目标，本次审阅交互会在启动音频/网络前 fail closed，而不对后来的当前焦点进行猜测。
+
+关闭「输入前预览」后，应用使用 issue #27 兼容路由。支持 AX 的目标会绑定原 PID 和精确 `AXUIElement`，并直接替换本次 hold 拥有的范围；无法建立 AX 范围时，固定 PID 键盘 owner 以 grapheme-counted Backspace 加 replacement suffix 替换自己已输出的尾部。任何物理输入、目标/安全状态变化或交付不确定均会永久中止该 owner，不回滚、不重发、不复制。
 
 ### 启动时弹出钥匙串授权
 
@@ -133,7 +142,11 @@ FeishuSpeech/
 │   ├── AppSettings.swift        # 设置
 │   ├── RecordingState.swift     # 状态
 │   ├── StreamingSpeechModels.swift # 流式事件与音频入口模型
-│   └── CursorTextModels.swift   # 光标目标与范围模型
+│   ├── CursorTextModels.swift   # 光标目标、原应用身份与范围模型
+│   └── TranscriptionReviewState.swift # 审阅第三轴状态
+├── Controllers/
+│   ├── OverlayWindowController.swift # 原有状态浮层
+│   └── ReviewWindowController.swift # 同一面板的只读/可编辑权限
 ├── Services/
 │   ├── HotKeyService.swift      # Fn 键监听
 │   ├── AudioRecorder.swift      # 录音与流式 PCM 输出
@@ -142,6 +155,7 @@ FeishuSpeech/
 │   ├── AccessibilityClient.swift # 原始目标捕获与安全校验
 │   ├── CursorTextSession.swift  # 暂定文本范围替换
 │   ├── CurrentFocusAppendSession.swift # 无 AX 范围时的同 PID snapshot 键盘替换
+│   ├── ReviewDestinationDelivery.swift # 原目标捕获、恢复和审阅确认交付
 │   ├── FeishuAPIService.swift   # token 与 HTTP 传输
 │   ├── LoginItemService.swift   # 开机启动
 │   ├── PermissionManager.swift  # 权限管理
@@ -151,7 +165,9 @@ FeishuSpeech/
 ├── Views/
 │   ├── MenuBarView.swift        # 菜单栏
 │   ├── PermissionView.swift     # 权限状态
-│   └── SettingsView.swift       # 设置
+│   ├── RecordingOverlayView.swift # 原有录音状态
+│   ├── TranscriptionReviewView.swift # 流式预览和多行草稿
+│   └── SettingsView.swift       # 审阅/兼容设置
 └── Resources/
     └── Assets.xcassets          # 图标
 ```

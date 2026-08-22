@@ -1659,7 +1659,8 @@ final class StreamingMainViewModelTests: XCTestCase {
                 appId: "configured-app",
                 appSecret: "configured-secret",
                 autoInsert: true,
-                playSound: false
+                playSound: false,
+                reviewBeforeInsert: false
             ),
             hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
             streamingProvider: provider,
@@ -1732,7 +1733,8 @@ final class StreamingMainViewModelTests: XCTestCase {
                 appId: "configured-app",
                 appSecret: "configured-secret",
                 autoInsert: true,
-                playSound: false
+                playSound: false,
+                reviewBeforeInsert: false
             ),
             hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
             streamingProvider: provider,
@@ -1787,7 +1789,8 @@ final class StreamingMainViewModelTests: XCTestCase {
                 appId: "configured-app",
                 appSecret: "configured-secret",
                 autoInsert: true,
-                playSound: false
+                playSound: false,
+                reviewBeforeInsert: false
             ),
             hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
             streamingProvider: provider,
@@ -1851,7 +1854,8 @@ final class StreamingMainViewModelTests: XCTestCase {
                     appId: "configured-app",
                     appSecret: "configured-secret",
                     autoInsert: true,
-                    playSound: false
+                    playSound: false,
+                    reviewBeforeInsert: false
                 ),
                 hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
                 streamingProvider: provider,
@@ -1907,7 +1911,8 @@ final class StreamingMainViewModelTests: XCTestCase {
                 appId: "configured-app",
                 appSecret: "configured-secret",
                 autoInsert: true,
-                playSound: false
+                playSound: false,
+                reviewBeforeInsert: false
             ),
             hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
             streamingProvider: provider,
@@ -1961,7 +1966,8 @@ final class StreamingMainViewModelTests: XCTestCase {
                 appId: "configured-app",
                 appSecret: "configured-secret",
                 autoInsert: true,
-                playSound: false
+                playSound: false,
+                reviewBeforeInsert: false
             ),
             hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
             streamingProvider: provider,
@@ -2016,7 +2022,8 @@ final class StreamingMainViewModelTests: XCTestCase {
                 appId: "configured-app",
                 appSecret: "configured-secret",
                 autoInsert: true,
-                playSound: false
+                playSound: false,
+                reviewBeforeInsert: false
             ),
             hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
             streamingProvider: provider,
@@ -2074,7 +2081,8 @@ final class StreamingMainViewModelTests: XCTestCase {
                 appId: "configured-app",
                 appSecret: "configured-secret",
                 autoInsert: true,
-                playSound: false
+                playSound: false,
+                reviewBeforeInsert: false
             ),
             hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
             streamingProvider: provider,
@@ -4056,7 +4064,8 @@ final class StreamingMainViewModelTests: XCTestCase {
                 appId: "configured-app",
                 appSecret: "configured-secret",
                 autoInsert: autoInsert,
-                playSound: false
+                playSound: false,
+                reviewBeforeInsert: false
             ),
             hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
             streamingProvider: provider,
@@ -4097,7 +4106,8 @@ final class StreamingMainViewModelTests: XCTestCase {
                 appId: "configured-app",
                 appSecret: "configured-secret",
                 autoInsert: autoInsert,
-                playSound: false
+                playSound: false,
+                reviewBeforeInsert: false
             ),
             hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
             streamingProvider: provider,
@@ -4158,7 +4168,8 @@ final class StreamingMainViewModelTests: XCTestCase {
                 appId: "configured-app",
                 appSecret: "configured-secret",
                 autoInsert: autoInsert,
-                playSound: false
+                playSound: false,
+                reviewBeforeInsert: false
             ),
             hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
             streamingProvider: provider,
@@ -4213,7 +4224,8 @@ final class StreamingMainViewModelTests: XCTestCase {
                 appId: "configured-app",
                 appSecret: "configured-secret",
                 autoInsert: true,
-                playSound: false
+                playSound: false,
+                reviewBeforeInsert: false
             ),
             hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
             streamingProvider: provider,
@@ -4297,7 +4309,8 @@ final class StreamingMainViewModelTests: XCTestCase {
                 appId: "configured-app",
                 appSecret: "configured-secret",
                 autoInsert: autoInsert,
-                playSound: false
+                playSound: false,
+                reviewBeforeInsert: false
             ),
             hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
             streamingProvider: provider,
@@ -4345,7 +4358,8 @@ final class StreamingMainViewModelTests: XCTestCase {
                 appId: "configured-app",
                 appSecret: "configured-secret",
                 autoInsert: true,
-                playSound: false
+                playSound: false,
+                reviewBeforeInsert: false
             ),
             hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
             streamingProvider: provider,

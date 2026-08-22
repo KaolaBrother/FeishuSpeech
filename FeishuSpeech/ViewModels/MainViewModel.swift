@@ -242,9 +242,27 @@ class MainViewModel: ObservableObject {
         let task: Task<Void, Never>
     }
 
+    private struct ReviewSurfaceAuthority {
+        let identifier: UUID
+        let generation: UInt64
+        let destination: ReviewDestinationToken
+    }
+
     @Published var status: RecordingState = .idle
     @Published var settings: AppSettings
     @Published var overlayMessage: String?
+    @Published private(set) var transcriptionReviewState: TranscriptionReviewState = .idle
+    @Published var reviewDraftText: String = "" {
+        didSet {
+            guard case .editable = transcriptionReviewState,
+                  !reviewConfirmationInFlight else { return }
+            reviewSurfaceRevision &+= 1
+            transcriptionReviewState = .editable(
+                draft: reviewDraftText,
+                isPossiblyIncomplete: reviewDraftIsPossiblyIncomplete
+            )
+        }
+    }
 
     private let hotKeyService = HotKeyService.shared
     private let hotKeyWakeRecovering: HotKeyWakeRecovering
@@ -252,6 +270,8 @@ class MainViewModel: ObservableObject {
     private let streamingProvider: any SpeechStreamingSessionProviding
     private let accessibilityClient: AccessibilityClient
     private let overlayPresenter: RecordingOverlayPresenting
+    private let reviewDestinationDelivery: ReviewDestinationDelivering
+    private let reviewSurfacePresenter: ReviewSurfacePresenting
     private let currentFocusAppendSessionFactory: (any CurrentFocusProvisionalOutputSessionFactory)?
     private let streamingDrainPolicy: StreamingDrainPolicy
     private let streamingMonotonicNow: @Sendable () -> ContinuousClock.Instant
@@ -295,6 +315,17 @@ class MainViewModel: ObservableObject {
     private var outputPreservationState = OutputPreservationState.none
     private var stopSoundPlayed = false
     private var isCompletionFeedbackPresented = false
+    private var activeInteractionOutputMode: InteractionOutputMode = .compatibility(autoInsert: true)
+    private var reviewSurfaceAuthority: ReviewSurfaceAuthority?
+    private var reviewSurfaceRevision: UInt64 = 0
+    private var reviewTerminalPending = false
+    private var reviewDraftIsPossiblyIncomplete = false
+    private var reviewConfirmationInFlight = false
+    private var reviewCopyRecoveryIssued = false
+    private var reviewTransitionTask: Task<Void, Never>?
+    private var reviewTransitionID: UUID?
+    private var reviewReadOnlyPresentationTask: Task<Void, Never>?
+    private var reviewDeliveryTask: Task<Void, Never>?
 
     var statusText: String {
         status.text
@@ -308,6 +339,8 @@ class MainViewModel: ObservableObject {
         accessibilityClient: AccessibilityClient? = nil,
         finalTextOutput: FinalTextOutput? = nil,
         overlayPresenter: RecordingOverlayPresenting? = nil,
+        reviewDestinationDelivery: ReviewDestinationDelivering? = nil,
+        reviewSurfacePresenter: ReviewSurfacePresenting? = nil,
         currentFocusAppendSessionFactory: (any CurrentFocusProvisionalOutputSessionFactory)? = nil,
         streamingDrainPolicy: StreamingDrainPolicy = StreamingDrainPolicy(),
         streamingMonotonicNow: @escaping @Sendable () -> ContinuousClock.Instant = {
@@ -323,6 +356,8 @@ class MainViewModel: ObservableObject {
         self.streamingProvider = streamingProvider ?? FeishuAPIService.shared
         self.accessibilityClient = accessibilityClient ?? MacAccessibilityClient()
         self.overlayPresenter = overlayPresenter ?? OverlayWindowController.shared
+        self.reviewDestinationDelivery = reviewDestinationDelivery ?? SystemReviewDestinationDelivery()
+        self.reviewSurfacePresenter = reviewSurfacePresenter ?? ReviewWindowController.shared
         self.streamingDrainPolicy = streamingDrainPolicy
         self.streamingMonotonicNow = streamingMonotonicNow
         if let currentFocusAppendSessionFactory {
@@ -369,7 +404,7 @@ class MainViewModel: ObservableObject {
                     self.startHotKeyMonitoring()
                 } else {
                     self.stopHotKeyMonitoring()
-                    if self.activeSessionIdentity != nil {
+                    if self.activeSessionIdentity != nil || self.reviewSurfaceAuthority != nil {
                         Task { @MainActor [weak self] in
                             await self?.terminateAbnormally(
                                 message: "权限已失效",
@@ -384,7 +419,10 @@ class MainViewModel: ObservableObject {
         permissionManager.$secureInputEnabled
             .removeDuplicates()
             .sink { [weak self] enabled in
-                guard enabled, let self, self.activeSessionIdentity != nil else { return }
+                guard enabled, let self,
+                      self.activeSessionIdentity != nil || self.reviewSurfaceAuthority != nil else {
+                    return
+                }
                 logger.warning("Secure input activated during an active interaction")
                 self.invalidateActiveIdentityAndCursor()
                 Task { @MainActor [weak self] in
@@ -430,6 +468,10 @@ class MainViewModel: ObservableObject {
     private func handleHotKeyState(_ state: HotKeyState, startsTranscriptionTask: Bool = true) {
         switch state {
         case .idle:
+            if reviewSurfaceAuthority != nil {
+                stopMaxDurationTimer()
+                return
+            }
             if activeSessionIdentity == nil, pendingRecorderBarrier == nil {
                 if !isCompletionFeedbackPresented {
                     hideOverlay()
@@ -457,6 +499,17 @@ class MainViewModel: ObservableObject {
     }
 
     private func handleHotKeyError(_ message: String) {
+        if reviewSurfaceAuthority != nil {
+            if activeSessionIdentity != nil {
+                Task { @MainActor [weak self] in
+                    await self?.terminateAbnormally(message: message, reportsError: true)
+                }
+            } else {
+                revokeReviewAuthority()
+                status = .error(message)
+            }
+            return
+        }
         guard activeSessionIdentity != nil else {
             guard pendingRecorderBarrier == nil else { return }
             if status != .error(message) {
@@ -504,7 +557,16 @@ class MainViewModel: ObservableObject {
             return
         }
 
+        guard reviewSurfaceAuthority == nil else {
+            logger.info("Ignoring streaming start while a review draft owns the interaction")
+            hotKeyService.resetToIdle()
+            return
+        }
+
         activeSessionIdentity = identity
+        activeInteractionOutputMode = settings.reviewBeforeInsert
+            ? .reviewFirst
+            : .compatibility(autoInsert: settings.autoInsert)
         isCompletionFeedbackPresented = false
         overlayMessage = nil
         captureClosed = false
@@ -527,12 +589,27 @@ class MainViewModel: ObservableObject {
         streamingAttemptPhase = .idle
         sessionCreationTask = nil
         retrySleepTask = nil
+        reviewSurfaceRevision &+= 1
+        reviewTerminalPending = false
+        reviewDraftIsPossiblyIncomplete = false
+        reviewConfirmationInFlight = false
+        reviewCopyRecoveryIssued = false
+        reviewTransitionTask?.cancel()
+        reviewTransitionTask = nil
+        reviewTransitionID = nil
+        cancelReviewReadOnlyPresentation()
+        reviewDeliveryTask?.cancel()
+        reviewDeliveryTask = nil
 
         guard !permissionManager.secureInputEnabled else {
             failStartup(identity: identity, message: "安全输入框不支持语音输入")
             return
         }
-        guard prepareCursorTarget(identity: identity) else { return }
+        if isReviewFirstMode {
+            guard prepareReviewDestination(identity: identity) else { return }
+        } else {
+            guard prepareCursorTarget(identity: identity) else { return }
+        }
         guard settings.isConfigured else {
             failStartup(identity: identity, message: "请先配置 App ID 和 Secret")
             return
@@ -561,6 +638,106 @@ class MainViewModel: ObservableObject {
         consumerTask = Task(priority: .userInitiated) { [weak self] in
             await self?.consumeAudio(identity: identity)
         }
+
+        if isReviewFirstMode, let authority = reviewSurfaceAuthority {
+            renderReviewReadOnly(
+                phase: .streaming,
+                preview: "",
+                authority: authority
+            )
+        }
+    }
+
+    private var isReviewFirstMode: Bool {
+        if case .reviewFirst = activeInteractionOutputMode {
+            return true
+        }
+        return false
+    }
+
+    private var sampledAutoInsert: Bool {
+        if case .compatibility(let autoInsert) = activeInteractionOutputMode {
+            return autoInsert
+        }
+        return false
+    }
+
+    private func prepareReviewDestination(identity: StreamingSessionIdentity) -> Bool {
+        do {
+            let destination = try reviewDestinationDelivery.capture(
+                generation: identity.generation
+            )
+            guard destination.capturedSecurityState == .safe,
+                  destination.cursor.processIdentifier > 0,
+                  destination.application.processIdentifier == destination.cursor.processIdentifier,
+                  !destination.application.bundleIdentifier.isEmpty,
+                  !destination.application.executableURL.path.isEmpty,
+                  destination.application.launchDate.timeIntervalSinceReferenceDate.isFinite else {
+                failStartup(identity: identity, message: "安全输入框不支持语音输入")
+                return false
+            }
+
+            let authority = ReviewSurfaceAuthority(
+                identifier: UUID(),
+                generation: identity.generation,
+                destination: destination
+            )
+            reviewSurfaceAuthority = authority
+            transcriptionReviewState = .streaming(preview: "")
+            status = .streaming
+            return true
+        } catch {
+            failStartup(identity: identity, message: "无法确认输入位置")
+            return false
+        }
+    }
+
+    private func renderReviewReadOnly(
+        phase: ReviewReadOnlyPhase,
+        preview: String,
+        authority: ReviewSurfaceAuthority? = nil
+    ) {
+        guard let currentAuthority = reviewSurfaceAuthority,
+              currentAuthority.identifier == (authority ?? currentAuthority).identifier,
+              !reviewTerminalPending else {
+            return
+        }
+        switch transcriptionReviewState {
+        case .streaming, .sealing:
+            break
+        default:
+            return
+        }
+
+        reviewSurfaceRevision &+= 1
+        let revision = reviewSurfaceRevision
+        let reviewID = currentAuthority.identifier
+        reviewReadOnlyPresentationTask?.cancel()
+        reviewReadOnlyPresentationTask = Task { @MainActor [weak self] in
+            // Keep the review surface on its own fire-and-forget lane. This yield gives
+            // capture and recognition work a scheduling boundary and lets a newer
+            // snapshot cancel a command that has not reached the presenter yet.
+            await Task.yield()
+            guard let self,
+                  !Task.isCancelled,
+                  self.reviewSurfaceAuthority?.identifier == reviewID,
+                  self.reviewSurfaceRevision == revision,
+                  !self.reviewTerminalPending else {
+                return
+            }
+            switch self.transcriptionReviewState {
+            case .streaming, .sealing:
+                break
+            default:
+                return
+            }
+            self.reviewSurfacePresenter.renderReadOnly(phase: phase, preview: preview)
+        }
+    }
+
+    private func cancelReviewReadOnlyPresentation() {
+        reviewReadOnlyPresentationTask?.cancel()
+        reviewReadOnlyPresentationTask = nil
     }
 
     private func prepareCursorTarget(identity: StreamingSessionIdentity) -> Bool {
@@ -606,7 +783,7 @@ class MainViewModel: ObservableObject {
                 identity: identity
             )
         case .live:
-            if settings.autoInsert {
+            if sampledAutoInsert {
                 status = .streaming
             } else {
                 newCursorSession.invalidate()
@@ -616,7 +793,7 @@ class MainViewModel: ObservableObject {
         case .finalOnly(let token):
             newCursorSession.invalidate()
             cursorSession = nil
-            if settings.autoInsert {
+            if sampledAutoInsert {
                 if armCapturedCurrentFocusAppendSession(
                     identity: StreamingSessionIdentity(generation: token.generation),
                     destination: token
@@ -638,8 +815,8 @@ class MainViewModel: ObservableObject {
     ) {
         newCursorSession.invalidate()
         cursorSession = nil
-        usesCurrentFocusFinalOutput = settings.autoInsert
-        if settings.autoInsert {
+        usesCurrentFocusFinalOutput = sampledAutoInsert
+        if sampledAutoInsert {
             attemptedUnboundAppendArm = true
             armCurrentFocusAppendSession(identity: identity)
             usesCurrentFocusFinalOutput = true
@@ -671,6 +848,7 @@ class MainViewModel: ObservableObject {
         guard isActive(identity) else { return }
         closeRetryAdmission()
         invalidateActiveIdentityAndCursor()
+        revokeReviewAuthority()
         activeIngress?.fail(.cancelled)
         holdPacketJournal.cancelWaiters()
         captureDrainTask?.cancel()
@@ -1493,6 +1671,14 @@ class MainViewModel: ObservableObject {
         source: CurrentFocusHypothesisSource,
         packetIndex: Int?
     ) -> Bool {
+        if isReviewFirstMode {
+            return handleReviewSnapshot(
+                text,
+                identity: identity,
+                packetIndex: packetIndex
+            )
+        }
+
         let context = ResponseReceiptContext(
             identity: identity,
             packetIndex: packetIndex,
@@ -1560,6 +1746,58 @@ class MainViewModel: ObservableObject {
             logIneligibleResponse(context, eligibility: "sealed")
             return false
         }
+    }
+
+    private func handleReviewSnapshot(
+        _ text: String,
+        identity: StreamingSessionIdentity,
+        packetIndex: Int?
+    ) -> Bool {
+        guard isActive(identity),
+              reviewSurfaceAuthority?.generation == identity.generation,
+              !reviewTerminalPending else {
+            return false
+        }
+        switch transcriptionReviewState {
+        case .streaming, .sealing:
+            break
+        default:
+            return false
+        }
+
+        if let packetIndex {
+            guard responseOutputLedger.generation == identity.generation,
+                  responseOutputLedger.isAdmissionOpen else {
+                return false
+            }
+            switch responseOutputLedger.reserve(
+                text: text,
+                packetIndex: packetIndex,
+                generation: identity.generation
+            ) {
+            case .owned:
+                break
+            case .historical, .staleGeneration, .sealed:
+                return false
+            }
+        }
+
+        // Empty/whitespace packets are acknowledged for replay ownership but do not
+        // erase the latest usable opaque preview. Action-2 uses that preview as the
+        // incomplete fallback when its authoritative final is contentless.
+        guard !isContentless(text) else { return false }
+
+        switch responseOutputLedger.claim(text: text, generation: identity.generation) {
+        case .changed(let snapshot, _):
+            let phase: ReviewReadOnlyPhase = captureClosed ? .sealing : .streaming
+            transcriptionReviewState = phase == .streaming
+                ? .streaming(preview: snapshot)
+                : .sealing(preview: snapshot)
+            renderReviewReadOnly(phase: phase, preview: snapshot)
+        case .duplicate, .staleGeneration, .sealed:
+            break
+        }
+        return false
     }
 
     private func reservePacketIndex(
@@ -1660,7 +1898,7 @@ class MainViewModel: ObservableObject {
         guard responseOutputLedger.isAdmissionOpen else {
             return .ineligible(reason: "sealed")
         }
-        guard settings.autoInsert else { return .ineligible(reason: "outputDisabled") }
+        guard sampledAutoInsert else { return .ineligible(reason: "outputDisabled") }
         guard let packetIndex = context.packetIndex else {
             return .ineligible(reason: "missingJournalIndex")
         }
@@ -1690,6 +1928,17 @@ class MainViewModel: ObservableObject {
         source: CurrentFocusHypothesisSource,
         packetIndex: Int?
     ) -> Bool {
+        if isReviewFirstMode {
+            guard isTerminal else {
+                return handleReviewSnapshot(
+                    text,
+                    identity: identity,
+                    packetIndex: packetIndex
+                )
+            }
+            return handleReviewTerminal(text, identity: identity)
+        }
+
         guard isTerminal else {
             return handlePacketResponse(
                 text,
@@ -1749,6 +1998,331 @@ class MainViewModel: ObservableObject {
             await self?.completeNormally(identity: identity)
         }
         return true
+    }
+
+    private func handleReviewTerminal(
+        _ text: String,
+        identity: StreamingSessionIdentity
+    ) -> Bool {
+        guard isActive(identity),
+              reviewSurfaceAuthority?.generation == identity.generation,
+              !reviewTerminalPending,
+              captureClosed else {
+            return true
+        }
+        switch transcriptionReviewState {
+        case .streaming, .sealing:
+            break
+        default:
+            return true
+        }
+
+        reviewTerminalPending = true
+        cancelReviewReadOnlyPresentation()
+        reviewSurfaceRevision &+= 1
+        responseOutputLedger.closeAdmission()
+        closeRetryAdmission()
+
+        let finalIsContentless = isContentless(text)
+        let latestSnapshot = responseOutputLedger.latestSnapshot
+        let draft: String?
+        let isPossiblyIncomplete: Bool
+        if !finalIsContentless {
+            draft = text
+            isPossiblyIncomplete = false
+        } else if !isContentless(latestSnapshot) {
+            draft = latestSnapshot
+            isPossiblyIncomplete = true
+        } else {
+            draft = nil
+            isPossiblyIncomplete = false
+        }
+
+        guard let authority = reviewSurfaceAuthority else {
+            return true
+        }
+        reviewDraftIsPossiblyIncomplete = isPossiblyIncomplete
+        reviewDraftText = draft ?? ""
+        let transitionID = UUID()
+        reviewTransitionTask?.cancel()
+        reviewTransitionID = transitionID
+        reviewTransitionTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            guard await self.awaitReviewRecorderBarrier(identity: identity) else {
+                guard self.reviewTransitionID == transitionID else { return }
+                self.reviewTransitionTask = nil
+                self.reviewTransitionID = nil
+                return
+            }
+            await self.finishReviewTransition(
+                identity: identity,
+                authority: authority,
+                draft: draft,
+                isPossiblyIncomplete: isPossiblyIncomplete,
+                transitionID: transitionID
+            )
+        }
+        return true
+    }
+
+    private func awaitReviewRecorderBarrier(identity: StreamingSessionIdentity) async -> Bool {
+        guard isActive(identity) else { return false }
+        if let barrier = pendingRecorderBarrier {
+            await barrier.task.value
+            guard isActive(identity) else { return false }
+            _ = clearPendingRecorderBarrier(identifier: barrier.identifier)
+        }
+        return isActive(identity)
+    }
+
+    private func finishReviewTransition(
+        identity: StreamingSessionIdentity,
+        authority: ReviewSurfaceAuthority,
+        draft: String?,
+        isPossiblyIncomplete: Bool,
+        transitionID: UUID
+    ) async {
+        guard isActive(identity),
+              reviewSurfaceAuthority?.identifier == authority.identifier,
+              reviewTerminalPending,
+              reviewTransitionID == transitionID else {
+            return
+        }
+
+        cancelReviewReadOnlyPresentation()
+        postReleaseDrainTask?.cancel()
+        postReleaseDrainTask = nil
+        postReleaseDrainDeadline = nil
+        invalidateActiveIdentityAndCursor()
+        captureDrainTask?.cancel()
+        captureDrainTask = nil
+        consumerTask = nil
+        sealingTask = nil
+        activeIngress = nil
+        activeStreamingSession = nil
+        holdPacketJournal.cancelWaiters()
+        responseOutputLedger.reset()
+        retryFailureStreak = 0
+        activeAttemptIdentifier = nil
+        nextAttemptIdentifier = 0
+        currentAttemptCancellationTask = nil
+        streamingAttemptPhase = .idle
+        retryAdmissionOpen = false
+        captureClosed = false
+        acceptedPacket = false
+        outputPreservationState = .none
+        stopMaxDurationTimer()
+        hideOverlay()
+        status = .idle
+        hotKeyService.resetToIdle()
+
+        guard let draft else {
+            revokeReviewAuthority()
+            return
+        }
+
+        reviewDraftText = draft
+        reviewDraftIsPossiblyIncomplete = isPossiblyIncomplete
+        reviewTerminalPending = false
+        transcriptionReviewState = .editable(
+            draft: draft,
+            isPossiblyIncomplete: isPossiblyIncomplete
+        )
+        reviewSurfaceRevision &+= 1
+        let reviewID = authority.identifier
+        let transitionRevision = reviewSurfaceRevision
+        var draftCallbackRevision = reviewSurfaceRevision
+        let result = await renderEditableReviewSurface(
+            draft: draft,
+            isPossiblyIncomplete: isPossiblyIncomplete,
+            onDraftChange: { [weak self] changedDraft in
+                guard let self,
+                      self.reviewSurfaceRevision == draftCallbackRevision else {
+                    return
+                }
+                self.updateReviewDraft(changedDraft, reviewID: reviewID)
+                draftCallbackRevision = self.reviewSurfaceRevision
+            },
+            onConfirm: { [weak self] in
+                self?.confirmReviewDraft(reviewID: reviewID)
+            },
+            onDiscard: { [weak self] in
+                self?.discardReviewDraft(reviewID: reviewID)
+            }
+        )
+        guard !Task.isCancelled,
+              reviewSurfaceAuthority?.identifier == reviewID,
+              reviewTransitionID == transitionID,
+              case .editable = transcriptionReviewState else {
+            return
+        }
+        guard result == .ready else {
+            guard reviewSurfaceRevision == transitionRevision else { return }
+            recoverReviewSurfaceFailure(
+                draft: draft,
+                reviewID: reviewID,
+                transitionID: transitionID,
+                transitionRevision: transitionRevision
+            )
+            return
+        }
+        reviewTransitionTask = nil
+        reviewTransitionID = nil
+    }
+
+    private func renderEditableReviewSurface(
+        draft: String,
+        isPossiblyIncomplete: Bool,
+        onDraftChange: @escaping @MainActor (String) -> Void,
+        onConfirm: @escaping @MainActor () -> Void,
+        onDiscard: @escaping @MainActor () -> Void
+    ) async -> ReviewEditableTransitionResult {
+        if let readinessPresenter = reviewSurfacePresenter as? any ReviewEditableReadinessPresenting {
+            return await readinessPresenter.renderEditableWhenReady(
+                draft: draft,
+                isPossiblyIncomplete: isPossiblyIncomplete,
+                onDraftChange: onDraftChange,
+                onConfirm: onConfirm,
+                onDiscard: onDiscard
+            )
+        }
+        return reviewSurfacePresenter.renderEditable(
+            draft: draft,
+            isPossiblyIncomplete: isPossiblyIncomplete,
+            onDraftChange: onDraftChange,
+            onConfirm: onConfirm,
+            onDiscard: onDiscard
+        )
+    }
+
+    private func recoverReviewSurfaceFailure(
+        draft: String,
+        reviewID: UUID,
+        transitionID: UUID,
+        transitionRevision: UInt64
+    ) {
+        guard reviewSurfaceAuthority?.identifier == reviewID,
+              reviewTransitionID == transitionID,
+              reviewSurfaceRevision == transitionRevision,
+              case .editable = transcriptionReviewState else {
+            return
+        }
+        if !reviewCopyRecoveryIssued {
+            reviewCopyRecoveryIssued = true
+            reviewDestinationDelivery.copyForManualRecovery(draft)
+        }
+        revokeReviewAuthority()
+        hotKeyService.resetToIdle()
+        publishCompletionFeedback(.manualRecoveryCopied)
+    }
+
+    private func updateReviewDraft(_ draft: String, reviewID: UUID) {
+        guard reviewSurfaceAuthority?.identifier == reviewID,
+              case .editable = transcriptionReviewState,
+              !reviewConfirmationInFlight else {
+            return
+        }
+        reviewDraftText = draft
+    }
+
+    func confirmReviewDraft() {
+        guard let reviewID = reviewSurfaceAuthority?.identifier else { return }
+        confirmReviewDraft(reviewID: reviewID)
+    }
+
+    private func confirmReviewDraft(reviewID: UUID) {
+        guard let authority = reviewSurfaceAuthority,
+              authority.identifier == reviewID,
+              case .editable = transcriptionReviewState,
+              !reviewConfirmationInFlight else {
+            return
+        }
+        let frozenText = reviewDraftText
+        guard !isContentless(frozenText) else { return }
+
+        reviewConfirmationInFlight = true
+        transcriptionReviewState = .confirming
+        cancelReviewReadOnlyPresentation()
+        reviewTransitionTask?.cancel()
+        reviewTransitionTask = nil
+        reviewTransitionID = nil
+        reviewSurfaceRevision &+= 1
+        reviewSurfacePresenter.dismiss()
+
+        let delivery = reviewDestinationDelivery
+        reviewDeliveryTask = Task { @MainActor [weak self] in
+            let result = await delivery.deliver(frozenText, to: authority.destination)
+            self?.completeReviewDelivery(
+                reviewID: reviewID,
+                frozenText: frozenText,
+                result: result
+            )
+        }
+    }
+
+    func discardReviewDraft() {
+        guard let reviewID = reviewSurfaceAuthority?.identifier else { return }
+        discardReviewDraft(reviewID: reviewID)
+    }
+
+    private func discardReviewDraft(reviewID: UUID) {
+        guard reviewSurfaceAuthority?.identifier == reviewID,
+              case .editable = transcriptionReviewState else {
+            return
+        }
+        revokeReviewAuthority()
+        hotKeyService.resetToIdle()
+    }
+
+    private func completeReviewDelivery(
+        reviewID: UUID,
+        frozenText: String,
+        result: ReviewDeliveryResult
+    ) {
+        guard reviewSurfaceAuthority?.identifier == reviewID,
+              reviewConfirmationInFlight else {
+            return
+        }
+
+        reviewDeliveryTask = nil
+        switch result {
+        case .inserted, .cancelled:
+            revokeReviewAuthority()
+        case .activationFailed, .identityChanged, .destinationInvalid,
+             .securityRejected, .unsafeText, .deliveryFailed, .deliveryUncertain:
+            if !reviewCopyRecoveryIssued {
+                reviewCopyRecoveryIssued = true
+                reviewDestinationDelivery.copyForManualRecovery(frozenText)
+            }
+            revokeReviewAuthority()
+            hotKeyService.resetToIdle()
+            publishCompletionFeedback(.manualRecoveryCopied)
+            return
+        }
+        hotKeyService.resetToIdle()
+    }
+
+    private func revokeReviewAuthority() {
+        let hadAuthority = reviewSurfaceAuthority != nil ||
+            transcriptionReviewState != .idle
+        cancelReviewReadOnlyPresentation()
+        reviewSurfaceRevision &+= 1
+        reviewTransitionID = nil
+        reviewTransitionTask?.cancel()
+        reviewTransitionTask = nil
+        reviewDeliveryTask?.cancel()
+        reviewDeliveryTask = nil
+        reviewSurfaceAuthority = nil
+        reviewTerminalPending = false
+        reviewConfirmationInFlight = false
+        reviewDraftIsPossiblyIncomplete = false
+        reviewCopyRecoveryIssued = false
+        reviewDraftText = ""
+        transcriptionReviewState = .idle
+        if hadAuthority {
+            reviewSurfacePresenter.dismiss()
+        }
+        activeInteractionOutputMode = .compatibility(autoInsert: settings.autoInsert)
     }
 
     private func finalizeExistingOutputOwner(
@@ -2029,6 +2603,17 @@ class MainViewModel: ObservableObject {
         stopMaxDurationTimer()
         status = .sealing
         overlayPresenter.update(status: .sealing)
+        if isReviewFirstMode,
+           let authority = reviewSurfaceAuthority,
+           !reviewTerminalPending {
+            let preview = responseOutputLedger.latestSnapshot
+            transcriptionReviewState = .sealing(preview: preview)
+            renderReviewReadOnly(
+                phase: .sealing,
+                preview: preview,
+                authority: authority
+            )
+        }
         logStreamingLifecycle(
             identity: identity,
             attemptIdentifier: activeAttemptIdentifier ?? 0,
@@ -2106,6 +2691,7 @@ class MainViewModel: ObservableObject {
         postReleaseDrainTask = nil
         postReleaseDrainDeadline = nil
         invalidateActiveIdentityAndCursor()
+        revokeReviewAuthority()
         activeIngress?.fail(.cancelled)
         holdPacketJournal.cancelWaiters()
         captureDrainTask = nil
@@ -2199,6 +2785,7 @@ class MainViewModel: ObservableObject {
         postReleaseDrainTask = nil
         postReleaseDrainDeadline = nil
         invalidateActiveIdentityAndCursor()
+        revokeReviewAuthority()
         ingress?.fail(.cancelled)
         holdPacketJournal.cancelWaiters()
         captureDrainTask = nil
@@ -2312,7 +2899,7 @@ class MainViewModel: ObservableObject {
 
     private func handleAudioRecorderFailure(_ failure: RecordingFailure) {
         logger.error("Audio recorder failure: \(failure.localizedDescription)")
-        if activeSessionIdentity != nil {
+        if activeSessionIdentity != nil || reviewSurfaceAuthority != nil {
             Task { @MainActor [weak self] in
                 await self?.terminateAbnormally(
                     message: failure.localizedDescription,
@@ -2334,6 +2921,18 @@ class MainViewModel: ObservableObject {
         switch monitoringState {
         case .failed:
             logger.error("HotKey tap failed: \(String(describing: monitoringState))")
+            if reviewSurfaceAuthority != nil {
+                if activeSessionIdentity != nil {
+                    Task { @MainActor [weak self] in
+                        await self?.terminateAbnormally(
+                            message: hotKeyMonitoringErrorMessage,
+                            reportsError: true
+                        )
+                    }
+                } else {
+                    revokeReviewAuthority()
+                }
+            }
             isShowingHotKeyMonitoringError = true
             status = .error(hotKeyMonitoringErrorMessage)
         case .active:
@@ -2439,18 +3038,22 @@ class MainViewModel: ObservableObject {
         }
     }
 
+    // The settings screen intentionally persists all six editable preferences in one call.
+    // swiftlint:disable:next function_parameter_count
     func updateSettings(
         appId: String,
         appSecret: String,
         autoInsert: Bool,
         playSound: Bool,
-        launchAtLogin: Bool
+        launchAtLogin: Bool,
+        reviewBeforeInsert: Bool
     ) {
         settings.appId = appId
         settings.appSecret = appSecret
         settings.autoInsert = autoInsert
         settings.playSound = playSound
         settings.launchAtLogin = launchAtLogin
+        settings.reviewBeforeInsert = reviewBeforeInsert
         saveSettings()
     }
 
@@ -2461,6 +3064,7 @@ class MainViewModel: ObservableObject {
         postReleaseDrainTask = nil
         postReleaseDrainDeadline = nil
         invalidateActiveIdentityAndCursor()
+        revokeReviewAuthority()
         activeIngress?.fail(.cancelled)
         holdPacketJournal.cancelWaiters()
         captureDrainTask?.cancel()

@@ -11,6 +11,7 @@ struct AppSettings: Codable {
     var autoInsert: Bool = true
     var playSound: Bool = true
     var launchAtLogin: Bool = false
+    var reviewBeforeInsert: Bool = true
     private var credentialReadFailures = Set<CredentialAccount>()
     private var preserveLegacyCredentialsOnSave = false
 
@@ -103,7 +104,8 @@ struct AppSettings: Codable {
         let storedSettings = StoredSettings(
             autoInsert: autoInsert,
             playSound: playSound,
-            launchAtLogin: launchAtLogin
+            launchAtLogin: launchAtLogin,
+            reviewBeforeInsert: reviewBeforeInsert
         )
         guard let data = try? JSONEncoder().encode(storedSettings) else { return }
         defaults.set(data, forKey: Self.storageKey)
@@ -118,13 +120,15 @@ struct AppSettings: Codable {
         appSecret: String = "",
         autoInsert: Bool = true,
         playSound: Bool = true,
-        launchAtLogin: Bool = false
+        launchAtLogin: Bool = false,
+        reviewBeforeInsert: Bool = true
     ) {
         self.appId = appId
         self.appSecret = appSecret
         self.autoInsert = autoInsert
         self.playSound = playSound
         self.launchAtLogin = launchAtLogin
+        self.reviewBeforeInsert = reviewBeforeInsert
         self.preserveLegacyCredentialsOnSave = false
     }
 
@@ -135,6 +139,7 @@ struct AppSettings: Codable {
         autoInsert = try container.decodeIfPresent(Bool.self, forKey: .autoInsert) ?? true
         playSound = try container.decodeIfPresent(Bool.self, forKey: .playSound) ?? true
         launchAtLogin = try container.decodeIfPresent(Bool.self, forKey: .launchAtLogin) ?? false
+        reviewBeforeInsert = try container.decodeIfPresent(Bool.self, forKey: .reviewBeforeInsert) ?? true
         credentialReadFailures = []
         preserveLegacyCredentialsOnSave = false
     }
@@ -144,6 +149,7 @@ struct AppSettings: Codable {
         try container.encode(autoInsert, forKey: .autoInsert)
         try container.encode(playSound, forKey: .playSound)
         try container.encode(launchAtLogin, forKey: .launchAtLogin)
+        try container.encode(reviewBeforeInsert, forKey: .reviewBeforeInsert)
     }
 
     private static func loadCredential(account: CredentialAccount) -> CredentialLoadResult {
@@ -210,6 +216,7 @@ struct AppSettings: Codable {
         case autoInsert
         case playSound
         case launchAtLogin
+        case reviewBeforeInsert
     }
 }
 
@@ -224,13 +231,30 @@ private struct StoredSettings: Codable {
     var autoInsert: Bool
     var playSound: Bool
     var launchAtLogin: Bool
+    var reviewBeforeInsert: Bool
 
-    init(autoInsert: Bool = true, playSound: Bool = true, launchAtLogin: Bool = false) {
+    init(
+        autoInsert: Bool = true,
+        playSound: Bool = true,
+        launchAtLogin: Bool = false,
+        reviewBeforeInsert: Bool = true
+    ) {
         self.appId = nil
         self.appSecret = nil
         self.autoInsert = autoInsert
         self.playSound = playSound
         self.launchAtLogin = launchAtLogin
+        self.reviewBeforeInsert = reviewBeforeInsert
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        appId = try container.decodeIfPresent(String.self, forKey: .appId)
+        appSecret = try container.decodeIfPresent(String.self, forKey: .appSecret)
+        autoInsert = try container.decodeIfPresent(Bool.self, forKey: .autoInsert) ?? true
+        playSound = try container.decodeIfPresent(Bool.self, forKey: .playSound) ?? true
+        launchAtLogin = try container.decodeIfPresent(Bool.self, forKey: .launchAtLogin) ?? false
+        reviewBeforeInsert = try container.decodeIfPresent(Bool.self, forKey: .reviewBeforeInsert) ?? true
     }
 
     var appSettings: AppSettings {
@@ -239,11 +263,21 @@ private struct StoredSettings: Codable {
             appSecret: appSecret ?? "",
             autoInsert: autoInsert,
             playSound: playSound,
-            launchAtLogin: launchAtLogin
+            launchAtLogin: launchAtLogin,
+            reviewBeforeInsert: reviewBeforeInsert
         )
     }
 
     var containsLegacyCredentials: Bool {
         appId != nil || appSecret != nil
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case appId
+        case appSecret
+        case autoInsert
+        case playSound
+        case launchAtLogin
+        case reviewBeforeInsert
     }
 }

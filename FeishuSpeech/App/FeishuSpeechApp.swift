@@ -1,9 +1,19 @@
+import Foundation
 import SwiftUI
 
 @main
 struct FeishuSpeechApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    @StateObject private var viewModel = MainViewModel()
+    @StateObject private var viewModel: MainViewModel
+
+    init() {
+        #if DEBUG
+        let settings = Self.isUnitTestHost ? AppSettings() : nil
+        #else
+        let settings: AppSettings? = nil
+        #endif
+        _viewModel = StateObject(wrappedValue: MainViewModel(settings: settings))
+    }
     
     var body: some Scene {
         MenuBarExtra {
@@ -23,4 +33,10 @@ struct FeishuSpeechApp: App {
             SettingsView(viewModel: viewModel)
         }
     }
+
+    #if DEBUG
+    private static var isUnitTestHost: Bool {
+        ProcessInfo.processInfo.environment["XCTestBundlePath"] != nil
+    }
+    #endif
 }

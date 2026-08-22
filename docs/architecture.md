@@ -2,11 +2,13 @@
 
 Document system boundaries, major components, data flow, and deployment shape.
 
-## Cursor-bound streaming speech architecture (issues #25/#26/#27/#28)
+## Streaming speech and review-first architecture (issues #25/#26/#27/#28/#38)
 
 Issue #25 accepted the initial design, issue #26 implemented the generation-bound streaming
 pipeline, issue #27 corrects held response assembly to complete snapshot replacement, and
-issue #28 splits capture from recognition so PCM is journaled even while Feishu factory hangs:
+issue #28 splits capture from recognition so PCM is journaled even while Feishu factory hangs.
+Issue #38 adds a default-on review-first route as an independent third asynchronous axis, while
+retaining issue #27 as the explicit compatibility route:
 
 ```text
 HotKeyService
@@ -14,8 +16,9 @@ HotKeyService
       -> capture line: AudioRecorder -> byte-bounded PCM ingress -> HoldPacketJournal
       -> recognition line: factory / one send loop over HoldPacketJournal
           -> snapshot/replay ledger -> one fresh FeishuStreamingSession actor per attempt
-      -> optional CursorTextSession (@MainActor) -> original AX editable element
-      -> CurrentFocusAppendSession -> PID-bound grapheme-aware keyboard replacement
+      -> review line (default): read-only streaming -> read-only sealing -> editable
+          -> explicit confirm -> captured original application/AX selection -> one targeted Cmd+V
+      -> compatibility only: CursorTextSession or CurrentFocusAppendSession
 ```
 
 The production hot-key state is `idle -> pending -> streaming -> sealing -> idle | error`.
@@ -35,6 +38,14 @@ authoritative action-2 final. Completion closes the output owner only after that
 A new hold
 cannot start while sealing. Reset, sleep/wake, cancellation, or terminal lifecycle failure
 invalidates the active generation before cleanup so late callbacks are inert.
+
+`reviewBeforeInsert` and `autoInsert` are sampled once at accepted-Fn start. The default
+`reviewBeforeInsert == true` route opens a separate review state
+`idle -> streaming(read-only) -> sealing(read-only) -> editable -> confirming | discard -> idle`.
+It captures the original destination before audio/network startup, never arms a live cursor or
+keyboard writer, and does not mutate the target until explicit confirmation. `autoInsert` has no
+authority in this route. When `reviewBeforeInsert == false`, the existing issue #27 continuous
+writer and the sampled `autoInsert` value remain the compatibility behavior.
 
 ### Streaming audio boundary
 
@@ -122,9 +133,101 @@ serialization, and exact-once terminal behavior are FeishuSpeech application inv
 Feishu documentation does not guarantee their runtime acceptance or idempotency; credential-bearing
 Release UAT remains pending.
 
-### Cursor-writing boundary
+### Review-first third axis and same-panel authority
 
-The post-UAT correction supersedes the original strict destination startup gate. Failure to
+`TranscriptionReviewState` is separate from `RecordingState` and from the two data lines:
+
+```text
+captureDrainTask: recorder ingress -> HoldPacketJournal
+consumerTask:     factory/retry -> journal replay/live send -> action 2
+review surface:   observe newly owned snapshots -> render one panel -> edit/confirm/discard
+```
+
+The first two task roots retain their issue #28 topology. `drainCapturedAudio` has no review
+presenter reference. The recognition consumer does not await read-only presentation, editor
+readiness, activation, focus, dismissal, or delivery. Review rendering adds no journal wake-up,
+retry condition, replay ordering, buffer, `AsyncSequence`, or backpressure edge.
+
+After strict destination capture succeeds, `MainViewModel` establishes a review ID and publishes
+`.streaming(preview: "")`. Read-only rendering runs on a cancellable, revision-gated fire-and-forget
+main-actor task; a newer snapshot can cancel a render that has not reached the presenter. Each
+newly owned, changed, non-contentless opaque snapshot replaces the preview in full. Equal values,
+historical replay, stale generations, closed admission, and late callbacks do not render.
+
+`ReviewWindowController` retains one `ReviewPanel`. During streaming/sealing it cannot become key
+or main, ignores mouse events, is not closable, and shows `正在聆听…` or `正在完成识别…` without taking
+focus from the captured target. Physical release changes the same panel to sealing and retains the
+latest preview; it does not dismiss or recreate the surface. This review panel is separate from
+the unchanged status-only `OverlayWindowController` / `RecordingOverlayView` pair.
+
+The authoritative action-2 result freezes the draft and closes response/retry admission. A
+non-contentless final is used exactly. A contentless final falls back to the last usable snapshot
+and marks it `可能不完整`; if neither value is usable, the surface returns to idle without opening
+an empty editor. Action 2 starts a separate review-transition task. Only that task waits for the
+existing recorder barrier and then for the same panel to become key with its exact multiline editor
+focused. Editable readiness is bounded to two seconds. Neither data-line task stores or awaits this
+transition.
+
+The editable panel accepts ordinary Return as text. `输入` and Command+Return confirm; `取消`,
+Escape, and window close discard. Whitespace-only text remains editable and cannot confirm.
+Discard performs no activation, AX write, pasteboard mutation, synthetic event, or recovery copy.
+Human edits update the review state only, and late recognition cannot overwrite them.
+
+Confirmation consumes authority synchronously before the first await: it freezes the exact
+untrimmed draft, changes to `.confirming`, advances the review revision, and dismisses the panel
+before starting delivery. Repeated confirmation or stale callbacks cannot create a second delivery.
+A pending editable/confirming review also prevents a successor Fn interaction from replacing it.
+
+### Review original-target and pasteboard boundary
+
+Review capture is stricter than compatibility output. Before audio/network startup it requires:
+
+- Accessibility trust and Secure Event Input off;
+- a focused element whose positive PID equals the frontmost process;
+- an affirmatively supported non-secure editable role/subrole;
+- a valid original selected range plus settable focus and selection-range attributes; and
+- a complete application identity: PID, bundle identifier, executable URL, and launch date.
+
+The token keeps the exact `AXUIElement` and selection in memory. Review capture performs no AX
+setter and does not query whether `kAXSelectedTextAttribute` is settable. Missing identity or
+destination uncertainty fails startup; review-first never falls through to a compatibility writer
+or ambient current focus.
+
+On confirmation, `SystemReviewDestinationDelivery` verifies the complete process-reuse-safe
+identity, requests activation of that exact application once, and waits at most two seconds. It
+then restores focus only to the captured AX element, verifies that exact focused element, restores
+and rereads the original selection, and rechecks application/frontmost/security state before any
+pasteboard mutation. The review route never writes `kAXSelectedTextAttribute`.
+
+The delivery helper accepts LF as multiline data without normalizing the draft, while rejecting
+NUL, tab, carriage return, DEL, and C1 controls before mutation. It snapshots every data-bearing
+type from every prior pasteboard item, writes the exact draft, and posts one Cmd+V pair to the
+captured PID. Postflight rechecks exact application identity, frontmost authority, focused AX
+element, Accessibility trust, and Secure Input; it does not require the pre-paste selection after
+the target application has owned the edit.
+
+Only a successful key post plus successful postflight schedules one bounded clipboard restoration.
+The scheduled operation checks that `NSPasteboard.general.changeCount` is still the value created
+by this review write, and the concrete restore repeats the check immediately before clearing or
+writing. Thus a third-party clipboard change is never overwritten. Key-post or postflight
+uncertainty schedules no automatic restoration and no delivery retry.
+
+Activation, identity, target, security, text, key-post, or postflight failure is terminal and never
+retargets. Except for cancellation, the currently owned failure copies the exact frozen draft once
+for manual recovery with transcript-free feedback; cancellation performs no copy. Editable-window
+readiness failure uses the same one-copy recovery. Manual recovery intentionally leaves the draft
+on the general pasteboard.
+
+Reset, sleep/wake, permission loss, Secure Input, abnormal termination, and cleanup revoke the
+review ID/revision, cancel presentation/transition/delivery tasks, clear transcript state and
+callbacks, and dismiss the panel. A stale task cannot remount, deliver, or copy. Transcript content
+is never added to logs, diagnostics, window titles, fixed feedback, notification text, persistence,
+or transcript-derived hashes.
+
+### Compatibility cursor-writing boundary
+
+This section applies only when `reviewBeforeInsert == false`. The post-UAT correction supersedes
+the original strict destination startup gate for that compatibility route. Failure to
 capture or confirm an Accessibility cursor/focused element no longer blocks audio capture or the
 Feishu stream. AX-backed live replacement is an opportunistic enhancement, not a prerequisite for
 recognition.
@@ -215,13 +318,14 @@ neither synthetic input nor recovery copy. `autoInsert=false` produces no target
 mutation. Usable held recognition is tracked separately from output eligibility, so disabled,
 unsafe, or ownerless output is not misreported as empty recognition or a stream failure.
 
-### Finalization and privacy
+### Shared finalization and privacy
 
 Release closes capture, not current-generation recognition authority. The recorder barrier first
 proves that queued callbacks and the accepted tail are closed; the coordinator then drains every
 journaled packet, retries recoverable attempts within the remaining budget, and waits for action 2.
-A safe non-empty action-2 snapshot is authoritative and is offered to the existing AX or fixed-PID
-owner before response admission closes. Callbacks from a stale generation, retired/timed-out
+A safe non-empty action-2 snapshot is authoritative. In review-first mode it freezes the draft and
+starts the independent recorder-barrier/editable transition; in compatibility mode it is offered
+to the existing AX or fixed-PID owner before response admission closes. Callbacks from a stale generation, retired/timed-out
 attempt, expired drain, or completed terminal boundary are transcript-free suppressed inputs and
 cannot mutate output. Because PID posting has no target
 acceptance acknowledgement, this is retained local submission state rather than proof that text is
@@ -235,8 +339,9 @@ separately, and reports fixed streaming failure only when no safe output exists;
 suppressed. A successful packet ACK resets the consecutive retry streak, including after repeated
 backend `10024` responses.
 
-The overlay remains status-only; target applications are the editing surface. Empty-recognition and
-uncertain-output outcomes use fixed, neutral, generation-guarded feedback presented
+The recording overlay remains status-only and is unchanged. The separate review panel is the
+editing surface in review-first mode; target applications remain the live editing surface only in
+compatibility mode. Empty-recognition and uncertain-output outcomes use fixed, neutral, generation-guarded feedback presented
 for two seconds even though the coordinator has already returned to idle. The neutral strings do
 not claim that a target accepted an event or that visible text was preserved. Logs may include
 typed state/eligibility/ownership/output outcomes, generations, attempt and journal indices,
@@ -306,7 +411,10 @@ and blanked settings.
 `AppSettings` still exposes `appId` and `appSecret` to the app at runtime, but
 its custom `Codable` implementation does not encode those fields into
 `FeishuSpeechSettings`. That user-defaults payload is limited to `autoInsert`,
-`playSound`, and `launchAtLogin`.
+`playSound`, `launchAtLogin`, and `reviewBeforeInsert`. Both decoding layers use
+`decodeIfPresent(Bool.self, forKey: .reviewBeforeInsert) ?? true`, so an older valid payload
+without the field safely selects the new default without discarding other preferences. An explicit
+`false` persists the issue #27 compatibility route.
 
 Loading settings performs a guarded migration from legacy credentials:
 
@@ -445,12 +553,9 @@ input observability was lost. FeishuSpeech's tagged synthetic events and the Fn 
 are excluded. Local/global AppKit monitors remain supplemental; failure to install either prevents
 the writer from arming.
 
-## TextInputSimulator — clipboard-restore contract
+## TextInputSimulator — compatibility input and review pasteboard contracts
 
-The legacy compatibility helper in `TextInputSimulator` writes a final string to
-`NSPasteboard.general`, sends a synthetic Cmd+V, then restores the previous clipboard state
-(issue #13, see `docs/decisions/D-13-01.md`). Production streaming output never uses this
-path. It instead:
+The issue #27 compatibility route does not use a pasteboard. It instead:
 
 - permits LF only on the verified AX range path, where it is multiline text data; the generic
   keyboard-event path rejects LF and all other C0/C1/DEL controls before claim/post;
@@ -467,7 +572,26 @@ path. It instead:
   never falls through to a full resend, Cmd+V, another target, or clipboard recovery;
 - never performs release-time one-shot/final-only insertion or manual clipboard recovery.
 
-The older compatibility helper retains these clipboard-restore mechanics:
+Issue #38 adds a separate two-phase paste transaction for explicit review confirmation. It is not a
+fallback from the compatibility writer. After complete application/AX preflight, it accepts the
+exact non-contentless frozen draft with LF as multiline data, snapshots every prior pasteboard item
+and data-bearing type, writes once, posts one Cmd+V pair to the captured PID, and performs exact
+application/focus/security postflight. Only a certain `.inserted` result schedules restoration.
+
+Review restoration is conditional rather than unconditional:
+
+- **Full snapshot before write.** Every item and every available type payload is captured, including
+  non-string data such as RTF or images.
+- **Expected-change gate.** The scheduled operation proceeds only if `changeCount` still equals the
+  count produced by this review write. The concrete restore repeats that guard immediately before
+  clearing or writing.
+- **Third-party ownership wins.** Any intervening pasteboard mutation suppresses restoration, so a
+  newer clipboard value is never overwritten.
+- **Uncertainty is terminal.** Key-event or postflight uncertainty schedules no restoration and no
+  retry. `MainViewModel` copies the exact frozen draft once for manual recovery on a current
+  non-cancellation failure.
+
+The older issue #13 helper remains for non-review callers and retains its historical mechanics:
 
 - **Full snapshot before write.** Before placing the transcribed text on the pasteboard, the
   simulator reads every `type` from `NSPasteboard.general` and stores a
@@ -506,6 +630,15 @@ recording overlay.
 
 ## Verification boundary
 
+The final issue #38 candidate passes 59/59 focused tests and a full run of 408 executed tests with
+1 skipped and 0 failures. Debug and Release builds, strict SwiftLint, diff checks, static checks
+that the legacy overlay files and project file remain untouched, and independent correctness and
+security/privacy reviews also pass. Automated coverage includes default-on/legacy-payload settings,
+same-panel read-only/editable authority, opaque snapshot/replay fences, action-2 and recorder-
+barrier ordering, nonblocking capture/recognition axes, human edit protection, exact-once
+confirm/discard, process-reuse-safe original-target validation, multiline/control classification,
+terminal uncertainty, manual recovery, and conditional full-pasteboard restoration.
+
 Issue #26's 272/272 lifecycle-free evidence predates the issue #27 correction and must not be used
 as proof of snapshot reconciliation. Issue #27 requires focused and full-suite evidence for
 duplicate, extension, shorter, revision, replay, Unicode grapheme, ordered transaction, suspension,
@@ -516,8 +649,8 @@ operation watchdogs, deadline races, delivery-state expiry, and stale callback s
 Automated evidence still cannot prove target-control acceptance or credential-bearing service
 behavior.
 
-Credential-bearing Feishu behavior and cross-application Accessibility compatibility remain live
-UAT. Installed build 5 recorded 66 HTTP-200 transactions over 13.55 seconds while visible output
+Credential-bearing Feishu behavior, real WindowServer panel activation/key focus, and
+cross-application Accessibility/Cmd+V compatibility remain live UAT. Installed build 5 recorded 66 HTTP-200 transactions over 13.55 seconds while visible output
 stopped after one word. This proves continuing transport, not response shape, output ownership, or
 target acceptance. The snapshot-replacement policy, subsequent actions, terminal encoding, real
 text/token-refresh behavior, PCM/tail handling, slow networks,
@@ -525,5 +658,6 @@ native/browser/Electron/terminal/rich-text targets, focus/caret interference, Un
 remain owner-UAT gates. No broad application compatibility is claimed yet.
 
 In particular, `CGEventPostToPid` has no target acceptance acknowledgement. A locally submitted
-replacement transaction with no visible target text remains PARTIAL and must not trigger global
-HID posting, retries, rollback, or an alternate clipboard path after uncertainty.
+compatibility replacement or review-confirmation Cmd+V with no visible target text remains PARTIAL
+and must not trigger global HID posting, retries, rollback, retargeting, or a second automatic
+delivery path after uncertainty.

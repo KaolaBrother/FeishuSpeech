@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### Added
+- 新增默认开启的「输入前预览」：按住 Fn 时在同一非激活面板以只读方式展示完整不透明 snapshot，松开后保持 sealing；权威 `action=2` 与 recorder barrier 都结算后，同一面板才转为多行草稿。用户可编辑并通过「输入」/Command+Return 显式确认，或通过「取消」/Escape/关窗丢弃且零写入（issue #38）
+- 新增审阅第三异步轴与原目标交付权限：设置会在每次 accepted Fn 开始时采样；审阅状态/渲染不给 capture-to-journal 生产线或 recognition consumer/retry/replay 消费线增加依赖、等待或 backpressure。关闭「输入前预览」时保留 issue #27 连续输出及旧 `autoInsert` 语义（issue #38）
+- `reviewBeforeInsert` 偏好默认为 `true`；旧版 UserDefaults JSON 缺少字段时通过 `decodeIfPresent` 安全迁移到审阅路由，显式关闭会持久化且不改写凭据或其他兼容偏好（issue #38）
 - 新增完整 snapshot reconciliation：packet replay ownership 与识别状态分离；任意当前焦点目标以 Swift `Character` 最长公共前缀计算恰好所需的 Backspace，再输入 replacement suffix（issue #27）
 - 新增按键内韧性流式会话：可恢复的网络/超时/部分 HTTP 和业务码 `10024` 失败会在 Fn 仍按住时以 250 ms 起步、4 s 封顶的指数退避创建新串行会话；同一录音/入口持续捕获，已录分片通过有序 journal 从头回放，已拥有的历史 index 不重复输出（issue #26）
 - 新增 generation-scoped 响应输出 ledger：每个符合条件的 journal packet index 只拥有一次原始标量，并按响应顺序拼接为增长的 UTF-16 frontier。相同、不相交和修订值都会作为不同 index 的本地输出策略拼接，不代表已证明飞书供应商语义（issue #26）
@@ -16,6 +19,8 @@
 - 新增 `MainViewModelTests` 覆盖 `MonitoringState` 失败映射、恢复清除和 cleanup 订阅释放路径（issues #22/#23/#24）
 
 ### Fixed
+- 审阅确认在开始音频/网络前捕获 PID、bundle ID、executable URL、launch date、精确 AX 元素和原选区；交付前有界激活原应用并恢复/复核该选区，然后只发送一次进程定向 Cmd+V。身份、焦点、选区、Secure Input 或交付不确定均 fail closed，不重定向、不重试；非取消失败将冻结草稿精确复制一次供手动恢复（issue #38）
+- 审阅粘贴成功路径现保存原剪贴板的每个 item 及其全部 data-bearing type，仅在进程定向 Cmd+V 和 postflight 都成功后安排一次有界恢复；调度时和真正恢复前都以本次写入的 `changeCount` 为门，不覆盖第三方剪贴板变化。按键投递或 postflight 不确定时不自动恢复、不重试，改为保留精确草稿的手动恢复（issue #38）
 - 修复 VPN 开启时流式识别仍走海外 CDN / TUN：keep-alive 在运行时物理网卡上做 bound UDP/53 DNS（DHCP option 6，再回退 recursor 主机名 `dns.alidns.com` / `public1.114dns.com`，跳过 `198.18.0.0/15`），TCP `IP_BOUND_IF` + CFStream TLS（SNI `open.feishu.cn`，证书链校验开启）。无 IP 字面量、不绑定 `en0`、无自定义 TLS verify。factory/packet/finish 在 keep-alive 连接类失败时不再 hop 到 URLSession。整文件识别仍走 URLSession（issue #34）
 - 修复 build 12 每次启动都要重填 App ID/Secret：#35 的 data-protection keychain 在无 `application-identifier` 时返回 -34018，读不到仍在 login keychain 的凭据。恢复 issue #18 的 login-keychain 读写；AppDelegate 仍只用 `launchAtLoginPreference(from:)` 同步开机启动（issue #36）
 - 修复 VPN 开启时流式识别不稳定：keep-alive 直连改为 primary 并禁止 TUN（`.other`），不绑定 `en0`；同一 watched factory/packet/finish 操作仅在无 HTTP 响应时 hop 一次到 URLSession。已完成 HTTP（含 4xx）与 CancellationError 不 hop；keep-alive 成功后粘性直连，URLSession 回退成功后粘性 URLSession；下一 attempt 重新从 keep-alive 开始（issue #33）

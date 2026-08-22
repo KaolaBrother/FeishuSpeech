@@ -14,27 +14,90 @@ protocol FinalTextOutput: AnyObject {
         destination: CursorDestinationToken,
         validateDestination: () throws -> Bool
     ) -> FinalTextInsertionResult
+    func insertOnce(
+        _ text: String,
+        destination: CursorDestinationToken,
+        validateBeforeMutation: () throws -> Bool,
+        validateAfterPosting: () throws -> Bool
+    ) -> FinalTextInsertionResult
     func insertAtCurrentFocusOnce(_ text: String) -> FinalTextInsertionResult
     func copyForManualRecovery(_ text: String)
 }
 
+extension FinalTextOutput {
+    /// Keeps pre-issue output implementations source-compatible while exposing the
+    /// two-phase contract to review-first delivery. Concrete implementations should
+    /// override this when they own the pasteboard and key-event boundary.
+    func insertOnce(
+        _ text: String,
+        destination: CursorDestinationToken,
+        validateBeforeMutation: () throws -> Bool,
+        validateAfterPosting: () throws -> Bool
+    ) -> FinalTextInsertionResult {
+        var validationCallCount = 0
+        let result = insertOnce(
+            text,
+            destination: destination,
+            validateDestination: {
+                validationCallCount += 1
+                if validationCallCount == 1 {
+                    return try validateBeforeMutation()
+                }
+                return try validateAfterPosting()
+            }
+        )
+        if validationCallCount >= 2, result == .destinationInvalid {
+            return .deliveryUncertain
+        }
+        return result
+    }
+}
+
 @MainActor
 final class SystemFinalTextOutput: FinalTextOutput {
+    private typealias ReviewPasteboardSnapshot = [[String: Data]]
+
     private let pasteboardWriter: FinalTextPasteboardWriting
     private let keyEventPoster: FinalTextKeyEventPosting
     private let currentFocusEventPoster: FinalTextCurrentFocusEventPosting
     private let secureInputStateProvider: SecureInputStateProviding
     private let frontmostProcessProvider: FrontmostProcessProviding
+    private let reviewPasteboardSnapshot: () -> ReviewPasteboardSnapshot
+    private let reviewPasteboardChangeCount: () -> Int
+    private let reviewPasteboardRestore: (ReviewPasteboardSnapshot, Int) -> Void
+    private let reviewPasteboardRestoreScheduler: (@escaping () -> Void) -> Void
 
     init(
         pasteboardWriter: FinalTextPasteboardWriting,
-        keyEventPoster: FinalTextKeyEventPosting
+        keyEventPoster: FinalTextKeyEventPosting,
+        reviewPasteboardSnapshot: (() -> [[String: Data]])? = nil,
+        reviewPasteboardChangeCount: (() -> Int)? = nil,
+        reviewPasteboardRestore: (([[String: Data]], Int) -> Void)? = nil,
+        reviewPasteboardRestoreScheduler: ((@escaping () -> Void) -> Void)? = nil
     ) {
         self.pasteboardWriter = pasteboardWriter
         self.keyEventPoster = keyEventPoster
         currentFocusEventPoster = SystemFinalTextCurrentFocusEventPoster()
         secureInputStateProvider = SystemSecureInputStateProvider()
         frontmostProcessProvider = SystemFrontmostProcessProvider()
+        self.reviewPasteboardSnapshot = reviewPasteboardSnapshot ?? {
+            TextInputSimulator.captureReviewPasteboardSnapshot()
+        }
+        self.reviewPasteboardChangeCount = reviewPasteboardChangeCount ?? {
+            NSPasteboard.general.changeCount
+        }
+        self.reviewPasteboardRestore = reviewPasteboardRestore ?? { snapshot, expectedChangeCount in
+            TextInputSimulator.restoreReviewPasteboardSnapshot(
+                snapshot,
+                ifChangeCount: expectedChangeCount
+            )
+        }
+        self.reviewPasteboardRestoreScheduler = reviewPasteboardRestoreScheduler ?? { operation in
+            DispatchQueue.global(qos: .userInteractive).async {
+                Thread.sleep(forTimeInterval: 1.0)
+                operation()
+            }
+        }
     }
 
     init(
@@ -42,13 +105,35 @@ final class SystemFinalTextOutput: FinalTextOutput {
         keyEventPoster: FinalTextKeyEventPosting,
         currentFocusEventPoster: FinalTextCurrentFocusEventPosting,
         secureInputStateProvider: SecureInputStateProviding,
-        frontmostProcessProvider: FrontmostProcessProviding
+        frontmostProcessProvider: FrontmostProcessProviding,
+        reviewPasteboardSnapshot: (() -> [[String: Data]])? = nil,
+        reviewPasteboardChangeCount: (() -> Int)? = nil,
+        reviewPasteboardRestore: (([[String: Data]], Int) -> Void)? = nil,
+        reviewPasteboardRestoreScheduler: ((@escaping () -> Void) -> Void)? = nil
     ) {
         self.pasteboardWriter = pasteboardWriter
         self.keyEventPoster = keyEventPoster
         self.currentFocusEventPoster = currentFocusEventPoster
         self.secureInputStateProvider = secureInputStateProvider
         self.frontmostProcessProvider = frontmostProcessProvider
+        self.reviewPasteboardSnapshot = reviewPasteboardSnapshot ?? {
+            TextInputSimulator.captureReviewPasteboardSnapshot()
+        }
+        self.reviewPasteboardChangeCount = reviewPasteboardChangeCount ?? {
+            NSPasteboard.general.changeCount
+        }
+        self.reviewPasteboardRestore = reviewPasteboardRestore ?? { snapshot, expectedChangeCount in
+            TextInputSimulator.restoreReviewPasteboardSnapshot(
+                snapshot,
+                ifChangeCount: expectedChangeCount
+            )
+        }
+        self.reviewPasteboardRestoreScheduler = reviewPasteboardRestoreScheduler ?? { operation in
+            DispatchQueue.global(qos: .userInteractive).async {
+                Thread.sleep(forTimeInterval: 1.0)
+                operation()
+            }
+        }
     }
 
     convenience init() {
@@ -79,6 +164,57 @@ final class SystemFinalTextOutput: FinalTextOutput {
             return try validateDestination() ? .inserted : .destinationInvalid
         } catch {
             return .destinationInvalid
+        }
+    }
+
+    func insertOnce(
+        _ text: String,
+        destination: CursorDestinationToken,
+        validateBeforeMutation: () throws -> Bool,
+        validateAfterPosting: () throws -> Bool
+    ) -> FinalTextInsertionResult {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              TextInputSimulator.isSafeForReviewConfirmation(text) else {
+            return .deliveryFailed
+        }
+        do {
+            guard try validateBeforeMutation() else { return .destinationInvalid }
+        } catch {
+            return .destinationInvalid
+        }
+
+        let reviewPasteboardSnapshot = reviewPasteboardSnapshot()
+        guard pasteboardWriter.replaceContents(with: text) else {
+            return .deliveryFailed
+        }
+        let postWriteChangeCount = reviewPasteboardChangeCount()
+        guard keyEventPoster.postCommandV(to: destination.processIdentifier) else {
+            return .deliveryUncertain
+        }
+        do {
+            guard try validateAfterPosting() else { return .deliveryUncertain }
+        } catch {
+            return .deliveryUncertain
+        }
+        scheduleReviewPasteboardRestore(
+            reviewPasteboardSnapshot,
+            expectedChangeCount: postWriteChangeCount
+        )
+        return .inserted
+    }
+
+    private func scheduleReviewPasteboardRestore(
+        _ snapshot: ReviewPasteboardSnapshot,
+        expectedChangeCount: Int
+    ) {
+        let changeCount = reviewPasteboardChangeCount
+        let restore = reviewPasteboardRestore
+        reviewPasteboardRestoreScheduler {
+            guard changeCount() == expectedChangeCount else {
+                logger.debug("Review pasteboard changed after insertion; skipping restoration")
+                return
+            }
+            restore(snapshot, expectedChangeCount)
         }
     }
 
@@ -562,6 +698,17 @@ enum TextInputSimulator {
         }
     }
 
+    /// Review confirmation preserves the exact multiline draft. LF is the only
+    /// control scalar admitted here; tabs, CR, NUL, DEL, and C1 controls remain
+    /// rejected before any destination or pasteboard mutation.
+    static func isSafeForReviewConfirmation(_ text: String) -> Bool {
+        !text.unicodeScalars.contains { scalar in
+            let value = scalar.value
+            if value == 0x0A { return false }
+            return value < 0x20 || value == 0x7F || (0x80 ... 0x9F).contains(value)
+        }
+    }
+
     static func isSafeForAutomaticKeyboardText(_ text: String) -> Bool {
         !text.unicodeScalars.contains { scalar in
             let value = scalar.value
@@ -664,6 +811,46 @@ enum TextInputSimulator {
         }
         logger.debug("Captured \(items.count) pasteboard item(s) (changeCount = \(changeCountBefore))")
         return PasteboardSnapshot(items: items, changeCountBeforeWrite: changeCountBefore)
+    }
+
+    /// Captures all data-bearing types from every existing pasteboard item for
+    /// the review-confirmation transaction.
+    fileprivate static func captureReviewPasteboardSnapshot() -> [[String: Data]] {
+        (NSPasteboard.general.pasteboardItems ?? []).map { item in
+            var dataByType: [String: Data] = [:]
+            for pasteboardType in item.types {
+                if let data = item.data(forType: pasteboardType) {
+                    dataByType[pasteboardType.rawValue] = data
+                }
+            }
+            return dataByType
+        }
+    }
+
+    /// Restores the full review snapshot only while the paste written by this
+    /// process is still the current pasteboard contents.
+    fileprivate static func restoreReviewPasteboardSnapshot(
+        _ snapshot: [[String: Data]],
+        ifChangeCount expectedChangeCount: Int
+    ) {
+        let pasteboard = NSPasteboard.general
+        guard pasteboard.changeCount == expectedChangeCount else {
+            logger.debug("Review pasteboard changed before restoration; leaving it untouched")
+            return
+        }
+
+        let restoredItems = snapshot.map { dataByType -> NSPasteboardItem in
+            let item = NSPasteboardItem()
+            for (rawType, data) in dataByType {
+                item.setData(data, forType: NSPasteboard.PasteboardType(rawValue: rawType))
+            }
+            return item
+        }
+        pasteboard.clearContents()
+        if !restoredItems.isEmpty {
+            pasteboard.writeObjects(restoredItems)
+        }
+        logger.debug("Restored \(restoredItems.count) review pasteboard item(s)")
     }
 
     /// Restores a previously captured snapshot back to the pasteboard.

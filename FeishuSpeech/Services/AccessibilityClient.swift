@@ -37,10 +37,45 @@ protocol AccessibilityRuntime: AnyObject {
     func string(for range: CursorTextRange, in element: AXUIElement) throws -> String
     func setSelectedTextRange(_ range: CursorTextRange, on element: AXUIElement) throws
     func setSelectedText(_ text: String, on element: AXUIElement) throws
+    func setFocused(_ focused: Bool, on element: AXUIElement) throws
+    func readSecurityState(for element: AXUIElement) -> DestinationSecurityState
+}
+
+extension AccessibilityRuntime {
+    /// Existing compatibility test doubles do not need review-only focus support.
+    /// Review capture/delivery treats the default as a hard failure.
+    func setFocused(_: Bool, on _: AXUIElement) throws {
+        throw AccessibilityClientError.operationFailed
+    }
+
+    func readSecurityState(for element: AXUIElement) -> DestinationSecurityState {
+        do {
+            guard let role = try role(for: element),
+                  [kAXTextFieldRole as String, kAXTextAreaRole as String].contains(role),
+                  let subrole = try subrole(for: element) else {
+                return .unverifiable
+            }
+            if subrole == (kAXSecureTextFieldSubrole as String) {
+                return .secure
+            }
+            return ["AXStandard", kAXSearchFieldSubrole as String].contains(subrole)
+                ? .safe
+                : .unverifiable
+        } catch {
+            return .unverifiable
+        }
+    }
 }
 
 @MainActor
-final class MacAccessibilityClient: AccessibilityClient {
+protocol ReviewDestinationAccessing: AnyObject {
+    func captureReviewCursorDestination(generation: UInt64) throws -> CursorDestinationToken
+    func restoreAndValidateBeforeDelivery(_ token: CursorDestinationToken) throws -> Bool
+    func validateAfterDelivery(_ token: CursorDestinationToken) throws -> Bool
+}
+
+@MainActor
+final class MacAccessibilityClient: AccessibilityClient, ReviewDestinationAccessing {
     private let runtime: AccessibilityRuntime
 
     init(runtime: AccessibilityRuntime) {
@@ -145,6 +180,97 @@ final class MacAccessibilityClient: AccessibilityClient {
 
     func setSelectedText(_ text: String, for token: CursorDestinationToken) throws {
         try runtime.setSelectedText(text, on: token.element)
+    }
+
+    func captureReviewCursorDestination(generation: UInt64) throws -> CursorDestinationToken {
+        guard runtime.isProcessTrusted else {
+            throw AccessibilityClientError.accessibilityUnavailable
+        }
+        guard !runtime.isSecureEventInputEnabled else {
+            throw AccessibilityClientError.accessibilityUnavailable
+        }
+
+        let element = try runtime.focusedElement()
+        let processIdentifier = try runtime.processIdentifier(for: element)
+        guard processIdentifier > 0,
+              processIdentifier == runtime.frontmostProcessIdentifier() else {
+            throw AccessibilityClientError.cannotComplete
+        }
+        guard try securityState(for: element) == .safe else {
+            throw AccessibilityClientError.accessibilityUnavailable
+        }
+
+        let selection = try runtime.selectedTextRange(for: element)
+        guard selection.location >= 0,
+              selection.length >= 0,
+              selection.endLocation != nil else {
+            throw AccessibilityClientError.invalidValue
+        }
+        guard try runtime.isAttributeSettable(
+            kAXSelectedTextRangeAttribute as String,
+            on: element
+        ) else {
+            throw AccessibilityClientError.accessibilityUnavailable
+        }
+        guard try runtime.isAttributeSettable(
+            kAXFocusedAttribute as String,
+            on: element
+        ) else {
+            throw AccessibilityClientError.accessibilityUnavailable
+        }
+
+        return CursorDestinationToken(
+            generation: generation,
+            processIdentifier: processIdentifier,
+            element: element,
+            originalSelection: selection
+        )
+    }
+
+    func restoreAndValidateBeforeDelivery(_ token: CursorDestinationToken) throws -> Bool {
+        guard runtime.isProcessTrusted,
+              !runtime.isSecureEventInputEnabled,
+              token.processIdentifier > 0,
+              try runtime.processIdentifier(for: token.element) == token.processIdentifier,
+              try securityState(for: token.element) == .safe else {
+            return false
+        }
+
+        guard try runtime.isAttributeSettable(kAXFocusedAttribute as String, on: token.element),
+              try runtime.isAttributeSettable(
+                  kAXSelectedTextRangeAttribute as String,
+                  on: token.element
+              ) else {
+            return false
+        }
+
+        try runtime.setFocused(true, on: token.element)
+        let focusedElement = try runtime.focusedElement()
+        guard CFEqual(focusedElement, token.element) else {
+            return false
+        }
+
+        try runtime.setSelectedTextRange(token.originalSelection, on: token.element)
+        guard try runtime.selectedTextRange(for: token.element) == token.originalSelection else {
+            return false
+        }
+        guard !runtime.isSecureEventInputEnabled,
+              runtime.readSecurityState(for: token.element) == .safe else {
+            return false
+        }
+        return true
+    }
+
+    func validateAfterDelivery(_ token: CursorDestinationToken) throws -> Bool {
+        guard runtime.isProcessTrusted,
+              !runtime.isSecureEventInputEnabled,
+              token.processIdentifier > 0,
+              try runtime.processIdentifier(for: token.element) == token.processIdentifier,
+              runtime.readSecurityState(for: token.element) == .safe else {
+            return false
+        }
+        let focusedElement = try runtime.focusedElement()
+        return CFEqual(focusedElement, token.element)
     }
 
     private func securityState(for element: AXUIElement) throws -> DestinationSecurityState {
@@ -260,6 +386,27 @@ private final class SystemAccessibilityRuntime: AccessibilityRuntime {
         guard result == .success else { throw map(result) }
     }
 
+    func setFocused(_ focused: Bool, on element: AXUIElement) throws {
+        let value: CFBoolean = focused ? kCFBooleanTrue : kCFBooleanFalse
+        let result = AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, value)
+        guard result == .success else { throw map(result) }
+    }
+
+    func readSecurityState(for element: AXUIElement) -> DestinationSecurityState {
+        do {
+            guard let role = try role(for: element), supportedEditableRoles.contains(role),
+                  let subrole = try subrole(for: element) else {
+                return .unverifiable
+            }
+            if subrole == (kAXSecureTextFieldSubrole as String) {
+                return .secure
+            }
+            return supportedNonSecureSubroles.contains(subrole) ? .safe : .unverifiable
+        } catch {
+            return .unverifiable
+        }
+    }
+
     private func stringAttribute(_ attribute: CFString, on element: AXUIElement) throws -> String? {
         var value: CFTypeRef?
         let result = AXUIElementCopyAttributeValue(element, attribute, &value)
@@ -286,5 +433,13 @@ private final class SystemAccessibilityRuntime: AccessibilityRuntime {
         default:
             return .operationFailed
         }
+    }
+
+    private var supportedEditableRoles: Set<String> {
+        [kAXTextFieldRole as String, kAXTextAreaRole as String]
+    }
+
+    private var supportedNonSecureSubroles: Set<String> {
+        ["AXStandard", kAXSearchFieldSubrole as String]
     }
 }
