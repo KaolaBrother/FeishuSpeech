@@ -4,6 +4,7 @@
 
 ### Added
 - 新增默认开启的「输入前预览」：按住 Fn 时在同一非激活面板以只读方式展示完整不透明 snapshot，松开后保持 sealing；权威 `action=2` 与 recorder barrier 都结算后，同一面板才转为多行草稿。用户可编辑并通过「输入」/Command+Return 显式确认，或通过「取消」/Escape/关窗丢弃且零写入（issue #38）
+- 调整输入前预览编辑器的确认键语义：未修饰 Return（含数字键盘 Enter）确认当前草稿，Shift+Return/Shift+Enter 插入换行，Command+Return 保持兼容确认；marked text 中的 Return 交给输入法，取消/Escape/关窗丢弃，纯空白不能确认（issue #39）
 - 新增审阅第三异步轴与原目标交付权限：设置会在每次 accepted Fn 开始时采样；审阅状态/渲染不给 capture-to-journal 生产线或 recognition consumer/retry/replay 消费线增加依赖、等待或 backpressure。关闭「输入前预览」时保留 issue #27 连续输出及旧 `autoInsert` 语义（issue #38）
 - `reviewBeforeInsert` 偏好默认为 `true`；旧版 UserDefaults JSON 缺少字段时通过 `decodeIfPresent` 安全迁移到审阅路由，显式关闭会持久化且不改写凭据或其他兼容偏好（issue #38）
 - 新增完整 snapshot reconciliation：packet replay ownership 与识别状态分离；任意当前焦点目标以 Swift `Character` 最长公共前缀计算恰好所需的 Backspace，再输入 replacement suffix（issue #27）

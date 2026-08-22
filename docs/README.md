@@ -2,7 +2,7 @@
 
 - [Architecture](architecture.md)
 - [API](api.md)
-- [Streaming speech and review-first implementation/design](streaming-speech-design.md) — issue #38 默认以同一面板展示只读 streaming/sealing snapshot，action 2 与 recorder barrier 后才可编辑并显式确认；审阅 UI 作为第三异步轴不阻塞 capture/journal 或 recognition/retry/replay；关闭设置仍使用 issue #27 兼容路由
+- [Streaming speech and review-first implementation/design](streaming-speech-design.md) — issue #38 默认以同一面板展示只读 streaming/sealing snapshot，action 2 与 recorder barrier 后才可编辑并显式确认；issue #39 规定未修饰 Return/数字键盘 Enter 确认、Shift+Return/Enter 换行、marked text 的 Return 交给输入法；审阅 UI 作为第三异步轴不阻塞 capture/journal 或 recognition/retry/replay；关闭设置仍使用 issue #27 兼容路由
 - [Capture/recognition split and direct-connect fallback (confirmed design)](designs/capture-recognition-split-direct-connect.md) — issues #28–#31; owner-confirmed 2026-08-20; implemented; streaming transport order later superseded by D-32-01, then D-34-01 for hop/DNS
 - [Conventions](conventions.md)
 - [Decisions](decisions/)
@@ -14,4 +14,5 @@
   - [D-32-01: Keep-alive primary and skip VPN/TUN](decisions/D-32-01.md) — issue #33；owner 2026-08-21 推翻 Q2-B：keep-alive 为 primary，禁止 `.other`，不绑定 `en0`；URLSession hop / fake-ip 范围由 D-34-01 取代
   - [D-34-01: Bound physical DNS and no URLSession hop](decisions/D-34-01.md) — issue #34；bound UDP/53 + `IP_BOUND_IF` TLS；factory/packet/finish 不 hop URLSession；无 IP 字面量
   - [D-38-01: Review-first live preview and explicit original-target delivery](decisions/D-38-01.md) — issue #38；默认开启、安全迁移、同一面板预览/编辑、exact-once fail-closed 原目标交付与剪贴板 `changeCount` 恢复门
+  - [D-39-01: Review editor Return confirmation policy](decisions/D-39-01.md) — issue #39；仅调整审阅编辑器键盘语义，D-38 的目标捕获、剪贴板生命周期、capture/journal、recognition/retry/replay 与第三异步轴保持不变
 - [Changelog](../CHANGELOG.md)

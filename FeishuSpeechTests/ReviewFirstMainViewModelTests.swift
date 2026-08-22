@@ -1,6 +1,8 @@
+import Foundation
+import AppKit
 import ApplicationServices
 import Combine
-import Foundation
+import SwiftUI
 import os.log
 import XCTest
 
@@ -56,6 +58,7 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
         XCTAssertEqual(context.accessibility.setSelectedTextCalls, [])
 
         context.presenter.invokeDraftChange("PRIVATE_EDIT_ATTEMPT")
+        context.presenter.invokeConfirm()
         XCTAssertEqual(
             context.viewModel.transcriptionReviewState,
             .streaming(preview: "PRIVATE_PARTIAL"),
@@ -71,7 +74,14 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
         }
         XCTAssertEqual(context.presenter.lastReadOnlyPreview, "PRIVATE_PARTIAL")
         XCTAssertEqual(context.presenter.lastReadOnlyPhase, .sealing)
+        context.presenter.invokeDraftChange("PRIVATE_SEALING_EDIT_ATTEMPT")
+        context.presenter.invokeConfirm()
         XCTAssertEqual(Set(context.presenter.surfaceIDs), Set([context.presenter.surfaceIdentity]))
+        XCTAssertEqual(
+            context.viewModel.transcriptionReviewState,
+            .sealing(preview: "PRIVATE_PARTIAL"),
+            "sealing must remain read-only until authoritative action 2"
+        )
         XCTAssertEqual(context.output.insertedTexts, [])
         XCTAssertEqual(context.accessibility.setSelectedTextCalls, [])
     }
@@ -104,6 +114,71 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
         await waitUntil { context.delivery.deliveredTexts.count == 1 }
 
         XCTAssertEqual(context.delivery.deliveredTexts, ["PRIVATE_EDITED_DRAFT"])
+        XCTAssertEqual(context.delivery.copyCalls, 0)
+        XCTAssertEqual(context.viewModel.transcriptionReviewState, .idle)
+    }
+
+    func test_reviewFirst_confirmationFreezesExactCurrentNonWhitespaceDraftAndDeliversOnce() async {
+        let context = makeContext(finishEvent: .final("PRIVATE_FINAL"))
+        let identity = StreamingSessionIdentity(generation: 3_839)
+        let draft = "  PRIVATE_EDITED_DRAFT\n"
+
+        await startAndSeal(context, identity: identity)
+        context.viewModel.reviewDraftText = draft
+        context.viewModel.confirmReviewDraft()
+        context.viewModel.confirmReviewDraft()
+        await waitUntil { context.delivery.deliveredTexts.count == 1 }
+
+        XCTAssertEqual(
+            context.delivery.deliveredTexts,
+            [draft],
+            "confirmation must deliver the current non-whitespace draft without trimming or normalizing"
+        )
+        XCTAssertEqual(context.delivery.copyCalls, 0)
+        XCTAssertEqual(context.viewModel.transcriptionReviewState, .idle)
+    }
+
+    func test_reviewFirst_repeatedBareReturnFromNativeEditorDeliversExactDraftOnce() async throws {
+        let nativePresenter = Issue39NativeReviewSurfacePresenter()
+        let context = makeContext(
+            finishEvent: .final("PRIVATE_NATIVE_FINAL"),
+            reviewSurfacePresenter: nativePresenter
+        )
+        let identity = StreamingSessionIdentity(generation: 3_840)
+        let editedDraft = "  PRIVATE_NATIVE_EDIT\n"
+
+        defer { nativePresenter.dismiss() }
+        await startAndSeal(context, identity: identity)
+
+        let window = try XCTUnwrap(nativePresenter.window)
+        let editor = try XCTUnwrap(nativePresenter.editor)
+        XCTAssertTrue(window.firstResponder === editor)
+
+        let initialRange = NSRange(location: 0, length: editor.string.utf16.count)
+        editor.setSelectedRange(initialRange)
+        editor.insertText(editedDraft, replacementRange: initialRange)
+        XCTAssertEqual(context.viewModel.reviewDraftText, editedDraft)
+
+        for _ in 0 ..< 2 {
+            let event = try XCTUnwrap(
+                NSEvent.keyEvent(
+                    with: .keyDown,
+                    location: .zero,
+                    modifierFlags: [],
+                    timestamp: 0,
+                    windowNumber: window.windowNumber,
+                    context: nil,
+                    characters: "\r",
+                    charactersIgnoringModifiers: "\r",
+                    isARepeat: false,
+                    keyCode: 36
+                )
+            )
+            editor.keyDown(with: event)
+        }
+
+        await waitUntil { context.delivery.deliveredTexts.count == 1 }
+        XCTAssertEqual(context.delivery.deliveredTexts, [editedDraft])
         XCTAssertEqual(context.delivery.copyCalls, 0)
         XCTAssertEqual(context.viewModel.transcriptionReviewState, .idle)
     }
@@ -614,7 +689,8 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
         holdStopBarrier: Bool = false,
         holdProviderFactory: Bool = false,
         holdReadOnlyPresentation: Bool = false,
-        editableTransitionResult: ReviewEditableTransitionResult = .ready
+        editableTransitionResult: ReviewEditableTransitionResult = .ready,
+        reviewSurfacePresenter: (any ReviewSurfacePresenting)? = nil
     ) -> Issue38ReviewContext {
         let recorder = Issue38ReviewAudioRecorder(holdStopBarrier: holdStopBarrier)
         let session = Issue38ReviewStreamingSession(
@@ -647,7 +723,7 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
             finalTextOutput: output,
             overlayPresenter: Issue38ReviewOverlayPresenter(),
             reviewDestinationDelivery: delivery,
-            reviewSurfacePresenter: presenter
+            reviewSurfacePresenter: reviewSurfacePresenter ?? presenter
         )
         recorder.resetTracking()
         return Issue38ReviewContext(
@@ -1060,6 +1136,74 @@ private final class Issue38ReviewSurfacePresenter: ReviewSurfacePresenting {
 
     func invokeDiscard() {
         discard?()
+    }
+}
+
+@MainActor
+private final class Issue39NativeReviewSurfacePresenter: ReviewSurfacePresenting {
+    private(set) var window: NSWindow?
+    private(set) var editor: NSTextView?
+    private var hostingView: NSHostingView<TranscriptionReviewView>?
+
+    func renderReadOnly(phase: ReviewReadOnlyPhase, preview: String) {}
+
+    func renderEditable(
+        draft: String,
+        isPossiblyIncomplete: Bool,
+        onDraftChange: @escaping @MainActor (String) -> Void,
+        onConfirm: @escaping @MainActor () -> Void,
+        onDiscard: @escaping @MainActor () -> Void
+    ) -> ReviewEditableTransitionResult {
+        let rootView = TranscriptionReviewView(
+            state: .editable(draft: draft, isPossiblyIncomplete: isPossiblyIncomplete),
+            onDraftChange: onDraftChange,
+            onConfirm: onConfirm,
+            onDiscard: onDiscard
+        )
+        let hostingView = NSHostingView(rootView: rootView)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 320),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hostingView
+        window.isReleasedWhenClosed = false
+        window.makeKeyAndOrderFront(nil)
+        hostingView.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        hostingView.layoutSubtreeIfNeeded()
+
+        guard let editor = editableTextView(in: hostingView),
+              window.makeFirstResponder(editor) else {
+            window.close()
+            return .failed
+        }
+
+        self.hostingView = hostingView
+        self.window = window
+        self.editor = editor
+        return .ready
+    }
+
+    func dismiss() {
+        window?.orderOut(nil)
+        window?.close()
+        editor = nil
+        hostingView = nil
+        window = nil
+    }
+
+    private func editableTextView(in view: NSView) -> NSTextView? {
+        if let textView = view as? NSTextView, textView.isEditable {
+            return textView
+        }
+        for subview in view.subviews.reversed() {
+            if let textView = editableTextView(in: subview) {
+                return textView
+            }
+        }
+        return nil
     }
 }
 

@@ -8,7 +8,7 @@ macOS 本地语音输入工具，使用飞书语音识别 API。
 - 👀 默认开启「输入前预览」：按住 Fn 时，同一预览面板以只读方式显示完整、不透明的流式 snapshot；相同 snapshot 不重复刷新，变长、缩短或修订都整体替换预览
 - 🔄 可恢复流式失败不会立即报错；应用在 Fn 按住期间及松开后的 bounded drain 内持续使用新会话重试，并保留已录音频的有序回放
 - ✏️ 松开 **Fn 键** 后同一面板保持只读并显示「正在完成识别…」；只有权威 `action=2` 已结算且录音队列屏障通过后，它才转为可编辑草稿
-- ✅ 只有点击「输入」或按 **Command+Return** 才会将未裁剪的编辑结果写回开始录音时捕获的原目标；「取消」、Escape 或关闭窗口不写入
+- ✅ 编辑器中按未修饰 **Return**（含数字键盘 **Enter**）、点击「输入」或按 **Command+Return** 才会将未裁剪的编辑结果写回开始录音时捕获的原目标；**Shift+Return/Shift+Enter** 只插入换行，输入法组合文本（marked text）中的 Return 交给输入法；「取消」、Escape 或关闭窗口不写入
 - 🔒 审阅路由会绑定原应用身份、精确 AX 元素与原选区；安全输入、密码框、目标漂移或交付不确定均 fail closed，不重定向、不自动重试
 - ⚙️ 关闭「输入前预览」可保留原有按住期间连续输出路由；「自动插入文字」的旧语义只在该兼容模式生效
 - 🌐 流式识别的租户 token 与 `stream_recognize` 走绑定物理网卡的 keep-alive（bound UDP DNS + `IP_BOUND_IF`），跳过 VPN/TUN；连接失败不再回退系统 URLSession。整文件识别仍走系统 URLSession
@@ -67,7 +67,7 @@ cp -R build/Build/Products/Release/FeishuSpeech.app /Applications/
 3. 继续按住并说话；「输入前预览」面板会以只读方式显示最新完整 snapshot，不会在原输入框中边听边改字
 4. 松开 **Fn 键**；面板保持同一个实例并转为「正在完成识别…」。松开只关闭采集，录音队列屏障后的尾包、在途请求、可恢复重连和 `action=2` 仍属于同一 generation
 5. 权威 `action=2` 结算后，同一面板转为多行编辑器。如果 final 为空但已有可用 snapshot，它会作为草稿并标注「可能不完整」；两者都无内容时不打开空编辑器
-6. 编辑后点击「输入」或按 **Command+Return**；普通 Return 只编辑换行。点击「取消」、按 Escape 或关闭窗口会放弃草稿而不写入，纯空白草稿不能确认
+6. 编辑后按未修饰 Return（含数字键盘 Enter）或点击「输入」确认；Shift+Return/Shift+Enter 插入换行，Command+Return 保持兼容确认。输入法组合文本（marked text）中的 Return 交给输入法；点击「取消」、按 Escape 或关闭窗口会放弃草稿而不写入，纯空白草稿不能确认
 
 默认审阅路由在开始音频/网络工作前捕获原应用和精确输入位置；确认时只尝试向该目标发送一次进程定向 Cmd+V。任何身份、激活、焦点、选区、Secure Input 或交付不确定都不会转向当前焦点或自动重试；非取消失败会将冻结草稿精确复制一次，供用户手动恢复。成功粘贴前会保存剪贴板全部 item/type 数据，只在粘贴后的有界机会内且 `changeCount` 仍属于本次写入时恢复；第三方剪贴板变化永不会被覆盖。
 
@@ -77,7 +77,7 @@ cp -R build/Build/Products/Release/FeishuSpeech.app /Applications/
 
 > build 6 的隐私安全诊断已确认重复来自把每个新 packet index 的完整 snapshot 错当成 delta 拼接，而非 replay、重连或 transport 失败。当前契约改为完整 snapshot 替换；`CGEventPostToPid` 仍没有目标接受确认，Release owner UAT 仍是必需门槛。
 
-Issue #38 最终候选已通过聚焦测试 59/59，完整套件执行 408 个测试（其中 1 个跳过、0 失败），并通过 strict SwiftLint 与 Debug/Release 构建。这些自动化结果不替代真实麦克风、凭据、WindowServer、Accessibility 恢复和第三方应用 Cmd+V 接收 UAT。
+Issue #39 最终候选已通过聚焦测试 40/40，完整套件为 423 个执行、1 个跳过、0 个失败，并通过 strict SwiftLint 与 Debug/Release 构建。这些自动化结果不替代真实麦克风、凭据、WindowServer、Accessibility 恢复和第三方应用 Cmd+V 接收 UAT。
 
 ## 常见问题
 

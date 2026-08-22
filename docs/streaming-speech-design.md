@@ -1,9 +1,10 @@
 # Streaming speech and review-first design
 
-Status: issue #38 default-on review-first, issue #27 compatibility output, snapshot replacement,
-release-drain lifecycle, resilience watchdogs, and the atomic HID interference gate are
-implemented. The issue #38 candidate passes 59/59 focused tests and 408 full-suite executions with
-1 skipped and 0 failures, plus strict SwiftLint and Debug/Release builds. Installed Release
+Status: issue #38 default-on review-first plus issue #39 editable keyboard policy, issue #27
+compatibility output, snapshot replacement, release-drain lifecycle, resilience watchdogs, and the
+atomic HID interference gate are implemented. The issue #39 candidate passes 40/40 focused tests
+and 423 full-suite executions with 1 skipped and 0 failures, plus strict SwiftLint and
+Debug/Release builds. Installed Release
 credential-bearing, WindowServer, Accessibility, and cross-application Cmd+V UAT remains pending.
 
 ## 1. Outcome
@@ -72,7 +73,8 @@ Accessibility behavior is application-dependent. Native AppKit, WebKit, Electron
 document-editor targets require live UAT before broad compatibility claims are made.
 
 Issue #26's lifecycle-free 272/272 evidence and issue #27's 316/316 evidence predate review-first.
-Issue #38 adds focused review/destination/pasteboard suites and a new full-suite run; no automated
+Issue #38 adds focused review/destination/pasteboard suites; issue #39 adds focused editor-keyboard
+and IME suites and a new full-suite run; no automated
 suite replaces installed UAT. In particular, `CGEventPostToPid` exposes no target-control
 acceptance acknowledgement, so `.posted` cannot prove visible text or Cmd+V consumption.
 
@@ -188,7 +190,8 @@ sealing
   | empty action 2 + no usable snapshot   -> idle
 editable
   | human edit                     -> editable(updatedDraft)
-  | Input / Command+Return         -> confirming
+  | Shift+Return / Shift+Enter     -> editable(updatedDraft + LF)
+  | Return/Enter (unmodified), Input, Command+Return -> confirming
   | Cancel / Escape / close        -> idle (zero delivery)
 confirming
   | certain insert or cancellation -> idle
@@ -552,10 +555,11 @@ After action 2 freezes a non-empty final, or an exact incomplete fallback from t
 snapshot, a separate transition waits for the recorder barrier and then gives the same panel
 editable authority. FeishuSpeech activation and exact editor focus are bounded to two seconds.
 
-The editor preserves multiline text. Bare Return inserts a newline; Command+Return or `输入`
-confirms. Escape, `取消`, or window close discards. Whitespace-only text cannot confirm. A late
-recognition callback cannot replace human-edited state, and a new Fn interaction cannot displace an
-unresolved draft.
+The editor preserves multiline text. Unmodified Return (including keypad Enter) confirms the current
+draft; Shift+Return/Shift+Enter inserts one newline without confirming; Command+Return remains a
+compatibility confirmation. Return during marked text is passed to the input method. Escape, `取消`,
+or window close discards. Whitespace-only text cannot confirm. A late recognition callback cannot
+replace human-edited state, and a new Fn interaction cannot displace an unresolved draft.
 
 ### Exact-once fail-closed confirmation
 
@@ -643,8 +647,10 @@ teardown from continuously advancing the overlay generation and leaving its wind
   can naturally expose it. It never appears in the window title, fixed feedback, menu bar, logs,
   notifications, or added accessibility label/help metadata.
 - `playSound` may retain start/final feedback but must not play once per partial.
-- In review-first mode, `autoInsert` does not bypass explicit confirmation. Input/Command+Return
-  confirms; Cancel/Escape/window close discards; bare Return edits; whitespace-only cannot confirm.
+- In review-first mode, `autoInsert` does not bypass explicit confirmation. Input, unmodified
+  Return/Enter, or Command+Return confirms; Shift+Return/Shift+Enter inserts LF without confirming;
+  Cancel/Escape/window close discards; Return during marked text is left to the input method;
+  whitespace-only cannot confirm.
 - In compatibility mode, `autoInsert=true` enables verified AX live replacement or captured/fixed-PID grapheme-aware
   keyboard replacement when AX is unavailable. AX may write multiline data; keyboard replacement
   rejects LF/action controls. Release-time fallbacks are removed.
@@ -842,7 +848,8 @@ Test/production custody separation was preserved for the automated implementatio
 
 - same review panel remains visible/nonactivating while held and sealing, then becomes key with the
   multiline editor focused after action 2;
-- edit, multiline Return, Command+Return/Input, Cancel/Escape/close, and rapid repeated confirm;
+- edit, bare Return/Enter confirmation, Shift+Return/Enter newline, Command+Return/Input,
+  Cancel/Escape/close, and rapid repeated confirm;
 - TextEdit/AppKit text view and text field;
 - Notes or another native rich-text editor;
 - Safari/Chrome editable web control;
@@ -875,10 +882,13 @@ build 8 passed its historical 316/316 gate. [D-38-01](decisions/D-38-01.md) adds
 review-first third axis while preserving that capture/journal and recognition/retry/replay topology.
 It routes complete snapshots to one read-only streaming/sealing panel, waits for action 2 and the
 recorder barrier only in a separate editable-transition task, and makes edited explicit confirmation
-the sole original-target delivery authority. The final issue #38 candidate passes 59/59 focused
-tests and 408 full-suite executions with 1 skipped and 0 failures, plus strict SwiftLint, Debug and
-Release builds, and independent correctness/security review. The issue #27 writer remains available
-when review-first is explicitly disabled.
+the sole original-target delivery authority. [D-39-01](decisions/D-39-01.md) changes only the
+editable review keyboard policy: unmodified Return/Enter confirms, Shift+Return/Enter inserts a
+newline, Command+Return remains compatible confirmation, and marked-text Return stays with the
+input method. The final issue #39 candidate passes 40/40 focused tests and 423 full-suite
+executions with 1 skipped and 0 failures, plus strict SwiftLint, Debug and Release builds, and
+independent correctness/security review. The issue #27 writer remains available when review-first
+is explicitly disabled.
 
 General-availability closure remains intentionally separate: the owner will self-test the installed
 Release with real Feishu credentials and the live target-application matrix above. Until the

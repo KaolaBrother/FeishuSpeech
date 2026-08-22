@@ -2,7 +2,7 @@
 
 Document system boundaries, major components, data flow, and deployment shape.
 
-## Streaming speech and review-first architecture (issues #25/#26/#27/#28/#38)
+## Streaming speech and review-first architecture (issues #25/#26/#27/#28/#38/#39)
 
 Issue #25 accepted the initial design, issue #26 implemented the generation-bound streaming
 pipeline, issue #27 corrects held response assembly to complete snapshot replacement, and
@@ -168,10 +168,17 @@ existing recorder barrier and then for the same panel to become key with its exa
 focused. Editable readiness is bounded to two seconds. Neither data-line task stores or awaits this
 transition.
 
-The editable panel accepts ordinary Return as text. `输入` and Command+Return confirm; `取消`,
-Escape, and window close discard. Whitespace-only text remains editable and cannot confirm.
+The editable panel accepts unmodified Return (including keypad Enter) as confirmation. Shift+Return
+and Shift+Enter insert LF without confirming; Command+Return remains a compatibility confirmation.
+Return during marked text is passed to the input method. `输入`, `取消`, Escape, and window close
+retain their explicit confirm/discard roles, and whitespace-only text remains editable but cannot
+confirm.
 Discard performs no activation, AX write, pasteboard mutation, synthetic event, or recovery copy.
 Human edits update the review state only, and late recognition cannot overwrite them.
+
+Issue #39 changes only this editable review keyboard policy. Original-target capture, clipboard
+lifecycle, capture/journal production, recognition/retry/replay consumption, and the independent
+review axis remain unchanged.
 
 Confirmation consumes authority synchronously before the first await: it freezes the exact
 untrimmed draft, changes to `.confirming`, advances the review revision, and dismisses the panel
@@ -630,14 +637,15 @@ recording overlay.
 
 ## Verification boundary
 
-The final issue #38 candidate passes 59/59 focused tests and a full run of 408 executed tests with
+The final issue #39 candidate passes 40/40 focused tests and a full run of 423 executed tests with
 1 skipped and 0 failures. Debug and Release builds, strict SwiftLint, diff checks, static checks
 that the legacy overlay files and project file remain untouched, and independent correctness and
 security/privacy reviews also pass. Automated coverage includes default-on/legacy-payload settings,
 same-panel read-only/editable authority, opaque snapshot/replay fences, action-2 and recorder-
 barrier ordering, nonblocking capture/recognition axes, human edit protection, exact-once
-confirm/discard, process-reuse-safe original-target validation, multiline/control classification,
-terminal uncertainty, manual recovery, and conditional full-pasteboard restoration.
+confirm/discard, Return/Enter/Shift-Return/IME keyboard policy, process-reuse-safe original-target
+validation, multiline/control classification, terminal uncertainty, manual recovery, and
+conditional full-pasteboard restoration.
 
 Issue #26's 272/272 lifecycle-free evidence predates the issue #27 correction and must not be used
 as proof of snapshot reconciliation. Issue #27 requires focused and full-suite evidence for
