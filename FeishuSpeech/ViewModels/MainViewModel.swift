@@ -663,17 +663,22 @@ class MainViewModel: ObservableObject {
     }
 
     private func prepareReviewDestination(identity: StreamingSessionIdentity) -> Bool {
-        do {
-            let destination = try reviewDestinationDelivery.capture(
+        let captureResult = reviewDestinationDelivery.capture(
+            generation: identity.generation
+        )
+        switch captureResult {
+        case .rejected(.secureInput):
+            failStartup(identity: identity, message: "安全输入框不支持语音输入")
+            return false
+        case .rejected(.destinationUnavailable):
+            failStartup(identity: identity, message: "无法确认输入位置")
+            return false
+        case .captured(let destination):
+            guard isValidReviewDestination(
+                destination,
                 generation: identity.generation
-            )
-            guard destination.capturedSecurityState == .safe,
-                  destination.cursor.processIdentifier > 0,
-                  destination.application.processIdentifier == destination.cursor.processIdentifier,
-                  !destination.application.bundleIdentifier.isEmpty,
-                  !destination.application.executableURL.path.isEmpty,
-                  destination.application.launchDate.timeIntervalSinceReferenceDate.isFinite else {
-                failStartup(identity: identity, message: "安全输入框不支持语音输入")
+            ) else {
+                failStartup(identity: identity, message: "无法确认输入位置")
                 return false
             }
 
@@ -686,9 +691,32 @@ class MainViewModel: ObservableObject {
             transcriptionReviewState = .streaming(preview: "")
             status = .streaming
             return true
-        } catch {
-            failStartup(identity: identity, message: "无法确认输入位置")
+        }
+    }
+
+    private func isValidReviewDestination(
+        _ destination: ReviewDestinationToken,
+        generation: UInt64
+    ) -> Bool {
+        guard generation > 0,
+              destination.generation == generation,
+              destination.capturedSecurityState == .safe,
+              destination.application.processIdentifier > 0,
+              !destination.application.bundleIdentifier.isEmpty,
+              !destination.application.executableURL.path.isEmpty,
+              destination.application.launchDate.timeIntervalSinceReferenceDate.isFinite else {
             return false
+        }
+        switch destination.binding {
+        case .exactCursor(let cursor):
+            return cursor.generation == generation &&
+                cursor.processIdentifier == destination.application.processIdentifier &&
+                cursor.processIdentifier > 0 &&
+                cursor.originalSelection.location >= 0 &&
+                cursor.originalSelection.length >= 0 &&
+                cursor.originalSelection.endLocation != nil
+        case .applicationCurrentFocus:
+            return true
         }
     }
 

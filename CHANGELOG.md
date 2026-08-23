@@ -5,6 +5,7 @@
 ### Added
 - 新增默认开启的「输入前预览」：按住 Fn 时在同一非激活面板以只读方式展示完整不透明 snapshot，松开后保持 sealing；权威 `action=2` 与 recorder barrier 都结算后，同一面板才转为多行草稿。用户可编辑并通过「输入」/Command+Return 显式确认，或通过「取消」/Escape/关窗丢弃且零写入（issue #38）
 - 调整输入前预览编辑器的确认键语义：未修饰 Return（含数字键盘 Enter）确认当前草稿，Shift+Return/Shift+Enter 插入换行，Command+Return 保持兼容确认；marked text 中的 Return 交给输入法，取消/Escape/关窗丢弃，纯空白不能确认（issue #39）
+- 为审阅目标增加普通非安全 AX 严格光标缺失时的应用绑定 fallback：exact AX 元素/原选区仍优先；fallback 在面板打开前绑定完整原应用，确认时只重新激活该应用并执行两次连续复合检查（Secure Input 开始 → raw PID → running/frontmost 完整身份 → Secure Input 结束），再向固定 PID 发送一次 multiline-safe Cmd+V；postflight 使用等价复合安全检查。该 fallback 证明原应用而非原控件或 caret；安全输入、身份不完整或漂移仍拒绝（issue #40）
 - 新增审阅第三异步轴与原目标交付权限：设置会在每次 accepted Fn 开始时采样；审阅状态/渲染不给 capture-to-journal 生产线或 recognition consumer/retry/replay 消费线增加依赖、等待或 backpressure。关闭「输入前预览」时保留 issue #27 连续输出及旧 `autoInsert` 语义（issue #38）
 - `reviewBeforeInsert` 偏好默认为 `true`；旧版 UserDefaults JSON 缺少字段时通过 `decodeIfPresent` 安全迁移到审阅路由，显式关闭会持久化且不改写凭据或其他兼容偏好（issue #38）
 - 新增完整 snapshot reconciliation：packet replay ownership 与识别状态分离；任意当前焦点目标以 Swift `Character` 最长公共前缀计算恰好所需的 Backspace，再输入 replacement suffix（issue #27）
@@ -21,6 +22,7 @@
 
 ### Fixed
 - 审阅确认在开始音频/网络前捕获 PID、bundle ID、executable URL、launch date、精确 AX 元素和原选区；交付前有界激活原应用并恢复/复核该选区，然后只发送一次进程定向 Cmd+V。身份、焦点、选区、Secure Input 或交付不确定均 fail closed，不重定向、不重试；非取消失败将冻结草稿精确复制一次供手动恢复（issue #38）
+- 修复普通非安全 final-only/可编辑 AX 目标因严格光标捕获能力缺失而在审阅启动时错误显示「无法确认输入位置」：先绑定完整原应用，继续使用同一预览/封存/编辑流程；确认时 fallback 只向该原应用的固定 PID 发送一次 Cmd+V，不递归发现当前焦点、不跨应用、不自动重试（issue #40）
 - 审阅粘贴成功路径现保存原剪贴板的每个 item 及其全部 data-bearing type，仅在进程定向 Cmd+V 和 postflight 都成功后安排一次有界恢复；调度时和真正恢复前都以本次写入的 `changeCount` 为门，不覆盖第三方剪贴板变化。按键投递或 postflight 不确定时不自动恢复、不重试，改为保留精确草稿的手动恢复（issue #38）
 - 修复 VPN 开启时流式识别仍走海外 CDN / TUN：keep-alive 在运行时物理网卡上做 bound UDP/53 DNS（DHCP option 6，再回退 recursor 主机名 `dns.alidns.com` / `public1.114dns.com`，跳过 `198.18.0.0/15`），TCP `IP_BOUND_IF` + CFStream TLS（SNI `open.feishu.cn`，证书链校验开启）。无 IP 字面量、不绑定 `en0`、无自定义 TLS verify。factory/packet/finish 在 keep-alive 连接类失败时不再 hop 到 URLSession。整文件识别仍走 URLSession（issue #34）
 - 修复 build 12 每次启动都要重填 App ID/Secret：#35 的 data-protection keychain 在无 `application-identifier` 时返回 -34018，读不到仍在 login keychain 的凭据。恢复 issue #18 的 login-keychain 读写；AppDelegate 仍只用 `launchAtLoginPreference(from:)` 同步开机启动（issue #36）
@@ -91,6 +93,7 @@
 ### Verification
 
 - issue #27 的最终候选 Release 1.0 build 8 已通过 316/316 完整测试、strict SwiftLint、Debug 与 Release 构建。发布 drain、权威 final、重复 `10024` 恢复、watchdog、deadline race、迟到回调和 fixed-target 安全边界均有自动化覆盖；这些本地门槛不证明真实凭据服务或目标控件实际接受 PID-targeted 事件。
+- Issue #40 的聚焦串行套件（destination capture/coordinator/final output/pasteboard/application fallback）通过 79/79；覆盖 identity-first capture、exact 优先、普通非安全 AX miss、固定 PID multiline Cmd+V、两次连续复合安全/PID/完整身份检查、交付不确定和一次手动恢复。该结果不替代安装版 Release UAT。
 
 ### Verification pending
 
@@ -98,6 +101,7 @@
 - `CGEventPostToPid` 没有目标控件接受确认；本地 `.posted` 仅证明完整 PID-bound replacement transaction 已提交，不能证明目标完成了可见替换。当前修正仍须安装版 owner UAT，若无可见输出应报告 PARTIAL，不能通过全局 HID、重复事件、回滚或不确定后的剪贴板回退扩展行为。
 - 真实飞书凭据下的后续 action、终止请求空音频编码、首次 token 刷新同序列重试、PCM/tail 兼容性和慢网行为仍需安装版 Release UAT。issue #26 的本地拼接策略已由 build 6 证据否定；issue #27 将响应按可相同、变长、缩短或修订的完整不透明 snapshot 替换，仍不推断稳定词或做文本归一化。
 - TextEdit/原生控件、浏览器、Electron、终端和富文本编辑器的 Accessibility 范围、焦点干扰、Unicode 与 undo 行为仍需跨应用实机 UAT；当前不声明广泛兼容性。
+- Issue #40 还需安装版 UAT：一个此前因普通非安全 strict-AX miss 显示「无法确认输入位置」的目标、一个 exact-AX 目标、Secure Input/密码框拒绝、确认期间跨应用切换、多行草稿，以及强制 post/postflight 不确定后的单次手动恢复。fallback 只证明原应用，不证明原控件或 caret 已消费 Cmd+V。
 
 ## [0.3.0] - 2025
 

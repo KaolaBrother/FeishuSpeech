@@ -129,6 +129,123 @@ final class FinalTextOutputSecurityTests: XCTestCase {
         XCTAssertEqual(frontmostProcess.queryCount, 2)
     }
 
+    func test_reviewCurrentFocusSafeMultilineDraftUsesCapturedPIDAndOneCmdV() {
+        let pasteboard = FakeFinalTextPasteboardWriter()
+        let eventPoster = FakeFinalTextKeyEventPoster()
+        let output = SystemFinalTextOutput(
+            pasteboardWriter: pasteboard,
+            keyEventPoster: eventPoster
+        )
+        var beforeCalls = 0
+        var afterCalls = 0
+        let draft = "first line\nsecond line"
+
+        let result = output.insertReviewAtCurrentFocusOnce(
+            draft,
+            processIdentifier: 42,
+            validateBeforeMutation: {
+                beforeCalls += 1
+                return .valid
+            },
+            validateAfterPosting: {
+                afterCalls += 1
+                return .valid
+            }
+        )
+
+        XCTAssertEqual(result, .inserted)
+        XCTAssertEqual(beforeCalls, 1)
+        XCTAssertEqual(afterCalls, 1)
+        XCTAssertEqual(pasteboard.writtenTexts, [draft])
+        XCTAssertEqual(eventPoster.destinationProcessIdentifiers, [42])
+    }
+
+    func test_reviewCurrentFocusUnsafeMultilineControlsRejectBeforeValidationOrMutation() {
+        for draft in [
+            "first\tline",
+            "first\rline",
+            "first\u{0000}line",
+            "first\u{007F}line",
+            "first\u{0085}line",
+            "\n\n"
+        ] {
+            let pasteboard = FakeFinalTextPasteboardWriter()
+            let eventPoster = FakeFinalTextKeyEventPoster()
+            let output = SystemFinalTextOutput(
+                pasteboardWriter: pasteboard,
+                keyEventPoster: eventPoster
+            )
+
+            let result = output.insertReviewAtCurrentFocusOnce(
+                draft,
+                processIdentifier: 42,
+                validateBeforeMutation: {
+                    XCTFail("unsafe review text must be rejected before destination validation")
+                    return .valid
+                },
+                validateAfterPosting: {
+                    XCTFail("unsafe review text must not reach postflight")
+                    return .valid
+                }
+            )
+
+            XCTAssertEqual(result, .deliveryFailed, "draft: \(draft.debugDescription)")
+            XCTAssertEqual(pasteboard.writtenTexts, [], "draft: \(draft.debugDescription)")
+            XCTAssertEqual(eventPoster.destinationProcessIdentifiers, [], "draft: \(draft.debugDescription)")
+        }
+    }
+
+    func test_reviewCurrentFocusTypedValidationRejectsSecurityIdentityOrDestinationBeforeMutation() {
+        let failures: [(ReviewCurrentFocusValidation, FinalTextInsertionResult)] = [
+            (.securityRejected, .securityRejected),
+            (.identityChanged, .identityChanged),
+            (.destinationInvalid, .destinationInvalid)
+        ]
+
+        for (validation, expectedResult) in failures {
+            let pasteboard = FakeFinalTextPasteboardWriter()
+            let eventPoster = FakeFinalTextKeyEventPoster()
+            let output = SystemFinalTextOutput(
+                pasteboardWriter: pasteboard,
+                keyEventPoster: eventPoster
+            )
+
+            let result = output.insertReviewAtCurrentFocusOnce(
+                "PRIVATE_REVIEW_DRAFT",
+                processIdentifier: 42,
+                validateBeforeMutation: { validation },
+                validateAfterPosting: {
+                    XCTFail("a rejected preflight must not reach postflight")
+                    return .valid
+                }
+            )
+
+            XCTAssertEqual(result, expectedResult)
+            XCTAssertEqual(pasteboard.writtenTexts, [])
+            XCTAssertEqual(eventPoster.destinationProcessIdentifiers, [])
+        }
+    }
+
+    func test_reviewCurrentFocusPostflightIdentityChangeIsUncertainAndDoesNotRetry() {
+        let pasteboard = FakeFinalTextPasteboardWriter()
+        let eventPoster = FakeFinalTextKeyEventPoster()
+        let output = SystemFinalTextOutput(
+            pasteboardWriter: pasteboard,
+            keyEventPoster: eventPoster
+        )
+
+        let result = output.insertReviewAtCurrentFocusOnce(
+            "PRIVATE_POSTFLIGHT_IDENTITY_CHANGE",
+            processIdentifier: 42,
+            validateBeforeMutation: { .valid },
+            validateAfterPosting: { .identityChanged }
+        )
+
+        XCTAssertEqual(result, .deliveryUncertain)
+        XCTAssertEqual(pasteboard.writtenTexts, ["PRIVATE_POSTFLIGHT_IDENTITY_CHANGE"])
+        XCTAssertEqual(eventPoster.destinationProcessIdentifiers, [42])
+    }
+
     func test_systemUnicodePosterConstructsCompletePrivatePairBeforePostingDownThenUpOnce() {
         let trace = FakePosterOperationTrace()
         let backend = FakeSystemUnicodeEventBackend(failure: nil, trace: trace)

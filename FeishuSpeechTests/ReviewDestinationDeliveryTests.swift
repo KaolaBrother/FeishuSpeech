@@ -18,7 +18,11 @@ final class ReviewDestinationDeliveryTests: XCTestCase {
         let runtime = Issue38ReviewAccessibilityRuntime()
         let client = MacAccessibilityClient(runtime: runtime)
 
-        let token = try client.captureReviewCursorDestination(generation: 38)
+        let capture = client.captureReviewCursorDestination(generation: 38)
+        guard case .exact(let token) = capture else {
+            XCTFail("a safe exact cursor must produce an exact review capture")
+            return
+        }
 
         XCTAssertEqual(token.originalSelection, CursorTextRange(location: 7, length: 3))
         XCTAssertTrue(runtime.attributeQueries.contains(kAXSelectedTextRangeAttribute as String))
@@ -33,25 +37,37 @@ final class ReviewDestinationDeliveryTests: XCTestCase {
     }
 
     func test_reviewCapture_failsClosedForTrustSecureInputOrSelectionUncertainty() {
-        let cases: [(String, (Issue38ReviewAccessibilityRuntime) -> Void)] = [
-            ("untrusted", { $0.isProcessTrusted = false }),
-            ("secure input", { $0.isSecureEventInputEnabled = true }),
-            ("wrong frontmost PID", { $0.currentProcessIdentifier = 99 }),
-            ("selection not settable", { $0.settableAttributes[kAXSelectedTextRangeAttribute as String] = false }),
-            ("focus not settable", { $0.settableAttributes[kAXFocusedAttribute as String] = false }),
-            ("unsupported role", { $0.role = "AXButton" }),
-            ("secure role", { $0.subrole = kAXSecureTextFieldSubrole as String })
+        let cases: [(String, (Issue38ReviewAccessibilityRuntime) -> Void, ReviewCursorCaptureExpectation)] = [
+            ("untrusted", { $0.isProcessTrusted = false }, .rejected(.accessibilityUnavailable)),
+            ("secure input", { $0.isSecureEventInputEnabled = true }, .rejected(.secureInput)),
+            ("wrong frontmost PID", { $0.currentProcessIdentifier = 99 }, .nonSecureMiss),
+            ("selection not settable", { $0.settableAttributes[kAXSelectedTextRangeAttribute as String] = false }, .nonSecureMiss),
+            ("focus not settable", { $0.settableAttributes[kAXFocusedAttribute as String] = false }, .nonSecureMiss),
+            ("unsupported role", { $0.role = "AXButton" }, .nonSecureMiss),
+            ("secure role", { $0.subrole = kAXSecureTextFieldSubrole as String }, .rejected(.secureInput))
         ]
 
-        for (name, configure) in cases {
+        for (name, configure, expectation) in cases {
             let runtime = Issue38ReviewAccessibilityRuntime()
             configure(runtime)
             let client = MacAccessibilityClient(runtime: runtime)
 
-            XCTAssertThrowsError(
-                try client.captureReviewCursorDestination(generation: 39),
-                "review capture must fail closed for \(name)"
-            )
+            let capture = client.captureReviewCursorDestination(generation: 39)
+            switch (expectation, capture) {
+            case (.nonSecureMiss, .nonSecureCursorUnavailable):
+                break
+            case (.rejected(let expected), .rejected(let actual)):
+                XCTAssertEqual(
+                    actual,
+                    expected,
+                    "review capture must reject " + name + " with the typed reason"
+                )
+            default:
+                XCTFail(
+                    "review capture must fail closed for " + name + ", got " +
+                        String(describing: capture)
+                )
+            }
             XCTAssertEqual(runtime.selectedTextWriteCallCount, 0)
         }
     }
@@ -59,7 +75,11 @@ final class ReviewDestinationDeliveryTests: XCTestCase {
     func test_restoreAndValidateBeforeDelivery_writesOnlyFocusAndSelectionInOrder() throws {
         let runtime = Issue38ReviewAccessibilityRuntime()
         let client = MacAccessibilityClient(runtime: runtime)
-        let token = try client.captureReviewCursorDestination(generation: 40)
+        let capture = client.captureReviewCursorDestination(generation: 40)
+        guard case .exact(let token) = capture else {
+            XCTFail("a safe exact cursor must produce an exact review capture")
+            return
+        }
         runtime.resetTrace()
 
         XCTAssertTrue(try client.restoreAndValidateBeforeDelivery(token))
@@ -258,7 +278,17 @@ final class ReviewDestinationDeliveryTests: XCTestCase {
             accessibility: accessibility,
             finalTextOutput: output
         )
-        let destination = try delivery.capture(generation: 41)
+        let capture = delivery.capture(generation: 41)
+        guard case .captured(let destination) = capture else {
+            XCTFail("a safe exact cursor must produce a review destination")
+            return
+        }
+        guard case .exactCursor(let cursor) = destination.binding else {
+            XCTFail("an available exact AX cursor must remain the preferred binding")
+            return
+        }
+        XCTAssertEqual(cursor.generation, 41)
+        XCTAssertEqual(cursor.processIdentifier, destination.application.processIdentifier)
 
         runtime.frontmost = Issue38ReviewFixtures.applicationIdentity(pid: 43)
         let wrongApp = await delivery.deliver("PRIVATE_WRONG_APP", to: destination)
@@ -286,7 +316,11 @@ final class ReviewDestinationDeliveryTests: XCTestCase {
             accessibility: accessibility,
             finalTextOutput: output
         )
-        let destination = try delivery.capture(generation: 42)
+        let capture = delivery.capture(generation: 42)
+        guard case .captured(let destination) = capture else {
+            XCTFail("a safe exact cursor must produce a review destination")
+            return
+        }
 
         let result = await delivery.deliver("PRIVATE_TIMEOUT", to: destination)
 
@@ -309,7 +343,11 @@ final class ReviewDestinationDeliveryTests: XCTestCase {
             accessibility: accessibility,
             finalTextOutput: output
         )
-        let destination = try delivery.capture(generation: 43)
+        let capture = delivery.capture(generation: 43)
+        guard case .captured(let destination) = capture else {
+            XCTFail("a safe exact cursor must produce a review destination")
+            return
+        }
 
         let result = await delivery.deliver("PRIVATE_UNCERTAIN", to: destination)
 
@@ -319,6 +357,11 @@ final class ReviewDestinationDeliveryTests: XCTestCase {
         XCTAssertEqual(output.mutationCount, 1)
         XCTAssertEqual(output.insertedTexts, ["PRIVATE_UNCERTAIN"])
     }
+}
+
+private enum ReviewCursorCaptureExpectation {
+    case nonSecureMiss
+    case rejected(ReviewCursorCaptureRejection)
 }
 
 @MainActor
@@ -486,8 +529,8 @@ private final class Issue38ReviewDestinationAccess: ReviewDestinationAccessing {
     var afterDeliveryResult = true
     private(set) var trace: [String] = []
 
-    func captureReviewCursorDestination(generation: UInt64) throws -> CursorDestinationToken {
-        Issue38ReviewFixtures.cursorToken(generation: generation)
+    func captureReviewCursorDestination(generation: UInt64) -> ReviewCursorCaptureResult {
+        .exact(Issue38ReviewFixtures.cursorToken(generation: generation))
     }
 
     func restoreAndValidateBeforeDelivery(_ token: CursorDestinationToken) throws -> Bool {

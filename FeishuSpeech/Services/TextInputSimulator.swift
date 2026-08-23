@@ -20,6 +20,12 @@ protocol FinalTextOutput: AnyObject {
         validateBeforeMutation: () throws -> Bool,
         validateAfterPosting: () throws -> Bool
     ) -> FinalTextInsertionResult
+    func insertReviewAtCurrentFocusOnce(
+        _ text: String,
+        processIdentifier: pid_t,
+        validateBeforeMutation: () -> ReviewCurrentFocusValidation,
+        validateAfterPosting: () -> ReviewCurrentFocusValidation
+    ) -> FinalTextInsertionResult
     func insertAtCurrentFocusOnce(_ text: String) -> FinalTextInsertionResult
     func copyForManualRecovery(_ text: String)
 }
@@ -51,10 +57,21 @@ extension FinalTextOutput {
         }
         return result
     }
+
+    /// Existing output doubles remain fail-closed until they explicitly adopt the
+    /// review-only current-focus transaction.
+    func insertReviewAtCurrentFocusOnce(
+        _ text: String,
+        processIdentifier: pid_t,
+        validateBeforeMutation: () -> ReviewCurrentFocusValidation,
+        validateAfterPosting: () -> ReviewCurrentFocusValidation
+    ) -> FinalTextInsertionResult {
+        .destinationInvalid
+    }
 }
 
 @MainActor
-final class SystemFinalTextOutput: FinalTextOutput {
+final class SystemFinalTextOutput: FinalTextOutput, ReviewCurrentFocusEnvironmentProviding {
     private typealias ReviewPasteboardSnapshot = [[String: Data]]
 
     private let pasteboardWriter: FinalTextPasteboardWriting
@@ -70,6 +87,8 @@ final class SystemFinalTextOutput: FinalTextOutput {
     init(
         pasteboardWriter: FinalTextPasteboardWriting,
         keyEventPoster: FinalTextKeyEventPosting,
+        secureInputStateProvider: SecureInputStateProviding? = nil,
+        frontmostProcessProvider: FrontmostProcessProviding? = nil,
         reviewPasteboardSnapshot: (() -> [[String: Data]])? = nil,
         reviewPasteboardChangeCount: (() -> Int)? = nil,
         reviewPasteboardRestore: (([[String: Data]], Int) -> Void)? = nil,
@@ -78,8 +97,8 @@ final class SystemFinalTextOutput: FinalTextOutput {
         self.pasteboardWriter = pasteboardWriter
         self.keyEventPoster = keyEventPoster
         currentFocusEventPoster = SystemFinalTextCurrentFocusEventPoster()
-        secureInputStateProvider = SystemSecureInputStateProvider()
-        frontmostProcessProvider = SystemFrontmostProcessProvider()
+        self.secureInputStateProvider = secureInputStateProvider ?? SystemSecureInputStateProvider()
+        self.frontmostProcessProvider = frontmostProcessProvider ?? SystemFrontmostProcessProvider()
         self.reviewPasteboardSnapshot = reviewPasteboardSnapshot ?? {
             TextInputSimulator.captureReviewPasteboardSnapshot()
         }
@@ -139,8 +158,18 @@ final class SystemFinalTextOutput: FinalTextOutput {
     convenience init() {
         self.init(
             pasteboardWriter: SystemFinalTextPasteboardWriter(),
-            keyEventPoster: SystemFinalTextKeyEventPoster()
+            keyEventPoster: SystemFinalTextKeyEventPoster(),
+            secureInputStateProvider: SystemSecureInputStateProvider(),
+            frontmostProcessProvider: SystemFrontmostProcessProvider()
         )
+    }
+
+    var reviewSecureInputStateProvider: SecureInputStateProviding {
+        secureInputStateProvider
+    }
+
+    var reviewFrontmostProcessProvider: FrontmostProcessProviding {
+        frontmostProcessProvider
     }
 
     func insertOnce(
@@ -177,10 +206,60 @@ final class SystemFinalTextOutput: FinalTextOutput {
               TextInputSimulator.isSafeForReviewConfirmation(text) else {
             return .deliveryFailed
         }
-        do {
-            guard try validateBeforeMutation() else { return .destinationInvalid }
-        } catch {
-            return .destinationInvalid
+        return performReviewPaste(
+            text,
+            processIdentifier: destination.processIdentifier,
+            validateBeforeMutation: {
+                do {
+                    return try validateBeforeMutation() ? .valid : .destinationInvalid
+                } catch {
+                    return .destinationInvalid
+                }
+            },
+            validateAfterPosting: {
+                do {
+                    return try validateAfterPosting() ? .valid : .destinationInvalid
+                } catch {
+                    return .destinationInvalid
+                }
+            }
+        )
+    }
+
+    func insertReviewAtCurrentFocusOnce(
+        _ text: String,
+        processIdentifier: pid_t,
+        validateBeforeMutation: () -> ReviewCurrentFocusValidation,
+        validateAfterPosting: () -> ReviewCurrentFocusValidation
+    ) -> FinalTextInsertionResult {
+        guard processIdentifier > 0,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              TextInputSimulator.isSafeForReviewConfirmation(text) else {
+            return .deliveryFailed
+        }
+
+        let preflightResult = validateBeforeMutation()
+        guard preflightResult == .valid else {
+            return finalTextInsertionResult(for: preflightResult)
+        }
+
+        return performReviewPaste(
+            text,
+            processIdentifier: processIdentifier,
+            validateBeforeMutation: { preflightResult },
+            validateAfterPosting: validateAfterPosting
+        )
+    }
+
+    private func performReviewPaste(
+        _ text: String,
+        processIdentifier: pid_t,
+        validateBeforeMutation: () -> ReviewCurrentFocusValidation,
+        validateAfterPosting: () -> ReviewCurrentFocusValidation
+    ) -> FinalTextInsertionResult {
+        let preflightResult = validateBeforeMutation()
+        guard preflightResult == .valid else {
+            return finalTextInsertionResult(for: preflightResult)
         }
 
         let reviewPasteboardSnapshot = reviewPasteboardSnapshot()
@@ -188,12 +267,11 @@ final class SystemFinalTextOutput: FinalTextOutput {
             return .deliveryFailed
         }
         let postWriteChangeCount = reviewPasteboardChangeCount()
-        guard keyEventPoster.postCommandV(to: destination.processIdentifier) else {
+        guard keyEventPoster.postCommandV(to: processIdentifier) else {
             return .deliveryUncertain
         }
-        do {
-            guard try validateAfterPosting() else { return .deliveryUncertain }
-        } catch {
+
+        guard validateAfterPosting() == .valid else {
             return .deliveryUncertain
         }
         scheduleReviewPasteboardRestore(
@@ -201,6 +279,21 @@ final class SystemFinalTextOutput: FinalTextOutput {
             expectedChangeCount: postWriteChangeCount
         )
         return .inserted
+    }
+
+    private func finalTextInsertionResult(
+        for validation: ReviewCurrentFocusValidation
+    ) -> FinalTextInsertionResult {
+        switch validation {
+        case .valid:
+            return .inserted
+        case .securityRejected:
+            return .securityRejected
+        case .identityChanged:
+            return .identityChanged
+        case .destinationInvalid:
+            return .destinationInvalid
+        }
     }
 
     private func scheduleReviewPasteboardRestore(
@@ -402,6 +495,12 @@ protocol SecureInputStateProviding: AnyObject {
 @MainActor
 protocol FrontmostProcessProviding: AnyObject {
     func frontmostProcessIdentifier() -> pid_t?
+}
+
+@MainActor
+protocol ReviewCurrentFocusEnvironmentProviding: AnyObject {
+    var reviewSecureInputStateProvider: SecureInputStateProviding { get }
+    var reviewFrontmostProcessProvider: FrontmostProcessProviding { get }
 }
 
 @MainActor

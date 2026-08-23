@@ -21,6 +21,13 @@ nonisolated enum ReviewActivationResult: Equatable, Sendable {
 protocol ReviewApplicationRuntime: AnyObject {
     func identity(for processIdentifier: pid_t) -> ReviewApplicationIdentity?
     func frontmostIdentity() -> ReviewApplicationIdentity?
+    func frontmostProcessIdentifier() -> pid_t?
+}
+
+extension ReviewApplicationRuntime {
+    func frontmostProcessIdentifier() -> pid_t? {
+        frontmostIdentity()?.processIdentifier
+    }
 }
 
 @MainActor
@@ -45,17 +52,12 @@ nonisolated enum ReviewDeliveryResult: Equatable, Sendable {
 
 @MainActor
 protocol ReviewDestinationDelivering: AnyObject {
-    func capture(generation: UInt64) throws -> ReviewDestinationToken
+    func capture(generation: UInt64) -> ReviewDestinationCaptureResult
     func deliver(
         _ frozenText: String,
         to destination: ReviewDestinationToken
     ) async -> ReviewDeliveryResult
     func copyForManualRecovery(_ frozenText: String)
-}
-
-private enum ReviewDestinationDeliveryError: Error {
-    case destinationUnavailable
-    case identityChanged
 }
 
 private func hasCompleteApplicationIdentity(_ identity: ReviewApplicationIdentity) -> Bool {
@@ -81,6 +83,10 @@ final class SystemReviewApplicationRuntime: ReviewApplicationRuntime {
         return Self.identity(for: application)
     }
 
+    func frontmostProcessIdentifier() -> pid_t? {
+        NSWorkspace.shared.frontmostApplication?.processIdentifier
+    }
+
     private static func identity(
         for application: NSRunningApplication
     ) -> ReviewApplicationIdentity? {
@@ -97,6 +103,19 @@ final class SystemReviewApplicationRuntime: ReviewApplicationRuntime {
             executableURL: executableURL,
             launchDate: launchDate
         )
+    }
+}
+
+@MainActor
+private final class ReviewRuntimeFrontmostProcessProvider: FrontmostProcessProviding {
+    private let applicationRuntime: ReviewApplicationRuntime
+
+    init(applicationRuntime: ReviewApplicationRuntime) {
+        self.applicationRuntime = applicationRuntime
+    }
+
+    func frontmostProcessIdentifier() -> pid_t? {
+        applicationRuntime.frontmostProcessIdentifier()
     }
 }
 
@@ -239,17 +258,28 @@ final class SystemReviewDestinationDelivery: ReviewDestinationDelivering {
     private let applicationActivator: ReviewApplicationActivating
     private let accessibility: ReviewDestinationAccessing
     private let finalTextOutput: FinalTextOutput
+    private let secureInputStateProvider: SecureInputStateProviding
+    private let frontmostProcessProvider: FrontmostProcessProviding
 
     init(
         applicationRuntime: ReviewApplicationRuntime,
         applicationActivator: ReviewApplicationActivating,
         accessibility: ReviewDestinationAccessing,
-        finalTextOutput: FinalTextOutput
+        finalTextOutput: FinalTextOutput,
+        secureInputStateProvider: SecureInputStateProviding? = nil,
+        frontmostProcessProvider: FrontmostProcessProviding? = nil
     ) {
         self.applicationRuntime = applicationRuntime
         self.applicationActivator = applicationActivator
         self.accessibility = accessibility
         self.finalTextOutput = finalTextOutput
+        let environment = finalTextOutput as? ReviewCurrentFocusEnvironmentProviding
+        self.secureInputStateProvider = secureInputStateProvider
+            ?? environment?.reviewSecureInputStateProvider
+            ?? SystemSecureInputStateProvider()
+        self.frontmostProcessProvider = frontmostProcessProvider
+            ?? environment?.reviewFrontmostProcessProvider
+            ?? ReviewRuntimeFrontmostProcessProvider(applicationRuntime: applicationRuntime)
     }
 
     convenience init() {
@@ -264,21 +294,49 @@ final class SystemReviewDestinationDelivery: ReviewDestinationDelivering {
         )
     }
 
-    func capture(generation: UInt64) throws -> ReviewDestinationToken {
-        let cursor = try accessibility.captureReviewCursorDestination(generation: generation)
-        guard cursor.generation == generation,
-              let application = applicationRuntime.identity(for: cursor.processIdentifier),
-              application.processIdentifier == cursor.processIdentifier,
-              hasCompleteApplicationIdentity(application) else {
-            throw ReviewDestinationDeliveryError.destinationUnavailable
+    func capture(generation: UInt64) -> ReviewDestinationCaptureResult {
+        guard generation > 0,
+              let application = applicationRuntime.frontmostIdentity(),
+              hasCompleteApplicationIdentity(application),
+              let runningApplication = applicationRuntime.identity(
+                  for: application.processIdentifier
+              ),
+              runningApplication == application else {
+            return .rejected(.destinationUnavailable)
         }
-        guard applicationRuntime.frontmostIdentity() == application else {
-            throw ReviewDestinationDeliveryError.identityChanged
+
+        let captureResult = accessibility.captureReviewCursorDestination(generation: generation)
+        let binding: ReviewDestinationBinding
+        switch captureResult {
+        case .exact(let cursor):
+            guard isValidCursorDestination(
+                cursor,
+                generation: generation,
+                processIdentifier: application.processIdentifier
+            ) else {
+                return .rejected(.destinationUnavailable)
+            }
+            binding = .exactCursor(cursor)
+        case .nonSecureCursorUnavailable:
+            binding = .applicationCurrentFocus
+        case .rejected(.secureInput):
+            return .rejected(.secureInput)
+        case .rejected(.accessibilityUnavailable):
+            return .rejected(.destinationUnavailable)
         }
-        return ReviewDestinationToken(
-            cursor: cursor,
-            application: application,
-            capturedSecurityState: .safe
+
+        guard applicationRuntime.identity(for: application.processIdentifier) == application,
+              applicationRuntime.frontmostIdentity() == application else {
+            return .rejected(.destinationUnavailable)
+        }
+
+        return .captured(
+            ReviewDestinationToken(
+                generation: generation,
+                application: application,
+                binding: binding,
+                capturedSecurityState: .safe
+            )
         )
     }
 
@@ -305,16 +363,35 @@ final class SystemReviewDestinationDelivery: ReviewDestinationDelivering {
             return .identityChanged
         }
 
-        let insertionResult = finalTextOutput.insertOnce(
-            frozenText,
-            destination: destination.cursor,
-            validateBeforeMutation: { [weak self] in
-                self?.validateBeforeMutation(destination) ?? false
-            },
-            validateAfterPosting: { [weak self] in
-                self?.validateAfterPosting(destination) ?? false
-            }
-        )
+        let insertionResult: FinalTextInsertionResult
+        switch destination.binding {
+        case .exactCursor(let cursor):
+            insertionResult = finalTextOutput.insertOnce(
+                frozenText,
+                destination: cursor,
+                validateBeforeMutation: { [weak self] in
+                    self?.validateExactBeforeMutation(destination) == .valid
+                },
+                validateAfterPosting: { [weak self] in
+                    self?.validateExactAfterPosting(destination) == .valid
+                }
+            )
+        case .applicationCurrentFocus:
+            insertionResult = finalTextOutput.insertReviewAtCurrentFocusOnce(
+                frozenText,
+                processIdentifier: destination.application.processIdentifier,
+                validateBeforeMutation: { [weak self] in
+                    self?.validateApplicationCurrentFocusBeforeMutation(destination)
+                        ?? .destinationInvalid
+                },
+                validateAfterPosting: { [weak self] in
+                    self?.validateApplicationCurrentFocusAfterPosting(destination)
+                        ?? .destinationInvalid
+                }
+            )
+        }
+
+        guard !Task.isCancelled else { return .cancelled }
 
         return reviewDeliveryResult(for: insertionResult)
     }
@@ -351,8 +428,10 @@ final class SystemReviewDestinationDelivery: ReviewDestinationDelivering {
         guard destination.capturedSecurityState == .safe else {
             return .securityRejected
         }
-        guard destination.application.processIdentifier == destination.cursor.processIdentifier,
-              destinationIsRunning(destination) else {
+        guard reviewDestinationTokenIsValid(destination) else {
+            return .destinationInvalid
+        }
+        guard destinationIsRunning(destination) else {
             return .identityChanged
         }
         return nil
@@ -371,28 +450,130 @@ final class SystemReviewDestinationDelivery: ReviewDestinationDelivering {
         }
     }
 
-    private func validateBeforeMutation(_ destination: ReviewDestinationToken) -> Bool {
-        guard !Task.isCancelled, destinationIsCurrent(destination) else { return false }
+    private func validateExactBeforeMutation(
+        _ destination: ReviewDestinationToken
+    ) -> ReviewCurrentFocusValidation {
+        guard !Task.isCancelled else { return .destinationInvalid }
+        guard destinationIsCurrent(destination) else { return .identityChanged }
+        guard case .exactCursor(let cursor) = destination.binding else {
+            return .destinationInvalid
+        }
         do {
-            guard try accessibility.restoreAndValidateBeforeDelivery(destination.cursor) else {
-                return false
+            guard try accessibility.restoreAndValidateBeforeDelivery(cursor) else {
+                return .destinationInvalid
             }
-            return destinationIsCurrent(destination)
+            return destinationIsCurrent(destination) ? .valid : .identityChanged
         } catch {
-            return false
+            return .destinationInvalid
         }
     }
 
-    private func validateAfterPosting(_ destination: ReviewDestinationToken) -> Bool {
-        guard !Task.isCancelled, destinationIsCurrent(destination) else { return false }
+    private func validateExactAfterPosting(
+        _ destination: ReviewDestinationToken
+    ) -> ReviewCurrentFocusValidation {
+        guard !Task.isCancelled else { return .destinationInvalid }
+        guard destinationIsCurrent(destination) else { return .identityChanged }
+        guard case .exactCursor(let cursor) = destination.binding else {
+            return .destinationInvalid
+        }
         do {
-            guard try accessibility.validateAfterDelivery(destination.cursor) else {
-                return false
+            guard try accessibility.validateAfterDelivery(cursor) else {
+                return .destinationInvalid
             }
-            return destinationIsCurrent(destination)
+            return destinationIsCurrent(destination) ? .valid : .identityChanged
         } catch {
+            return .destinationInvalid
+        }
+    }
+
+    private func validateApplicationCurrentFocusBeforeMutation(
+        _ destination: ReviewDestinationToken
+    ) -> ReviewCurrentFocusValidation {
+        var result: ReviewCurrentFocusValidation = .valid
+        for _ in 0 ..< 2 {
+            let sample = applicationCurrentFocusSample(destination)
+            if sample != .valid, result == .valid {
+                result = sample
+            }
+        }
+        return result
+    }
+
+    private func validateApplicationCurrentFocusAfterPosting(
+        _ destination: ReviewDestinationToken
+    ) -> ReviewCurrentFocusValidation {
+        applicationCurrentFocusSample(destination)
+    }
+
+    private func applicationCurrentFocusSample(
+        _ destination: ReviewDestinationToken
+    ) -> ReviewCurrentFocusValidation {
+        guard !Task.isCancelled,
+              destination.application.processIdentifier > 0 else {
+            return .destinationInvalid
+        }
+
+        // Keep this as one composite sample. The initial security read must
+        // precede every destination read, and the final read closes the race
+        // where Secure Input turns on while the identities are being loaded.
+        let secureInputAtStart = secureInputStateProvider.isSecureInputEnabled()
+        let rawFrontmostProcessIdentifier = frontmostProcessProvider.frontmostProcessIdentifier()
+        let running = applicationRuntime.identity(
+            for: destination.application.processIdentifier
+        )
+        let frontmost = applicationRuntime.frontmostIdentity()
+        let secureInputAtEnd = secureInputStateProvider.isSecureInputEnabled()
+
+        guard !secureInputAtStart, !secureInputAtEnd else {
+            return .securityRejected
+        }
+        guard rawFrontmostProcessIdentifier == destination.application.processIdentifier else {
+            return .destinationInvalid
+        }
+        guard let running,
+              hasCompleteApplicationIdentity(running),
+              running == destination.application else {
+            return .identityChanged
+        }
+        guard let frontmost,
+              hasCompleteApplicationIdentity(frontmost),
+              frontmost == destination.application else {
+            return .identityChanged
+        }
+        return .valid
+    }
+
+    private func reviewDestinationTokenIsValid(
+        _ destination: ReviewDestinationToken
+    ) -> Bool {
+        guard destination.generation > 0,
+              destination.capturedSecurityState == .safe,
+              hasCompleteApplicationIdentity(destination.application) else {
             return false
         }
+        switch destination.binding {
+        case .exactCursor(let cursor):
+            return isValidCursorDestination(
+                cursor,
+                generation: destination.generation,
+                processIdentifier: destination.application.processIdentifier
+            )
+        case .applicationCurrentFocus:
+            return true
+        }
+    }
+
+    private func isValidCursorDestination(
+        _ cursor: CursorDestinationToken,
+        generation: UInt64,
+        processIdentifier: pid_t
+    ) -> Bool {
+        cursor.generation == generation &&
+            cursor.processIdentifier == processIdentifier &&
+            cursor.processIdentifier > 0 &&
+            cursor.originalSelection.location >= 0 &&
+            cursor.originalSelection.length >= 0 &&
+            cursor.originalSelection.endLocation != nil
     }
 
     private func reviewDeliveryResult(
@@ -403,6 +584,8 @@ final class SystemReviewDestinationDelivery: ReviewDestinationDelivering {
             return .inserted
         case .securityRejected:
             return .securityRejected
+        case .identityChanged:
+            return .identityChanged
         case .destinationInvalid:
             return .destinationInvalid
         case .deliveryUncertain:

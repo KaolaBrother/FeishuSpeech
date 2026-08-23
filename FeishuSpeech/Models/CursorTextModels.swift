@@ -36,10 +36,37 @@ nonisolated struct ReviewApplicationIdentity: Equatable, Sendable {
     let launchDate: Date
 }
 
+enum ReviewDestinationBinding {
+    case exactCursor(CursorDestinationToken)
+    case applicationCurrentFocus
+}
+
 struct ReviewDestinationToken {
-    let cursor: CursorDestinationToken
+    let generation: UInt64
     let application: ReviewApplicationIdentity
+    let binding: ReviewDestinationBinding
     let capturedSecurityState: DestinationSecurityState
+}
+
+enum ReviewCursorCaptureResult {
+    case exact(CursorDestinationToken)
+    case nonSecureCursorUnavailable
+    case rejected(ReviewCursorCaptureRejection)
+}
+
+nonisolated enum ReviewCursorCaptureRejection: Equatable, Sendable {
+    case secureInput
+    case accessibilityUnavailable
+}
+
+enum ReviewDestinationCaptureResult {
+    case captured(ReviewDestinationToken)
+    case rejected(ReviewDestinationCaptureRejection)
+}
+
+nonisolated enum ReviewDestinationCaptureRejection: Equatable, Sendable {
+    case secureInput
+    case destinationUnavailable
 }
 
 nonisolated enum CursorCapabilityRejection: Equatable, Sendable {
@@ -65,6 +92,13 @@ nonisolated enum DestinationSecurityState: Equatable, Sendable {
     case safe
     case secure
     case unverifiable
+}
+
+nonisolated enum ReviewCurrentFocusValidation: Equatable, Sendable {
+    case valid
+    case securityRejected
+    case identityChanged
+    case destinationInvalid
 }
 
 nonisolated enum CursorTextSessionState: Equatable, Sendable {
@@ -102,6 +136,7 @@ nonisolated enum FinalOnlyFallbackDecision: Equatable, Sendable {
 nonisolated enum FinalTextInsertionResult: Equatable, Sendable {
     case inserted
     case securityRejected
+    case identityChanged
     case destinationInvalid
     case deliveryFailed
     case deliveryUncertain

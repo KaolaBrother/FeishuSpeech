@@ -2,13 +2,14 @@
 
 Document system boundaries, major components, data flow, and deployment shape.
 
-## Streaming speech and review-first architecture (issues #25/#26/#27/#28/#38/#39)
+## Streaming speech and review-first architecture (issues #25/#26/#27/#28/#38/#39/#40)
 
 Issue #25 accepted the initial design, issue #26 implemented the generation-bound streaming
 pipeline, issue #27 corrects held response assembly to complete snapshot replacement, and
 issue #28 splits capture from recognition so PCM is journaled even while Feishu factory hangs.
-Issue #38 adds a default-on review-first route as an independent third asynchronous axis, while
-retaining issue #27 as the explicit compatibility route:
+Issue #38 adds a default-on review-first route as an independent third asynchronous axis, issue #40
+adds an application-bound fallback for ordinary non-secure AX misses, and issue #27 remains the
+explicit compatibility route:
 
 ```text
 HotKeyService
@@ -17,7 +18,7 @@ HotKeyService
       -> recognition line: factory / one send loop over HoldPacketJournal
           -> snapshot/replay ledger -> one fresh FeishuStreamingSession actor per attempt
       -> review line (default): read-only streaming -> read-only sealing -> editable
-          -> explicit confirm -> captured original application/AX selection -> one targeted Cmd+V
+          -> explicit confirm -> captured original app + (exact AX selection | current focus) -> one Cmd+V
       -> compatibility only: CursorTextSession or CurrentFocusAppendSession
 ```
 
@@ -42,10 +43,14 @@ invalidates the active generation before cleanup so late callbacks are inert.
 `reviewBeforeInsert` and `autoInsert` are sampled once at accepted-Fn start. The default
 `reviewBeforeInsert == true` route opens a separate review state
 `idle -> streaming(read-only) -> sealing(read-only) -> editable -> confirming | discard -> idle`.
-It captures the original destination before audio/network startup, never arms a live cursor or
-keyboard writer, and does not mutate the target until explicit confirmation. `autoInsert` has no
-authority in this route. When `reviewBeforeInsert == false`, the existing issue #27 continuous
-writer and the sampled `autoInsert` value remain the compatibility behavior.
+It captures a complete original application identity before audio/network startup and prefers an
+exact AX cursor/selection. If an ordinary non-secure target cannot complete the strict AX cursor
+contract, it retains that same application identity as an `applicationCurrentFocus` binding; it
+never arms a live cursor or keyboard writer and does not mutate the target until explicit
+confirmation. Secure input, lost trust, incomplete identity, PID reuse, or identity drift remains
+terminal. `autoInsert` has no authority in this route. When `reviewBeforeInsert == false`, the
+existing issue #27 continuous writer and the sampled `autoInsert` value remain the compatibility
+behavior.
 
 ### Streaming audio boundary
 
@@ -148,11 +153,13 @@ presenter reference. The recognition consumer does not await read-only presentat
 readiness, activation, focus, dismissal, or delivery. Review rendering adds no journal wake-up,
 retry condition, replay ordering, buffer, `AsyncSequence`, or backpressure edge.
 
-After strict destination capture succeeds, `MainViewModel` establishes a review ID and publishes
-`.streaming(preview: "")`. Read-only rendering runs on a cancellable, revision-gated fire-and-forget
-main-actor task; a newer snapshot can cancel a render that has not reached the presenter. Each
-newly owned, changed, non-contentless opaque snapshot replaces the preview in full. Equal values,
-historical replay, stale generations, closed admission, and late callbacks do not render.
+After identity-first destination capture succeeds, `MainViewModel` establishes a review ID and
+publishes `.streaming(preview: "")`. Read-only rendering runs on a cancellable, revision-gated
+fire-and-forget main-actor task; a newer snapshot can cancel a render that has not reached the
+presenter. Each newly owned, changed, non-contentless opaque snapshot replaces the preview in full.
+Equal values, historical replay, stale generations, closed admission, and late callbacks do not
+render. Exact AX capture wins whenever available; an ordinary non-secure strict-AX miss uses the
+already captured application's current-focus binding.
 
 `ReviewWindowController` retains one `ReviewPanel`. During streaming/sealing it cannot become key
 or main, ignores mouse events, is not closable, and shows `正在聆听…` or `正在完成识别…` without taking
@@ -176,48 +183,50 @@ confirm.
 Discard performs no activation, AX write, pasteboard mutation, synthetic event, or recovery copy.
 Human edits update the review state only, and late recognition cannot overwrite them.
 
-Issue #39 changes only this editable review keyboard policy. Original-target capture, clipboard
-lifecycle, capture/journal production, recognition/retry/replay consumption, and the independent
-review axis remain unchanged.
+Issue #39 changes only this editable review keyboard policy. Original-target capture as amended by
+issue #40, clipboard lifecycle, capture/journal production, recognition/retry/replay consumption,
+and the independent review axis remain unchanged.
 
 Confirmation consumes authority synchronously before the first await: it freezes the exact
 untrimmed draft, changes to `.confirming`, advances the review revision, and dismisses the panel
 before starting delivery. Repeated confirmation or stale callbacks cannot create a second delivery.
 A pending editable/confirming review also prevents a successor Fn interaction from replacing it.
 
-### Review original-target and pasteboard boundary
+### Review original-application and pasteboard boundary
 
-Review capture is stricter than compatibility output. Before audio/network startup it requires:
+Before audio/network startup, review capture requires a complete application identity (PID, bundle
+identifier, executable URL, and launch date) and confirms that the running process and frontmost
+application agree. It then asks AX for a typed outcome. Accessibility trust, Secure Event Input
+off, a supported non-secure editable role/subrole, focused-element PID equal to the frontmost PID,
+a valid selected range, and settable focus plus selected-range attributes are required for the
+preferred exact binding. A strict capability miss after final live security checks yields an
+`applicationCurrentFocus` binding to the already captured identity. Global/affirmative secure
+input, lost trust, incomplete identity, PID reuse, and post-capture identity drift fail startup.
 
-- Accessibility trust and Secure Event Input off;
-- a focused element whose positive PID equals the frontmost process;
-- an affirmatively supported non-secure editable role/subrole;
-- a valid original selected range plus settable focus and selection-range attributes; and
-- a complete application identity: PID, bundle identifier, executable URL, and launch date.
-
-The token keeps the exact `AXUIElement` and selection in memory. Review capture performs no AX
-setter and does not query whether `kAXSelectedTextAttribute` is settable. Missing identity or
-destination uncertainty fails startup; review-first never falls through to a compatibility writer
-or ambient current focus.
+The exact token keeps the `AXUIElement` and selection in memory. The fallback token keeps neither;
+it cannot be used as an implicit exact cursor. Capture performs no AX setter and does not query
+whether `kAXSelectedTextAttribute` is settable. Review-first never falls through to a compatibility
+writer or an application discovered after panel activation.
 
 On confirmation, `SystemReviewDestinationDelivery` verifies the complete process-reuse-safe
-identity, requests activation of that exact application once, and waits at most two seconds. It
-then restores focus only to the captured AX element, verifies that exact focused element, restores
-and rereads the original selection, and rechecks application/frontmost/security state before any
-pasteboard mutation. The review route never writes `kAXSelectedTextAttribute`.
+identity, requests activation of that exact application once, and waits at most two seconds. The
+exact branch restores focus only to the captured AX element, verifies that exact focused element,
+restores and rereads the original selection, and rechecks application/frontmost/security state
+before mutation. The fallback branch performs no AX setter or later AX recapture; it requires two
+consecutive composite samples, each ordered Secure Input at start -> raw captured PID ->
+running/frontmost complete identities -> Secure Input at end, and then uses
+`insertReviewAtCurrentFocusOnce` to post one Cmd+V pair directly to the captured PID. Postflight
+uses the equivalent composite safety shape. The fallback proves the original application, not the
+original control or caret inside it.
 
 The delivery helper accepts LF as multiline data without normalizing the draft, while rejecting
 NUL, tab, carriage return, DEL, and C1 controls before mutation. It snapshots every data-bearing
 type from every prior pasteboard item, writes the exact draft, and posts one Cmd+V pair to the
-captured PID. Postflight rechecks exact application identity, frontmost authority, focused AX
-element, Accessibility trust, and Secure Input; it does not require the pre-paste selection after
-the target application has owned the edit.
-
-Only a successful key post plus successful postflight schedules one bounded clipboard restoration.
-The scheduled operation checks that `NSPasteboard.general.changeCount` is still the value created
-by this review write, and the concrete restore repeats the check immediately before clearing or
-writing. Thus a third-party clipboard change is never overwritten. Key-post or postflight
-uncertainty schedules no automatic restoration and no delivery retry.
+captured PID. Only a successful key post plus successful postflight schedules one bounded clipboard
+restoration. The scheduled operation checks that `NSPasteboard.general.changeCount` is still the
+value created by this review write, and the concrete restore repeats the check immediately before
+clearing or writing. Thus a third-party clipboard change is never overwritten. Key-post or
+postflight uncertainty schedules no automatic restoration and no delivery retry.
 
 Activation, identity, target, security, text, key-post, or postflight failure is terminal and never
 retargets. Except for cancellation, the currently owned failure copies the exact frozen draft once
@@ -579,11 +588,15 @@ The issue #27 compatibility route does not use a pasteboard. It instead:
   never falls through to a full resend, Cmd+V, another target, or clipboard recovery;
 - never performs release-time one-shot/final-only insertion or manual clipboard recovery.
 
-Issue #38 adds a separate two-phase paste transaction for explicit review confirmation. It is not a
-fallback from the compatibility writer. After complete application/AX preflight, it accepts the
-exact non-contentless frozen draft with LF as multiline data, snapshots every prior pasteboard item
-and data-bearing type, writes once, posts one Cmd+V pair to the captured PID, and performs exact
-application/focus/security postflight. Only a certain `.inserted` result schedules restoration.
+Issue #38 adds a separate two-phase paste transaction for explicit review confirmation, and issue
+#40 adds its application-current-focus binding. It is not a fallback from the compatibility writer.
+After complete application identity preflight, the exact branch also restores the captured AX
+selection; the fallback performs two consecutive composite samples, each ordered Secure Input at
+start -> raw captured PID -> running/frontmost complete identities -> Secure Input at end. Both
+accept the exact non-contentless frozen draft with LF as multiline data, snapshot every prior
+pasteboard item and data-bearing type, write once, post one Cmd+V pair to the captured PID, and
+perform the equivalent composite postflight check. Only a certain `.inserted` result schedules
+restoration.
 
 Review restoration is conditional rather than unconditional:
 
@@ -645,7 +658,11 @@ same-panel read-only/editable authority, opaque snapshot/replay fences, action-2
 barrier ordering, nonblocking capture/recognition axes, human edit protection, exact-once
 confirm/discard, Return/Enter/Shift-Return/IME keyboard policy, process-reuse-safe original-target
 validation, multiline/control classification, terminal uncertainty, manual recovery, and
-conditional full-pasteboard restoration.
+conditional full-pasteboard restoration. The issue #40 focused serialized suites add 79/79
+passing tests for typed exact-vs-fallback capture, identity-first ordering, ordinary non-secure
+strict-AX misses, fixed-PID multiline delivery, two composite security/PID/identity checks with
+Secure Input rechecks, identity
+uncertainty, preview/retry independence, and one-copy recovery.
 
 Issue #26's 272/272 lifecycle-free evidence predates the issue #27 correction and must not be used
 as proof of snapshot reconciliation. Issue #27 requires focused and full-suite evidence for
@@ -658,7 +675,10 @@ Automated evidence still cannot prove target-control acceptance or credential-be
 behavior.
 
 Credential-bearing Feishu behavior, real WindowServer panel activation/key focus, and
-cross-application Accessibility/Cmd+V compatibility remain live UAT. Installed build 5 recorded 66 HTTP-200 transactions over 13.55 seconds while visible output
+cross-application Accessibility/Cmd+V compatibility remain live UAT. Issue #40 specifically needs
+one ordinary non-secure final-only/editable AX target that previously showed `无法确认输入位置`,
+one exact-AX target, secure/password rejection, app switching during confirmation, multiline
+confirmation, and forced post/postflight uncertainty with manual recovery. Installed build 5 recorded 66 HTTP-200 transactions over 13.55 seconds while visible output
 stopped after one word. This proves continuing transport, not response shape, output ownership, or
 target acceptance. The snapshot-replacement policy, subsequent actions, terminal encoding, real
 text/token-refresh behavior, PCM/tail handling, slow networks,
@@ -668,4 +688,5 @@ remain owner-UAT gates. No broad application compatibility is claimed yet.
 In particular, `CGEventPostToPid` has no target acceptance acknowledgement. A locally submitted
 compatibility replacement or review-confirmation Cmd+V with no visible target text remains PARTIAL
 and must not trigger global HID posting, retries, rollback, retargeting, or a second automatic
-delivery path after uncertainty.
+delivery path after uncertainty. The D-40 fallback proves the original application only, not the
+original control or caret within it.

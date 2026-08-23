@@ -572,6 +572,26 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
         await context.provider.releaseFactory()
     }
 
+    func test_reviewFirst_secureCaptureRejectionStaysBeforeSurfaceAudioAndProvider() async {
+        let context = makeContext(finishEvent: .cancelled)
+        context.delivery.captureResult = .rejected(.secureInput)
+        let identity = StreamingSessionIdentity(generation: 3_824)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { context.delivery.captureCallCount == 1 }
+        await settle()
+
+        XCTAssertEqual(context.viewModel.transcriptionReviewState, .idle)
+        XCTAssertEqual(context.presenter.renderReadOnlyCallCount, 0)
+        XCTAssertEqual(context.recorder.startStreamingCallCount, 0)
+        let providerCallCount = await context.provider.makeSessionCallCount
+        XCTAssertEqual(providerCallCount, 0)
+        XCTAssertEqual(context.viewModel.journalCountForTesting, 0)
+        XCTAssertEqual(context.output.insertedTexts, [])
+        XCTAssertEqual(context.output.currentFocusInsertedTexts, [])
+        XCTAssertEqual(context.output.copiedTexts, [])
+    }
+
     func test_reviewFirst_journalAndActionTwoProgressWhileReviewSurfaceIsGated() async {
         let context = makeContext(
             packetEvents: [.partial("PRIVATE_GATED_PARTIAL")],
@@ -1011,39 +1031,64 @@ private final class Issue38ReviewFinalTextOutput: FinalTextOutput {
 
 @MainActor
 private final class Issue38ReviewDestinationDelivery: ReviewDestinationDelivering {
-    private let destination: ReviewDestinationToken
+    private let application: ReviewApplicationIdentity
+    private let element: AXUIElement
     private(set) var captureCallCount = 0
     private(set) var deliveredTexts: [String] = []
     private(set) var copyCalls = 0
     private(set) var copiedTexts: [String] = []
     private(set) var eventTrace: [String] = []
     var result: ReviewDeliveryResult = .inserted
+    var captureResult: ReviewDestinationCaptureResult
 
     init() {
-        let element = AXUIElementCreateApplication(42)
-        let cursor = CursorDestinationToken(
-            generation: 1,
-            processIdentifier: 42,
-            element: element,
-            originalSelection: CursorTextRange(location: 4, length: 0)
-        )
-        let application = ReviewApplicationIdentity(
+        element = AXUIElementCreateApplication(42)
+        application = ReviewApplicationIdentity(
             processIdentifier: 42,
             bundleIdentifier: "com.example.review-target",
             executableURL: URL(fileURLWithPath: "/Applications/ReviewTarget.app"),
             launchDate: Date(timeIntervalSince1970: 42)
         )
-        destination = ReviewDestinationToken(
-            cursor: cursor,
-            application: application,
-            capturedSecurityState: .safe
+        captureResult = .captured(
+            ReviewDestinationToken(
+                generation: 1,
+                application: application,
+                binding: .exactCursor(
+                    CursorDestinationToken(
+                        generation: 1,
+                        processIdentifier: 42,
+                        element: element,
+                        originalSelection: CursorTextRange(location: 4, length: 0)
+                    )
+                ),
+                capturedSecurityState: .safe
+            )
         )
     }
 
-    func capture(generation: UInt64) throws -> ReviewDestinationToken {
+    func capture(generation: UInt64) -> ReviewDestinationCaptureResult {
         captureCallCount += 1
         eventTrace.append("capture")
-        return destination
+        switch captureResult {
+        case .captured:
+            return .captured(
+                ReviewDestinationToken(
+                    generation: generation,
+                    application: application,
+                    binding: .exactCursor(
+                        CursorDestinationToken(
+                            generation: generation,
+                            processIdentifier: application.processIdentifier,
+                            element: element,
+                            originalSelection: CursorTextRange(location: 4, length: 0)
+                        )
+                    ),
+                    capturedSecurityState: .safe
+                )
+            )
+        case .rejected:
+            return captureResult
+        }
     }
 
     func record(event: String) {

@@ -69,7 +69,7 @@ extension AccessibilityRuntime {
 
 @MainActor
 protocol ReviewDestinationAccessing: AnyObject {
-    func captureReviewCursorDestination(generation: UInt64) throws -> CursorDestinationToken
+    func captureReviewCursorDestination(generation: UInt64) -> ReviewCursorCaptureResult
     func restoreAndValidateBeforeDelivery(_ token: CursorDestinationToken) throws -> Bool
     func validateAfterDelivery(_ token: CursorDestinationToken) throws -> Bool
 }
@@ -182,49 +182,54 @@ final class MacAccessibilityClient: AccessibilityClient, ReviewDestinationAccess
         try runtime.setSelectedText(text, on: token.element)
     }
 
-    func captureReviewCursorDestination(generation: UInt64) throws -> CursorDestinationToken {
-        guard runtime.isProcessTrusted else {
-            throw AccessibilityClientError.accessibilityUnavailable
-        }
-        guard !runtime.isSecureEventInputEnabled else {
-            throw AccessibilityClientError.accessibilityUnavailable
+    func captureReviewCursorDestination(generation: UInt64) -> ReviewCursorCaptureResult {
+        if let admissionResult = reviewCaptureAdmissionResult() {
+            return admissionResult
         }
 
-        let element = try runtime.focusedElement()
-        let processIdentifier = try runtime.processIdentifier(for: element)
+        let element: AXUIElement
+        do {
+            element = try runtime.focusedElement()
+        } catch {
+            return reviewCaptureResultForCapabilityMiss()
+        }
+
+        let processIdentifier: pid_t
+        do {
+            processIdentifier = try runtime.processIdentifier(for: element)
+        } catch {
+            return reviewCaptureResultForCapabilityMiss()
+        }
         guard processIdentifier > 0,
               processIdentifier == runtime.frontmostProcessIdentifier() else {
-            throw AccessibilityClientError.cannotComplete
-        }
-        guard try securityState(for: element) == .safe else {
-            throw AccessibilityClientError.accessibilityUnavailable
+            return reviewCaptureResultForCapabilityMiss()
         }
 
-        let selection = try runtime.selectedTextRange(for: element)
-        guard selection.location >= 0,
+        if let securityResult = reviewSecurityValidation(for: element) {
+            return securityResult
+        }
+
+        guard let selection = reviewSelection(for: element),
+              selection.location >= 0,
               selection.length >= 0,
               selection.endLocation != nil else {
-            throw AccessibilityClientError.invalidValue
-        }
-        guard try runtime.isAttributeSettable(
-            kAXSelectedTextRangeAttribute as String,
-            on: element
-        ) else {
-            throw AccessibilityClientError.accessibilityUnavailable
-        }
-        guard try runtime.isAttributeSettable(
-            kAXFocusedAttribute as String,
-            on: element
-        ) else {
-            throw AccessibilityClientError.accessibilityUnavailable
+            return reviewCaptureResultForCapabilityMiss()
         }
 
-        return CursorDestinationToken(
+        guard reviewCaptureAttributesAreSettable(for: element) else {
+            return reviewCaptureResultForCapabilityMiss()
+        }
+
+        if let admissionResult = reviewCaptureAdmissionResult() {
+            return admissionResult
+        }
+
+        return .exact(CursorDestinationToken(
             generation: generation,
             processIdentifier: processIdentifier,
             element: element,
             originalSelection: selection
-        )
+        ))
     }
 
     func restoreAndValidateBeforeDelivery(_ token: CursorDestinationToken) throws -> Bool {
@@ -282,6 +287,78 @@ final class MacAccessibilityClient: AccessibilityClient, ReviewDestinationAccess
             return .secure
         }
         return supportedNonSecureSubroles.contains(subrole) ? .safe : .unverifiable
+    }
+
+    private func reviewCaptureAdmissionResult() -> ReviewCursorCaptureResult? {
+        guard runtime.isProcessTrusted else {
+            return .rejected(.accessibilityUnavailable)
+        }
+        guard !runtime.isSecureEventInputEnabled else {
+            return .rejected(.secureInput)
+        }
+        return nil
+    }
+
+    private func reviewSecurityValidation(
+        for element: AXUIElement
+    ) -> ReviewCursorCaptureResult? {
+        let state: DestinationSecurityState
+        do {
+            state = try reviewSecurityState(for: element)
+        } catch {
+            return reviewCaptureResultForCapabilityMiss()
+        }
+        switch state {
+        case .secure:
+            return .rejected(.secureInput)
+        case .unverifiable:
+            return reviewCaptureResultForCapabilityMiss()
+        case .safe:
+            return nil
+        }
+    }
+
+    private func reviewSecurityState(
+        for element: AXUIElement
+    ) throws -> DestinationSecurityState {
+        guard let subrole = try runtime.subrole(for: element) else {
+            return .unverifiable
+        }
+        if subrole == (kAXSecureTextFieldSubrole as String) {
+            return .secure
+        }
+        return try securityState(for: element)
+    }
+
+    private func reviewSelection(for element: AXUIElement) -> CursorTextRange? {
+        try? runtime.selectedTextRange(for: element)
+    }
+
+    private func reviewCaptureAttributesAreSettable(for element: AXUIElement) -> Bool {
+        do {
+            guard try runtime.isAttributeSettable(
+                kAXSelectedTextRangeAttribute as String,
+                on: element
+            ) else {
+                return false
+            }
+            return try runtime.isAttributeSettable(
+                kAXFocusedAttribute as String,
+                on: element
+            )
+        } catch {
+            return false
+        }
+    }
+
+    private func reviewCaptureResultForCapabilityMiss() -> ReviewCursorCaptureResult {
+        guard runtime.isProcessTrusted else {
+            return .rejected(.accessibilityUnavailable)
+        }
+        guard !runtime.isSecureEventInputEnabled else {
+            return .rejected(.secureInput)
+        }
+        return .nonSecureCursorUnavailable
     }
 
     private var supportedEditableRoles: Set<String> {

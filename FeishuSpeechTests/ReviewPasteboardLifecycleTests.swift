@@ -80,6 +80,62 @@ final class ReviewPasteboardLifecycleTests: XCTestCase {
         XCTAssertEqual(pasteboard.restoreCount, 0)
     }
 
+    func test_successfulApplicationBoundReviewPasteUsesSameSnapshotAndRestoresMultilineDraft() {
+        let pasteboard = Issue38ReviewPasteboardLifecycleWriter()
+        let scheduler = Issue38ReviewPasteboardRestoreScheduler()
+        let keyPoster = Issue38ReviewPasteboardKeyPoster()
+        let output = makeOutput(
+            pasteboard: pasteboard,
+            scheduler: scheduler,
+            keyPoster: keyPoster
+        )
+        let priorItems = pasteboard.items
+        let draft = "first line\nsecond line"
+
+        let result = output.insertReviewAtCurrentFocusOnce(
+            draft,
+            processIdentifier: 42,
+            validateBeforeMutation: { .valid },
+            validateAfterPosting: { .valid }
+        )
+
+        XCTAssertEqual(result, .inserted)
+        XCTAssertEqual(pasteboard.items, [Issue38ReviewPasteboardItem.draft(draft)])
+        XCTAssertEqual(pasteboard.writtenTexts, [draft])
+        XCTAssertEqual(pasteboard.writeCount, 1)
+        XCTAssertEqual(keyPoster.processIdentifiers, [42])
+        XCTAssertEqual(scheduler.pendingCount, 1)
+
+        scheduler.runNext()
+
+        XCTAssertEqual(pasteboard.items, priorItems)
+        XCTAssertEqual(pasteboard.restoreCount, 1)
+    }
+
+    func test_applicationBoundReviewPastePostflightUncertaintyDoesNotRestoreOrRetry() {
+        let pasteboard = Issue38ReviewPasteboardLifecycleWriter()
+        let scheduler = Issue38ReviewPasteboardRestoreScheduler()
+        let keyPoster = Issue38ReviewPasteboardKeyPoster()
+        let output = makeOutput(
+            pasteboard: pasteboard,
+            scheduler: scheduler,
+            keyPoster: keyPoster
+        )
+
+        let result = output.insertReviewAtCurrentFocusOnce(
+            "PRIVATE_FALLBACK_UNCERTAIN",
+            processIdentifier: 42,
+            validateBeforeMutation: { .valid },
+            validateAfterPosting: { .destinationInvalid }
+        )
+
+        XCTAssertEqual(result, .deliveryUncertain)
+        XCTAssertEqual(pasteboard.writtenTexts, ["PRIVATE_FALLBACK_UNCERTAIN"])
+        XCTAssertEqual(keyPoster.processIdentifiers, [42])
+        XCTAssertEqual(scheduler.pendingCount, 0)
+        XCTAssertEqual(pasteboard.restoreCount, 0)
+    }
+
     func test_preflightFailureDoesNotSnapshotMutateScheduleOrRestore() {
         let pasteboard = Issue38ReviewPasteboardLifecycleWriter()
         let scheduler = Issue38ReviewPasteboardRestoreScheduler()
