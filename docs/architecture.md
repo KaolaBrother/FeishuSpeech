@@ -166,6 +166,11 @@ focus from the captured target. Physical release changes the same panel to seali
 latest preview; it does not dismiss or recreate the surface. This review panel is separate from
 the unchanged status-only `OverlayWindowController` / `RecordingOverlayView` pair.
 
+The review panel keeps its initial 520x320 content size, minimum 420x240, and maximum 760x600. The
+read-only transcript and native multiline editor share the 18pt transcript font; the font correction
+does not enlarge those bounds. The panel omits `.fullSizeContentView`, so read-only content remains
+below the titlebar/traffic-light controls rather than occupying the full titlebar region.
+
 The authoritative action-2 result and recorder barrier freeze the draft and close response/retry
 admission. A non-contentless final is used exactly. A contentless final falls back to the last usable
 snapshot and marks it `可能不完整`; if neither value is usable, the surface returns to idle without
@@ -190,9 +195,16 @@ and the independent review axis remain unchanged.
 Confirmation consumes authority synchronously before the first await: it freezes the exact
 untrimmed draft, changes to `.confirming`, advances the review revision, and keeps the same panel
 visible while starting one delivery task. Repeated confirmation or stale callbacks cannot create a
-second delivery. A readiness or delivery failure returns to the same draft with fixed feedback and
-explicit Retry/Discard authority; it never copies, retargets, or automatically retries. A pending
+second delivery. A readiness or delivery failure returns to the same draft with fixed feedback. The
+pending UI has no visible `重试编辑` control and cannot confirm; only a later `.editable` state
+exposes Send/Return confirmation, while Discard remains explicit. The controller may re-evaluate
+readiness, but it never copies, retargets, or automatically retries delivery. A pending
 editable/confirming review also prevents a successor Fn interaction from replacing it.
+
+The request to activate the accessory application is advisory only. Editable readiness remains
+fail-closed against the actual predicates: the application is active, the panel is key, the editor
+is materialized and attached to that panel, and the editor is the first responder. An activation
+request result alone never grants editable or confirmation authority.
 
 ### Review original-application and pasteboard boundary
 
@@ -672,7 +684,7 @@ SwiftLint, diff checks, protected async-topology checks, and independent correct
 reviews also pass. Automated coverage includes both legacy settings values converging on review,
 same-panel read-only/sealing/pending/editable/confirming authority, opaque snapshot/replay fences,
 action-2 and recorder-barrier ordering, nonblocking capture/recognition axes, human edit protection,
-typed readiness outcomes and retry, exact-once Send/Return confirmation, Return/Enter/Shift-Return/
+typed readiness outcomes and re-evaluation, exact-once Send/Return confirmation, Return/Enter/Shift-Return/
 IME keyboard policy, process-reuse-safe original-target validation, multiline/control classification,
 terminal uncertainty, durable draft retention, and conditional full-pasteboard restoration. The
 current evidence does not include automatic recovery copy or a direct-output branch.

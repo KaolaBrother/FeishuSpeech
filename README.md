@@ -10,7 +10,8 @@ macOS 本地语音输入工具，使用飞书语音识别 API。
 - ✏️ 松开 **Fn 键** 后同一面板保持只读并显示「正在完成识别…」；只有权威 `action=2` 已结算且录音队列屏障通过后，它才转为可编辑草稿。捕获/录音和识别/provider 是独立异步根，均不等待面板或编辑器
 - ✅ 只有编辑器中的显式「发送」、未修饰 **Return**（含数字键盘 **Enter**）或 **Command+Return** 才会将未裁剪的编辑结果写回开始录音时捕获的原应用（exact AX 目标优先，普通非安全 AX miss 使用该应用当前焦点）；**Shift+Return/Shift+Enter** 只插入一个换行，输入法组合文本（marked text）中的 Return 交给输入法；「取消」、Escape 或关闭窗口不写入
 - 🔒 审阅路由优先绑定原应用身份、精确 AX 元素与原选区；普通非安全目标无法完成严格 AX 光标捕获时，绑定开始交互时的完整原应用并在确认时使用固定 PID 的当前焦点；安全输入、密码框、身份不完整/漂移或交付不确定仍 fail closed。确认前没有 AX setter、目标键盘事件、pasteboard 写入、直接插入或 recovery copy
-- 🛡️ 编辑器激活、key-window、编辑器 materialization、first-responder、取消/超时，以及交付/安全失败都会保留同一面板中的精确草稿和固定反馈；只提供显式重试/编辑/丢弃，不自动复制、重试、换目标或绕过审阅
+- 🛡️ accessory-app 激活请求只是 advisory；application active、panel key、编辑器 materialization/attachment 与 first-responder 等实际 readiness predicates 仍 fail closed。准备失败时同一面板保留精确草稿，可继续编辑但不显示「重试编辑」或发送确认；只有进入 `.editable` 后才能通过显式发送/Return/Command+Return 投递，交付/安全失败也不自动复制、重试、换目标或绕过审阅
+- 🖼️ 流式预览与多行编辑器共用 18pt transcript 字体；面板初始尺寸仍为 520×320，最小/最大尺寸仍为 420×240 / 760×600，不因增大字体而放大。只读正文不使用 full-size content view，保持在标题栏和交通灯按钮下方
 - ⚙️ 设置中的旧 `reviewBeforeInsert` / `autoInsert` 值仅为 Codable 迁移保留，不能关闭预览或恢复连续/直接输出
 - 🌐 流式识别的租户 token 与 `stream_recognize` 走绑定物理网卡的 keep-alive（bound UDP DNS + `IP_BOUND_IF`），跳过 VPN/TUN；连接失败不再回退系统 URLSession。整文件识别仍走系统 URLSession
 
@@ -68,13 +69,13 @@ cp -R build/Build/Products/Release/FeishuSpeech.app /Applications/
 3. 继续按住并说话；「输入前预览」面板会以只读方式显示最新完整 snapshot，不会在原输入框中边听边改字
 4. 松开 **Fn 键**；面板保持同一个实例并转为「正在完成识别…」。松开只关闭采集，录音队列屏障后的尾包、在途请求、可恢复重连和 `action=2` 仍属于同一 generation
 5. 权威 `action=2` 结算后，同一面板转为多行编辑器。如果 final 为空但已有可用 snapshot，它会作为草稿并标注「可能不完整」；两者都无内容时不打开空编辑器
-6. action 2 与 recorder barrier 后，同一面板进入编辑阶段；若激活或编辑器就绪暂时失败，面板仍保留草稿并提供「重试编辑」或「取消」。编辑后点击「发送」、按未修饰 Return（含数字键盘 Enter）或按 Command+Return 确认；Shift+Return/Shift+Enter 插入一个换行，输入法组合文本（marked text）中的 Return 交给输入法；交付失败也保留精确草稿，仅用户再次显式确认才会产生新的投递，纯空白草稿不能确认
+6. action 2 与 recorder barrier 后，同一面板进入编辑阶段；若 readiness 暂时失败，面板仍保留可编辑但不可确认的草稿且不显示「重试编辑」；实际 application/panel/editor/first-responder predicates 满足后才进入 `.editable`，用户可点击「发送」、按未修饰 Return（含数字键盘 Enter）或按 Command+Return 确认。Shift+Return/Shift+Enter 插入一个换行，输入法组合文本（marked text）中的 Return 交给输入法；交付失败也保留精确草稿，仅用户再次显式确认才会产生新的投递，纯空白草稿不能确认
 
 审阅路由在开始音频/网络工作前捕获完整原应用身份，并优先捕获精确 AX 元素与原选区。普通非安全目标若严格 AX 光标捕获缺失，仍可绑定这个原应用；确认时重新激活该应用，执行两次连续复合 preflight，每次都按 Secure Input（开始）→ raw 捕获 PID → running/frontmost 完整身份 → Secure Input（结束）顺序检查，再只向捕获 PID 发送一次进程定向 Cmd+V；postflight 使用等价的复合安全检查。此 fallback 证明的是原应用，不是原控件或插入点；任何身份、激活、焦点、选区、Secure Input 或交付不确定都不会转向其他应用、自动复制或自动重试。成功粘贴前会保存剪贴板全部 item/type 数据，只在粘贴后的有界机会内且 `changeCount` 仍属于本次写入时恢复；第三方剪贴板变化永不会被覆盖。
 
 审阅 UI 是独立的第三条异步轴：只读渲染为可取消的 fire-and-forget 主线程观察，不会让录音采集/音频 journal 等待界面，也不会让识别 consumer/重试/回放等待窗口。录音状态浮层仍然只显示状态，没有改成文字预览或编辑器。设置不能关闭此路线；旧布尔值仅用于解码/保存迁移，运行时诊断不显示或哈希识别文本，也不记录音频、凭据、token、stream ID、目标控件或剪贴板内容。
 
-> build 6 的隐私安全诊断已确认重复来自把每个新 packet index 的完整 snapshot 错当成 delta 拼接，而非 replay、重连或 transport 失败。当前契约改为完整 snapshot 替换；`CGEventPostToPid` 仍没有目标接受确认，Release owner UAT 仍是必需门槛。Issue #40 v2 的聚焦审阅套件已通过 79/79，完整串行套件通过 442（1 个预期 live-TCP skip），但不替代真实目标应用 UAT。
+> build 6 的隐私安全诊断已确认重复来自把每个新 packet index 的完整 snapshot 错当成 delta 拼接，而非 replay、重连或 transport 失败。当前契约改为完整 snapshot 替换；`CGEventPostToPid` 仍没有目标接受确认，Release owner UAT 仍是必需门槛。Issue #40 v2 的聚焦审阅套件已通过 79/79，完整串行套件通过 442（1 个预期 live-TCP skip），但不替代真实目标应用 UAT。安装版 v3 UAT 仍为失败/open：它暴露了旧的「重试编辑」控件、字体与标题栏安全区问题；不声明安装版通过，需替换 Release 重新验收。
 
 Issue #39 最终候选的 40/40 聚焦、423 个执行/1 个跳过/0 个失败，以及 Issue #40 v2 之前的候选结果均为历史证据；当前 79/79 与 442/1 skip 的自动化结果也不替代真实麦克风、凭据、WindowServer、Accessibility 恢复和第三方应用 Cmd+V 接收 UAT。
 

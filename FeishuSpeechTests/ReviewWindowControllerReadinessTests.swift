@@ -5,10 +5,11 @@ import XCTest
 
 @MainActor
 final class ReviewWindowControllerReadinessTests: XCTestCase {
-    func test_activationRejectionIsTypedPendingAndKeepsSamePanelAndCallbacks() async {
+    func test_activationRequestFailureIsAdvisoryWhenPredicatesAreReady() async {
         let clock = ReviewReadinessClock()
         let probe = ReviewReadinessProbe()
         probe.activationAllowed = false
+        probe.editor = probe.makeEditor()
         let controller = makeController(probe: probe, clock: clock)
         defer { controller.dismiss() }
 
@@ -31,13 +32,75 @@ final class ReviewWindowControllerReadinessTests: XCTestCase {
 
         let result = await controller.requestEditableReadiness()
 
-        XCTAssertEqual(result, .pending(.activationRejected))
+        XCTAssertEqual(
+            result,
+            .ready,
+            "an activation request failure must remain advisory when real readiness predicates are already true"
+        )
         XCTAssertTrue(initialPanel.isVisible)
         XCTAssertTrue(reviewPanel() === initialPanel, "readiness failure must retain the same panel")
         XCTAssertTrue(controller.windowShouldClose(initialPanel))
         XCTAssertEqual(discardCallCount, 1, "failure must retain the explicit discard callback")
         XCTAssertEqual(probe.activationRequestCount, 1)
         XCTAssertEqual(clock.sleepCallCount, 0)
+    }
+
+    func test_activationRequestFailurePollsDelayedPredicatesUntilReady() async {
+        let clock = ReviewReadinessClock()
+        let probe = ReviewReadinessProbe()
+        probe.activationAllowed = false
+        probe.applicationActive = false
+        probe.applicationActiveAfterCheckCount = 2
+        probe.panelKey = false
+        probe.panelKeyAfterCheckCount = 2
+        probe.editor = probe.makeEditor()
+        let controller = makeController(probe: probe, clock: clock)
+        defer { controller.dismiss() }
+        renderDraft(on: controller, draft: "PRIVATE_DELAYED_READINESS_DRAFT")
+        guard let panel = reviewPanel() else {
+            XCTFail("renderDraft must materialize a production ReviewPanel")
+            return
+        }
+
+        let result = await controller.requestEditableReadiness()
+
+        XCTAssertEqual(
+            result,
+            .ready,
+            "an activation request failure must not prevent polling real application/key predicates"
+        )
+        XCTAssertGreaterThanOrEqual(clock.sleepCallCount, 2)
+        XCTAssertGreaterThanOrEqual(probe.applicationActiveCheckCount, 2)
+        XCTAssertGreaterThanOrEqual(probe.panelKeyCheckCount, 2)
+        XCTAssertTrue(panel.isVisible)
+        XCTAssertTrue(reviewPanel() === panel)
+    }
+
+    func test_activationRequestFailureWithNeverReadyPredicatesTimesOutWithActualPredicate() async {
+        let clock = ReviewReadinessClock()
+        clock.setAdvanceToDeadlineOnNextSleep()
+        let probe = ReviewReadinessProbe()
+        probe.activationAllowed = false
+        probe.applicationActive = false
+        let controller = makeController(probe: probe, clock: clock)
+        defer { controller.dismiss() }
+        renderDraft(on: controller, draft: "PRIVATE_TIMEOUT_AFTER_ACTIVATION_FAILURE")
+        guard let panel = reviewPanel() else {
+            XCTFail("renderDraft must materialize a production ReviewPanel")
+            return
+        }
+
+        let result = await controller.requestEditableReadiness()
+
+        XCTAssertEqual(
+            result,
+            .pending(.timedOut(lastUnmet: .applicationActive)),
+            "failure must be typed from the actual unmet predicate, never as activationRejected"
+        )
+        XCTAssertNotEqual(result, .ready, "an actually unready surface must never become confirmable")
+        XCTAssertTrue(panel.isVisible)
+        XCTAssertTrue(reviewPanel() === panel)
+        XCTAssertEqual(probe.activationRequestCount, 1)
     }
 
     func test_inactiveApplicationIsTypedPendingWithoutDismissingPanel() async {
@@ -295,10 +358,10 @@ final class ReviewWindowControllerReadinessTests: XCTestCase {
                     probe?.requestActivation() ?? false
                 },
                 applicationIsActive: { [weak probe] in
-                    probe?.applicationActive ?? false
+                    probe?.applicationIsActiveCheck() ?? false
                 },
                 panelIsKey: { [weak probe] _ in
-                    probe?.panelKey ?? false
+                    probe?.panelKeyCheck() ?? false
                 },
                 editorLookup: { [weak probe] _ in
                     probe?.editorLookup()
@@ -360,11 +423,15 @@ final class ReviewWindowControllerReadinessTests: XCTestCase {
 private final class ReviewReadinessProbe: @unchecked Sendable {
     var activationAllowed = true
     var applicationActive = true
+    var applicationActiveAfterCheckCount: Int?
     var panelKey = true
+    var panelKeyAfterCheckCount: Int?
     var editor: NSTextView?
     var editorAttached = true
     var firstResponderAssignmentSucceeds = true
     private(set) var activationRequestCount = 0
+    private(set) var applicationActiveCheckCount = 0
+    private(set) var panelKeyCheckCount = 0
     private(set) var editorLookupCount = 0
     private(set) var editorAttachedCount = 0
     private(set) var firstResponderAssignmentCount = 0
@@ -373,6 +440,22 @@ private final class ReviewReadinessProbe: @unchecked Sendable {
     func requestActivation() -> Bool {
         activationRequestCount += 1
         return activationAllowed
+    }
+
+    func applicationIsActiveCheck() -> Bool {
+        applicationActiveCheckCount += 1
+        if let applicationActiveAfterCheckCount {
+            return applicationActiveCheckCount >= applicationActiveAfterCheckCount
+        }
+        return applicationActive
+    }
+
+    func panelKeyCheck() -> Bool {
+        panelKeyCheckCount += 1
+        if let panelKeyAfterCheckCount {
+            return panelKeyCheckCount >= panelKeyAfterCheckCount
+        }
+        return panelKey
     }
 
     func editorLookup() -> NSTextView? {

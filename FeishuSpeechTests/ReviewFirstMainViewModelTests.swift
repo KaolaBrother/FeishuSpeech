@@ -158,6 +158,83 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
         XCTAssertEqual(context.viewModel.transcriptionReviewState, .idle)
     }
 
+    func test_reviewFirst_realProductionSurfaceMakesFrozenDraftConfirmableWithoutRetryEditing() async throws {
+        let production = ReviewWindowController.ReadinessEnvironment.appKit
+        let firstResponderProbe = Issue40ProductionFirstResponderProbe()
+        let controller = ReviewWindowController(
+            readinessEnvironment: ReviewWindowController.ReadinessEnvironment(
+                requestActivation: { true },
+                applicationIsActive: { true },
+                panelIsKey: { _ in true },
+                editorLookup: production.editorLookup,
+                editorAttached: production.editorAttached,
+                makeFirstResponder: { panel, editor in
+                    firstResponderProbe.make(panel: panel, editor: editor)
+                },
+                firstResponderIsEditor: { panel, editor in
+                    firstResponderProbe.check(panel: panel, editor: editor)
+                },
+                nowNanoseconds: production.nowNanoseconds,
+                sleep: production.sleep
+            )
+        )
+        let presenter = Issue40ProductionReviewSurfacePresenter(controller: controller)
+        let context = makeProductionReviewContext(
+            finishEvent: .final("PRIVATE_REAL_PRODUCTION_DRAFT"),
+            presenter: presenter
+        )
+        defer { controller.dismiss() }
+
+        await startAndSealProduction(
+            context,
+            identity: StreamingSessionIdentity(generation: 3_842)
+        )
+        await settle()
+
+        XCTAssertEqual(
+            context.viewModel.transcriptionReviewState,
+            .editable(
+                draft: "PRIVATE_REAL_PRODUCTION_DRAFT",
+                isPossiblyIncomplete: false,
+                feedback: nil
+            ),
+            "a genuinely ready production surface must transition out of pending into confirmable editable state"
+        )
+        let panel = try XCTUnwrap(presenter.retainedPanel)
+        let editor = try XCTUnwrap(
+            editableTextView(in: panel.contentView),
+            "production presenter must materialize the native editable editor"
+        )
+        XCTAssertTrue(editor.isEditable)
+        XCTAssertTrue(editor.window === panel)
+        XCTAssertTrue(
+            firstResponderProbe.requestedEditorWasAttached,
+            "readiness must request the real attached editor as first responder"
+        )
+        XCTAssertGreaterThan(firstResponderProbe.makeCallCount, 0)
+        XCTAssertGreaterThan(firstResponderProbe.checkCallCount, 0)
+        XCTAssertTrue(
+            presenter.renderedStates.contains {
+                if case .editable = $0 { return true }
+                return false
+            },
+            "the real presenter must render the confirmable editable state"
+        )
+        XCTAssertEqual(context.delivery.deliveredTexts, [])
+        XCTAssertEqual(context.output.insertedTexts, [])
+        XCTAssertEqual(context.output.currentFocusInsertedTexts, [])
+        XCTAssertEqual(context.accessibility.setSelectedTextCalls, [])
+
+        presenter.invokeConfirm()
+        await waitUntil { context.delivery.deliveredTexts.count == 1 }
+        XCTAssertEqual(
+            context.delivery.deliveredTexts,
+            ["PRIVATE_REAL_PRODUCTION_DRAFT"],
+            "only the explicit confirm callback may deliver the frozen draft"
+        )
+        XCTAssertEqual(context.delivery.copyCalls, 0)
+    }
+
     func test_reviewFirst_repeatedBareReturnFromNativeEditorDeliversExactDraftOnce() async throws {
         let nativePresenter = Issue39NativeReviewSurfacePresenter()
         let context = makeContext(
@@ -1100,6 +1177,48 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
         )
     }
 
+    private func makeProductionReviewContext(
+        finishEvent: StreamingRecognitionEvent,
+        presenter: Issue40ProductionReviewSurfacePresenter
+    ) -> Issue40ProductionReviewContext {
+        let recorder = Issue38ReviewAudioRecorder(holdStopBarrier: false)
+        let session = Issue38ReviewStreamingSession(
+            packetEvents: [],
+            finishEvent: finishEvent
+        )
+        let provider = Issue38ReviewStreamingProvider(session: session)
+        let accessibility = Issue38ReviewAccessibilityClient()
+        let output = Issue38ReviewFinalTextOutput()
+        let delivery = Issue38ReviewDestinationDelivery()
+        let viewModel = MainViewModel(
+            audioRecorder: recorder,
+            settings: AppSettings(
+                appId: "configured-app",
+                appSecret: "configured-secret",
+                autoInsert: true,
+                playSound: false,
+                reviewBeforeInsert: true
+            ),
+            hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
+            streamingProvider: provider,
+            accessibilityClient: accessibility,
+            finalTextOutput: output,
+            overlayPresenter: Issue38ReviewOverlayPresenter(),
+            reviewDestinationDelivery: delivery,
+            reviewSurfacePresenter: presenter
+        )
+        return Issue40ProductionReviewContext(
+            viewModel: viewModel,
+            recorder: recorder,
+            session: session,
+            provider: provider,
+            accessibility: accessibility,
+            output: output,
+            delivery: delivery,
+            presenter: presenter
+        )
+    }
+
     private func startAndSeal(
         _ context: Issue38ReviewContext,
         identity: StreamingSessionIdentity
@@ -1116,6 +1235,36 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
             self.isTerminalReviewDraftState(context.viewModel.transcriptionReviewState)
         }
         await waitUntilAsync { await context.session.finishCallCount == 1 }
+    }
+
+    private func startAndSealProduction(
+        _ context: Issue40ProductionReviewContext,
+        identity: StreamingSessionIdentity
+    ) async {
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { context.recorder.startStreamingCallCount == 1 }
+        await waitUntilAsync { await context.provider.makeSessionCallCount == 1 }
+        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        await waitUntilAsync { await context.session.finishCallCount == 1 }
+        await waitUntil {
+            if case .editable = context.viewModel.transcriptionReviewState {
+                return true
+            }
+            return false
+        }
+    }
+
+    private func editableTextView(in view: NSView?) -> NSTextView? {
+        guard let view else { return nil }
+        if let textView = view as? NSTextView, textView.isEditable {
+            return textView
+        }
+        for subview in view.subviews.reversed() {
+            if let textView = editableTextView(in: subview) {
+                return textView
+            }
+        }
+        return nil
     }
 
     private func isTerminalReviewDraftState(_ state: TranscriptionReviewState) -> Bool {
@@ -1170,6 +1319,93 @@ private struct Issue38ReviewContext {
     let output: Issue38ReviewFinalTextOutput
     let delivery: Issue38ReviewDestinationDelivery
     let presenter: Issue38ReviewSurfacePresenter
+}
+
+@MainActor
+private struct Issue40ProductionReviewContext {
+    let viewModel: MainViewModel
+    let recorder: Issue38ReviewAudioRecorder
+    let session: Issue38ReviewStreamingSession
+    let provider: Issue38ReviewStreamingProvider
+    let accessibility: Issue38ReviewAccessibilityClient
+    let output: Issue38ReviewFinalTextOutput
+    let delivery: Issue38ReviewDestinationDelivery
+    let presenter: Issue40ProductionReviewSurfacePresenter
+}
+
+@MainActor
+private final class Issue40ProductionReviewSurfacePresenter: ReviewSurfacePresenting {
+    let controller: ReviewWindowController
+    private(set) var retainedPanel: ReviewPanel?
+    private(set) var renderedStates: [TranscriptionReviewState] = []
+    private var onConfirm: (@MainActor () -> Void)?
+
+    init(controller: ReviewWindowController) {
+        self.controller = controller
+    }
+
+    func renderReadOnly(phase: ReviewReadOnlyPhase, preview: String) {
+        controller.renderReadOnly(phase: phase, preview: preview)
+        retainedPanel = currentPanel()
+    }
+
+    func renderDraft(
+        state: TranscriptionReviewState,
+        onDraftChange: @escaping @MainActor (String) -> Void,
+        onConfirm: @escaping @MainActor () -> Void,
+        onRetryReadiness: @escaping @MainActor () -> Void,
+        onDiscard: @escaping @MainActor () -> Void
+    ) {
+        renderedStates.append(state)
+        self.onConfirm = onConfirm
+        controller.renderDraft(
+            state: state,
+            onDraftChange: onDraftChange,
+            onConfirm: onConfirm,
+            onRetryReadiness: onRetryReadiness,
+            onDiscard: onDiscard
+        )
+        retainedPanel = currentPanel()
+    }
+
+    func requestEditableReadiness() async -> ReviewEditableTransitionResult {
+        await controller.requestEditableReadiness()
+    }
+
+    func dismiss() {
+        controller.dismiss()
+        retainedPanel = nil
+        onConfirm = nil
+    }
+
+    func invokeConfirm() {
+        onConfirm?()
+    }
+
+    private func currentPanel() -> ReviewPanel? {
+        NSApp.windows.compactMap { $0 as? ReviewPanel }.last
+    }
+}
+
+@MainActor
+private final class Issue40ProductionFirstResponderProbe {
+    private(set) var makeCallCount = 0
+    private(set) var checkCallCount = 0
+    private(set) var requestedEditorWasAttached = false
+
+    func make(panel: ReviewPanel, editor: NSTextView) -> Bool {
+        makeCallCount += 1
+        requestedEditorWasAttached = editor.window === panel
+        _ = panel.makeFirstResponder(editor)
+        // AppKit cannot always install a first responder in a headless test
+        // window, but the production readiness path must still request it.
+        return true
+    }
+
+    func check(panel: ReviewPanel, editor: NSTextView) -> Bool {
+        checkCallCount += 1
+        return editor.window === panel
+    }
 }
 
 private actor Issue38ReviewStreamingSession: SpeechStreamingSession {

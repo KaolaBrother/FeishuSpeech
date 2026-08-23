@@ -125,7 +125,7 @@ final class ReviewWindowController: NSObject, NSWindowDelegate, ReviewSurfacePre
 
         let panel = ReviewPanel(
             contentRect: NSRect(origin: .zero, size: initialWindowSize),
-            styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
+            styleMask: [.titled, .closable, .resizable],
             backing: .buffered,
             defer: false
         )
@@ -174,13 +174,6 @@ final class ReviewWindowController: NSObject, NSWindowDelegate, ReviewSurfacePre
     }
 
     private func setClosable(_ closable: Bool, on panel: ReviewPanel) {
-        var styleMask = panel.styleMask
-        if closable {
-            styleMask.insert(.closable)
-        } else {
-            styleMask.remove(.closable)
-        }
-        panel.styleMask = styleMask
         panel.standardWindowButton(.closeButton)?.isHidden = !closable
     }
 
@@ -271,16 +264,14 @@ final class ReviewWindowController: NSObject, NSWindowDelegate, ReviewSurfacePre
             startNanoseconds: attemptStart
         )
 
-        guard readinessEnvironment.requestActivation() else {
-            clearEditableReadiness()
+        if !readinessEnvironment.requestActivation() {
             logReadiness(
                 event: "review_readiness_pending",
                 attempt: attempt,
-                result: "activationRejected",
+                result: "activationAdvisoryRejected",
                 predicate: .activationRequest,
                 startNanoseconds: attemptStart
             )
-            return .pending(.activationRejected)
         }
 
         materializeEditableSurface(on: panel)

@@ -12,6 +12,268 @@ private let logger = Logger(
 )
 
 final class TranscriptionReviewViewTests: XCTestCase {
+    @MainActor
+    func test_transcriptFontIsMateriallyLargerInStreamingAndEditableSurfaces() throws {
+        let expectedMinimumPointSize: CGFloat = 18
+        let previewText = "PRIVATE_FONT_PREVIEW"
+        let previewWindow = makeWindow(
+            rootView: TranscriptionReviewView(
+                state: .streaming(preview: previewText)
+            )
+        )
+        defer {
+            previewWindow.orderOut(nil)
+            previewWindow.close()
+        }
+
+        let previewField = try XCTUnwrap(
+            textField(containing: previewText, in: previewWindow.contentView),
+            "streaming preview must expose a measurable transcript text control"
+        )
+        let previewPointSize = previewField.font?.pointSize ?? 0
+        XCTAssertGreaterThanOrEqual(
+            previewPointSize,
+            expectedMinimumPointSize,
+            "streaming/read-only transcript text must use the explicit larger transcript size"
+        )
+
+        let editableText = "PRIVATE_FONT_EDITABLE"
+        let editableWindow = makeWindow(
+            rootView: TranscriptionReviewView(
+                state: .editable(
+                    draft: editableText,
+                    isPossiblyIncomplete: false,
+                    feedback: nil
+                )
+            )
+        )
+        defer {
+            editableWindow.orderOut(nil)
+            editableWindow.close()
+        }
+
+        let editor = try XCTUnwrap(
+            editableTextView(in: editableWindow.contentView),
+            "editable review must materialize its native text editor"
+        )
+        let editorPointSize = editor.font?.pointSize ?? 0
+        XCTAssertGreaterThanOrEqual(
+            editorPointSize,
+            expectedMinimumPointSize,
+            "editable transcript text must share the explicit larger transcript size"
+        )
+        XCTAssertEqual(
+            editorPointSize,
+            previewPointSize,
+            "streaming and editable transcript surfaces must use the same shared/default font size"
+        )
+    }
+
+    @MainActor
+    func test_frozenDraftExposesSendAndReturnWithoutRetryEditingControl() throws {
+        let source = try productionSource(relativePath: "FeishuSpeech/Views/TranscriptionReviewView.swift")
+        XCTAssertFalse(
+            source.contains("重试编辑"),
+            "the frozen editable review must not expose the obsolete retry-editing control or text"
+        )
+        XCTAssertTrue(
+            source.contains("Button(\"发送\")"),
+            "the frozen editable review must retain an explicit Send confirmation control"
+        )
+
+        let pendingWindow = makeWindow(
+            rootView: TranscriptionReviewView(
+                state: .editablePending(
+                    draft: "PRIVATE_PENDING_DRAFT",
+                    isPossiblyIncomplete: false,
+                    readiness: .blocked(
+                        attempt: 1,
+                        failure: .surfaceInvalidated
+                    ),
+                    feedback: nil
+                )
+            )
+        )
+        defer {
+            pendingWindow.orderOut(nil)
+            pendingWindow.close()
+        }
+        XCTAssertNil(
+            button(titled: "重试编辑", in: pendingWindow.contentView),
+            "no review state may render the removed retry-editing control"
+        )
+
+        let editableWindow = makeWindow(
+            rootView: TranscriptionReviewView(
+                state: .editable(
+                    draft: "PRIVATE_CONFIRMABLE_DRAFT",
+                    isPossiblyIncomplete: false,
+                    feedback: nil
+                )
+            )
+        )
+        defer {
+            editableWindow.orderOut(nil)
+            editableWindow.close()
+        }
+        XCTAssertNotNil(editableWindow.contentView)
+        XCTAssertNil(button(titled: "重试编辑", in: editableWindow.contentView))
+    }
+
+    @MainActor
+    func test_deliveryUncertainFeedbackWarnsAboutPossibleDuplicateSendWithoutRetryEditing() throws {
+        let source = try productionSource(relativePath: "FeishuSpeech/Views/TranscriptionReviewView.swift")
+        XCTAssertFalse(
+            source.contains("重试编辑"),
+            "delivery uncertainty must not restore the removed retry-editing action"
+        )
+        XCTAssertTrue(
+            source.contains("再次发送") && source.contains("重复"),
+            "delivery uncertainty feedback must explicitly warn that another Send may duplicate prior output"
+        )
+
+        let window = makeWindow(
+            rootView: TranscriptionReviewView(
+                state: .editable(
+                    draft: "PRIVATE_UNCERTAIN_DRAFT",
+                    isPossiblyIncomplete: false,
+                    feedback: .deliveryUncertain
+                )
+            )
+        )
+        defer {
+            window.orderOut(nil)
+            window.close()
+        }
+
+        XCTAssertNil(
+            button(titled: "重试编辑", in: window.contentView),
+            "delivery uncertainty must remain an explicit-send state without retry-editing control"
+        )
+    }
+
+    @MainActor
+    func test_activationFailedFeedbackNamesTargetApplicationWithoutPreparationOrRetryText() throws {
+        let source = try productionSource(relativePath: "FeishuSpeech/Views/TranscriptionReviewView.swift")
+        XCTAssertTrue(
+            source.contains("无法激活目标应用；请确认后再发送。"),
+            "activation failure after readiness must name target application activation and require explicit confirmation"
+        )
+        XCTAssertFalse(
+            source.contains("编辑器正在准备，请稍候。"),
+            "activation failure must not claim the editor is still preparing after readiness failed"
+        )
+        XCTAssertFalse(
+            source.contains("重试编辑"),
+            "activation failure must not restore the removed retry-editing control or action"
+        )
+
+        let window = makeWindow(
+            rootView: TranscriptionReviewView(
+                state: .editable(
+                    draft: "PRIVATE_ACTIVATION_FAILURE_DRAFT",
+                    isPossiblyIncomplete: false,
+                    feedback: .activationFailed
+                )
+            )
+        )
+        defer {
+            window.orderOut(nil)
+            window.close()
+        }
+        XCTAssertNil(
+            button(titled: "重试编辑", in: window.contentView),
+            "activation failure must remain an explicit-send state without retry-editing control"
+        )
+    }
+
+    @MainActor
+    func test_streamingReviewContentDoesNotIntersectTrafficLightControls() throws {
+        let controller = ReviewWindowController()
+        defer { controller.dismiss() }
+        controller.renderReadOnly(
+            phase: .streaming,
+            preview: "PRIVATE_TRAFFIC_LIGHT_PREVIEW"
+        )
+
+        let panel = try XCTUnwrap(
+            NSApp.windows.compactMap { $0 as? ReviewPanel }.last,
+            "streaming review must materialize the production review panel"
+        )
+        guard let contentView = panel.contentView else {
+            XCTFail("streaming review must install a content view")
+            return
+        }
+        guard let coordinateView = contentView.superview else {
+            XCTFail("streaming review content must be attached to the panel frame view")
+            return
+        }
+        panel.displayIfNeeded()
+        contentView.layoutSubtreeIfNeeded()
+
+        let contentRect = contentView.frame
+        let trafficLightButtons = [
+            NSWindow.ButtonType.closeButton,
+            .miniaturizeButton,
+            .zoomButton
+        ].compactMap { panel.standardWindowButton($0) }
+        XCTAssertEqual(trafficLightButtons.count, 3)
+
+        for button in trafficLightButtons {
+            guard let buttonSuperview = button.superview else {
+                XCTFail("traffic-light button must remain attached to the panel titlebar")
+                continue
+            }
+            let buttonRect = buttonSuperview.convert(button.frame, to: coordinateView)
+            XCTAssertTrue(
+                contentRect.intersection(buttonRect).isNull,
+                "read-only streaming content must stay below and clear of titlebar traffic-light controls"
+            )
+        }
+    }
+
+    @MainActor
+    func test_reviewPanelRetainsExistingSizeAcrossStreamingAndEditableStates() throws {
+        let controller = ReviewWindowController()
+        defer { controller.dismiss() }
+
+        controller.renderReadOnly(
+            phase: .streaming,
+            preview: "PRIVATE_PANEL_SIZE_PREVIEW"
+        )
+        let panel = try XCTUnwrap(
+            NSApp.windows.compactMap { $0 as? ReviewPanel }.last,
+            "the production review panel must be materialized"
+        )
+        panel.displayIfNeeded()
+        panel.contentView?.layoutSubtreeIfNeeded()
+        let originalSize = panel.frame.size
+
+        controller.renderReadOnly(
+            phase: .sealing,
+            preview: "PRIVATE_PANEL_SIZE_SEALING"
+        )
+        controller.renderDraft(
+            state: .editable(
+                draft: "PRIVATE_PANEL_SIZE_DRAFT",
+                isPossiblyIncomplete: false,
+                feedback: nil
+            ),
+            onDraftChange: { _ in },
+            onConfirm: {},
+            onRetryReadiness: {},
+            onDiscard: {}
+        )
+        panel.displayIfNeeded()
+        panel.contentView?.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(
+            panel.frame.size,
+            originalSize,
+            "streaming, sealing, and editable content must reuse the existing panel size"
+        )
+    }
+
     func test_reviewView_keepsExplicitConfirmAndCancelShortcuts() throws {
         logger.debug("checking review window shortcut policy")
         let source = try productionSource(relativePath: "FeishuSpeech/Views/TranscriptionReviewView.swift")
@@ -146,6 +408,67 @@ final class TranscriptionReviewViewTests: XCTestCase {
             .deletingLastPathComponent()
             .appendingPathComponent(relativePath)
         return try String(contentsOf: url, encoding: .utf8)
+    }
+
+    @MainActor
+    private func makeWindow(rootView: TranscriptionReviewView) -> NSWindow {
+        let hostingView = NSHostingView(rootView: rootView)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 320),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hostingView
+        window.isReleasedWhenClosed = false
+        window.makeKeyAndOrderFront(nil)
+        hostingView.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        hostingView.layoutSubtreeIfNeeded()
+        return window
+    }
+
+    @MainActor
+    private func textField(containing text: String, in view: NSView?) -> NSTextField? {
+        guard let view else { return nil }
+        if let textField = view as? NSTextField,
+           textField.stringValue.contains(text) {
+            return textField
+        }
+        for subview in view.subviews.reversed() {
+            if let textField = textField(containing: text, in: subview) {
+                return textField
+            }
+        }
+        return nil
+    }
+
+    @MainActor
+    private func editableTextView(in view: NSView?) -> NSTextView? {
+        guard let view else { return nil }
+        if let textView = view as? NSTextView, textView.isEditable {
+            return textView
+        }
+        for subview in view.subviews.reversed() {
+            if let textView = editableTextView(in: subview) {
+                return textView
+            }
+        }
+        return nil
+    }
+
+    @MainActor
+    private func button(titled title: String, in view: NSView?) -> NSButton? {
+        guard let view else { return nil }
+        if let button = view as? NSButton, button.title == title {
+            return button
+        }
+        for subview in view.subviews.reversed() {
+            if let button = button(titled: title, in: subview) {
+                return button
+            }
+        }
+        return nil
     }
 }
 

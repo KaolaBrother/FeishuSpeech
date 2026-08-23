@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Changed — Issue #40 v3 installed-UAT correction (validation remains open)
+- 安装版 UAT 暴露的界面问题已对齐当前契约：流式预览与原生多行编辑器统一使用 18pt transcript 字体，审阅面板仍保持初始 520×320、最小 420×240、最大 760×600，不因字体调整而放大。
+- pending UI 不再显示「重试编辑」；readiness 未满足时草稿仍留在同一面板且不可确认，只有实际进入 `.editable` 后才显示「发送」并接受未修饰 Return/Enter 或 Command+Return。Shift+Return/Enter 换行语义保持不变。
+- accessory-app 激活请求仅为 advisory；application active、panel key、编辑器 materialization/attachment 与 first-responder 等实际 readiness predicates 仍逐项 fail closed。只读正文移除 `.fullSizeContentView`，保持在标题栏/traffic-light 控件下方。
+- 本次是 UI/readiness presentation correction，不改变 capture/recording 与 recognition/provider 的独立异步根、action 2 + recorder barrier 的 durable draft、显式 Send/Return 输出门或 exact-target/fixed-PID fallback 安全边界。安装版 UAT v3 仍失败且 Issue #40 仍 open；本条不代表 Release UAT 或 issue 关闭。
+
 ### Changed — Issue #40 v2
 - 所有 accepted Fn 交互统一进入一条审阅路线：`streaming -> sealing -> editablePending -> editable`。捕获/录音与识别/provider/retry/replay 仍是独立异步根，互不等待面板、编辑器就绪、ack 或交付。
 - `reviewBeforeInsert` 与 `autoInsert` 的两个持久化值均只保留 Codable 解码/迁移兼容性，不能关闭预览、恢复连续/直接输出或绕过显式确认；设置界面不再提供 bypass 控件。
@@ -105,7 +111,7 @@
 ### Verification
 
 - issue #27 的最终候选 Release 1.0 build 8 已通过 316/316 完整测试、strict SwiftLint、Debug 与 Release 构建。发布 drain、权威 final、重复 `10024` 恢复、watchdog、deadline race、迟到回调和 fixed-target 安全边界均有自动化覆盖；这些本地门槛不证明真实凭据服务或目标控件实际接受 PID-targeted 事件。
-- Issue #40 v2 的聚焦串行套件（destination capture/coordinator/final output/pasteboard/application fallback/readiness）通过 79/79；完整串行套件通过 442（1 个预期 live-TCP skip），覆盖 identity-first capture、exact 优先、普通非安全 AX miss、固定 PID multiline Cmd+V、两次连续复合安全/PID/完整身份检查、同面板 readiness retry、交付不确定和零 copy draft retention。该结果不替代安装版 Release UAT。
+- Issue #40 v2 的聚焦串行套件（destination capture/coordinator/final output/pasteboard/application fallback/readiness）通过 79/79；完整串行套件通过 442（1 个预期 live-TCP skip），覆盖 identity-first capture、exact 优先、普通非安全 AX miss、固定 PID multiline Cmd+V、两次连续复合安全/PID/完整身份检查、同面板 readiness re-evaluation、交付不确定和零 copy draft retention。该结果不替代安装版 Release UAT。
 
 ### Verification pending
 

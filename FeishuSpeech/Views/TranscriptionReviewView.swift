@@ -7,6 +7,10 @@ private let logger = Logger(
     category: "TranscriptionReviewView"
 )
 
+enum TranscriptionReviewTypography {
+    static let transcriptFontSize: CGFloat = 18
+}
+
 struct TranscriptionReviewView: View {
     let state: TranscriptionReviewState
     let onDraftChange: (@MainActor (String) -> Void)?
@@ -89,9 +93,16 @@ struct TranscriptionReviewView: View {
     private func readOnlyContent(preview: String, status: String) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             ScrollView {
-                Text(preview.isEmpty ? status : preview)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
+                if preview.isEmpty {
+                    Text(status)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                } else {
+                    Text(preview)
+                        .font(.system(size: TranscriptionReviewTypography.transcriptFontSize))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -151,31 +162,23 @@ struct TranscriptionReviewView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Button("重试编辑") {
-                onRetryReadiness?()
-            }
-            .keyboardShortcut(.return, modifiers: [.command, .shift])
-            .disabled({
-                if case .preparing = readiness { return true }
-                return false
-            }())
         }
     }
 
     private func feedbackText(for feedback: ReviewDraftFeedback?) -> String? {
         switch feedback {
         case .activationFailed:
-            return "无法激活预览，请重试编辑。"
+            return "无法激活目标应用；请确认后再发送。"
         case .destinationChanged:
-            return "目标已变化，请重试编辑。"
+            return "目标已变化；请检查草稿后发送。"
         case .securityRejected:
             return "目标安全状态不允许输入。"
         case .unsafeText:
-            return "草稿包含不安全字符，请编辑后重试。"
+            return "草稿包含不安全字符，请修改后发送。"
         case .deliveryFailed:
-            return "输入失败；草稿已保留，请显式重试或取消。"
+            return "输入失败；草稿已保留，请编辑后显式发送。"
         case .deliveryUncertain:
-            return "输入状态不确定；重试可能造成重复输入。"
+            return "输入状态不确定；再次发送可能造成重复输入。"
         case .deliveryCancelled:
             return "输入已取消；草稿已保留。"
         case nil:
@@ -243,14 +246,15 @@ private struct EditableDraftView: View {
                 .keyboardShortcut(.cancelAction)
                 .disabled(!isEditable)
 
-                Button("发送") {
-                    confirmDraft()
-                }
-                .keyboardShortcut(.return, modifiers: .command)
-                .disabled(
-                    !canConfirm ||
+                if canConfirm {
+                    Button("发送") {
+                        confirmDraft()
+                    }
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .disabled(
                         draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                )
+                    )
+                }
             }
         }
     }
@@ -288,7 +292,9 @@ private struct ReviewDraftTextEditor: NSViewRepresentable {
         textView.isSelectable = true
         textView.isRichText = false
         textView.allowsUndo = true
-        textView.font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        textView.font = NSFont.systemFont(
+            ofSize: TranscriptionReviewTypography.transcriptFontSize
+        )
         textView.minSize = NSSize(width: 0, height: 0)
         textView.maxSize = NSSize(
             width: CGFloat.greatestFiniteMagnitude,

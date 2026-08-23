@@ -192,7 +192,7 @@ sealing
 editablePending
   | readiness ready                 -> editable(sameDraft)
   | readiness failure/cancellation  -> editablePending(sameDraft, feedback)
-  | Retry Editing                   -> editablePending(preparing)
+  | readiness re-evaluation         -> editablePending(preparing)
 editable
   | human edit                     -> editable(updatedDraft)
   | Shift+Return / Shift+Enter     -> editable(updatedDraft + LF)
@@ -206,8 +206,10 @@ confirming
 The review ID, revision, and terminal-pending flags fence stale render, recognition, window, and
 delivery callbacks. Confirmation consumes authority synchronously before its first await and keeps
 the same panel visible while delivery runs. A draft blocks a successor hold; transient readiness or
-delivery failure retains it for explicit retry/edit/discard, while lifecycle cleanup or explicit
-discard may revoke it. No automatic copy, direct output, retry, or retarget exists.
+delivery failure retains it for readiness re-evaluation, editing, or discard, while lifecycle cleanup
+or explicit discard may revoke it. Pending UI has no visible Retry Editing control and cannot
+confirm; Send/Return is admitted only once `.editable`. No automatic copy, direct output, delivery
+retry, or retarget exists.
 
 ### Historical writer state (dormant compatibility services only)
 
@@ -372,7 +374,9 @@ replay continue inside that budget until every packet is acknowledged and action
 A safe non-empty action-2 snapshot is authoritative and freezes the coordinator-owned review draft
 before admission closes. Expiry preserves the draft authority or reports fixed delivery uncertainty;
 it never invokes a dormant writer, copies text, retargets, or emits external output without explicit
-confirmation. The same panel remains the retry/discard surface.
+confirmation. The same panel retains draft authority for readiness re-evaluation, editing, or
+explicit Discard; pending UI does not expose a Retry Editing control, and Send/Return is admitted
+only once `.editable`.
 Deadline/cancellation winners retire their attempt; late results cannot mutate output.
 An abnormal lifecycle event does not wait on that barrier to revoke authority: generation/output
 writers and transport are cancelled immediately, while the independently retained recorder barrier
@@ -575,8 +579,16 @@ mouse, close, and editor authority disabled. Changed snapshots replace a read-on
 After action 2 freezes a non-empty final, or an exact incomplete fallback from the latest usable
 snapshot, a separate transition waits for the recorder barrier and gives the same panel durable
 `editablePending` authority before attempting FeishuSpeech activation and exact editor focus.
-Readiness is typed and bounded to two seconds; failure keeps the panel/draft available for Retry
-Editing or Discard rather than dismissing it.
+Readiness is typed and bounded to two seconds. The activation request is advisory; the actual
+application-active, panel-key, editor-materialized/attached, and editor-first-responder predicates
+remain fail-closed. Failure keeps the panel/draft in non-confirmable `editablePending` without a
+visible Retry Editing control; readiness may be re-evaluated and Discard remains explicit rather
+than dismissing the draft.
+
+The review panel keeps its 520x320 initial size, 420x240 minimum, and 760x600 maximum. Streaming
+preview text and the native multiline editor use the shared 18pt transcript font. The panel omits
+`.fullSizeContentView`, constraining read-only content below the titlebar/traffic-light controls;
+the font correction does not enlarge the panel.
 
 The editor preserves multiline text. Unmodified Return (including keypad Enter) confirms the current
 draft; Shift+Return/Shift+Enter inserts one newline without confirming; Command+Return remains an
@@ -671,7 +683,12 @@ teardown from continuously advancing the overlay generation and leaving its wind
   status-only. Its implementation and issue #37 owner-UAT gate are unchanged.
 - The separate review panel is one retained `NSPanel`: nonactivating/read-only while listening and
   sealing, then `editablePending`/key/editable only after action 2 and the recorder barrier. A typed
-  readiness failure keeps the same panel, draft, Retry Editing, and Discard controls.
+  readiness failure keeps the same panel and draft in non-confirmable `editablePending`; pending UI
+  has no visible Retry Editing control, while readiness re-evaluation and explicit Discard remain
+  available. Only `.editable` exposes Send/Return confirmation.
+- The panel remains 520x320 initially, with 420x240 minimum and 760x600 maximum. The streaming
+  preview and native editor share an 18pt transcript font without enlarging those bounds. Removing
+  `.fullSizeContentView` keeps read-only content below the titlebar/traffic-light controls.
 - Transcript content appears only as the intended review body/editor, where assistive technology
   can naturally expose it. It never appears in the window title, fixed feedback, menu bar, logs,
   notifications, or added accessibility label/help metadata.
@@ -686,8 +703,8 @@ teardown from continuously advancing the overlay generation and leaving its wind
   application's current-focus binding. Secure Input, secure/password AX roles, lost trust,
   incomplete identity, PID reuse, and identity drift remain fail-closed startup errors.
 - Empty-recognition and uncertain-output feedback are fixed transcript-free strings. Review delivery
-  failures use the retained draft feedback (`输入失败；草稿已保留，请显式重试或取消。` or
-  `输入状态不确定；重试可能造成重复输入。`) and never claim that a target accepted or displayed
+  failures use the retained draft feedback (`输入失败；草稿已保留，请编辑后显式发送。` or
+  `输入状态不确定；再次发送可能造成重复输入。`) and never claim that a target accepted or displayed
   text.
 - Authentication failure uses the fixed private feedback `认证失败，请检查应用凭据`; provider detail,
   credentials, and transcript content never appear in that message.
@@ -748,7 +765,8 @@ No cursor destination survives the process lifetime or is persisted to UserDefau
      and identity-owned cleanup. Whole-file recognition remains compatibility-only.
 6. **Review state, same panel, and destination delivery — implemented locally (issues #38/#39/#40)**
    - Unconditional streaming/sealing preview, recorder-barrier `editablePending` transition,
-     durable human-editable draft, exact-once Send/Return confirm/discard, typed readiness retry,
+     durable human-editable draft, exact-once Send/Return confirm/discard, typed readiness
+     re-evaluation,
      complete application identity with exact AX preference or application-current-focus fallback,
      bounded activation, one captured-PID Cmd+V, terminal uncertainty, no-copy failure return, and
      conditional full-pasteboard restoration are implemented and independently reviewed.
@@ -879,8 +897,10 @@ delivery, and security failure cases are listed below.
 - release closes capture but keeps current-generation response/retry authority through a 60-second
   post-barrier drain; factory/send/finish each have a 30-second watchdog;
 - action 2 plus the recorder barrier freezes the exact draft in the same panel; typed readiness,
-  delivery, and security failures retain that draft for explicit retry/edit/discard with fixed,
-  transcript-free feedback and no automatic copy/direct output/retarget;
+  delivery, and security failures retain that draft for readiness re-evaluation, editing, or explicit
+  discard with fixed, transcript-free feedback and no automatic copy/direct
+  output/retry/retarget. Pending UI has no visible Retry Editing control; Send/Return is admitted
+  only once `.editable`;
 - [Historical issue #27 writer evidence] safe action-2 text reconciles the existing AX/fixed-PID
   owner before closure; expired, retired, stale, or post-terminal callbacks never create, append,
   rewrite, Cmd+V, or copy compatibility output;
@@ -947,7 +967,8 @@ application is captured before panel/audio/provider startup, confirmation uses t
 composites ordered Secure Input start -> raw PID -> running/frontmost identities -> Secure Input
 end, then one fixed-PID Cmd+V; postflight uses the equivalent safety shape, and the fallback proves
 the application rather than the original control or caret. D-40-01 v2 additionally makes the
-draft durable across typed readiness and delivery failures, retains Retry/Discard authority, and
+draft durable across typed readiness and delivery failures, retains draft/discard authority without
+a visible pending Retry Editing control, and
 removes automatic copy/direct-output recovery. The focused Issue #40 suites pass 79/79 and the
 full serialized suite passes 442 with one intentional live-TCP skip. The final issue #39 candidate
 passes 40/40 focused tests and 423 full-suite
