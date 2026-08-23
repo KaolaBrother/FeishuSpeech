@@ -39,7 +39,7 @@ protocol ReviewApplicationActivating: AnyObject {
 }
 
 nonisolated enum ReviewDeliveryResult: Equatable, Sendable {
-    case inserted
+    case submittedUnverified
     case activationFailed
     case identityChanged
     case destinationInvalid
@@ -249,6 +249,204 @@ final class WorkspaceReviewApplicationActivator: ReviewApplicationActivating {
     }
 }
 
+/// Review output owns one monitor session for the complete delivery attempt.
+/// Both monitors are armed before activation; their baselines are captured
+/// only after the captured application is live. The activation lock is always
+/// acquired before the input monitor's epoch lock, and that ordering remains
+/// held through the final epoch/modifier gate and the two event-post attempts.
+@MainActor
+private final class ReviewDeliveryMonitoringSession {
+    private let inputMonitor: CurrentFocusInputMonitoring
+    private let activationMonitor: CurrentFocusActivationMonitoring
+    private let modifierSampler: () -> CGEventFlags
+    private let modifierSleeper: (UInt64) async -> Bool
+    private let activationLock = NSLock()
+
+    private var isArmed = false
+    private var inputBaseline: UInt64?
+    private var activationBaseline: UInt64?
+    private var inputMonitorObservedDrift = false
+    private var activationMonitorObservedDrift = false
+
+    init(
+        inputMonitor: CurrentFocusInputMonitoring,
+        activationMonitor: CurrentFocusActivationMonitoring,
+        modifierSampler: @escaping () -> CGEventFlags,
+        modifierSleeper: ((UInt64) async -> Bool)? = nil
+    ) {
+        self.inputMonitor = inputMonitor
+        self.activationMonitor = activationMonitor
+        self.modifierSampler = modifierSampler
+        self.modifierSleeper = modifierSleeper ?? { nanoseconds in
+            do {
+                try await Task.sleep(nanoseconds: nanoseconds)
+                return true
+            } catch {
+                return false
+            }
+        }
+    }
+
+    func arm() -> Bool {
+        guard inputMonitor.supportsReviewDeliveryEpoch,
+              activationMonitor.supportsReviewDeliveryEpoch else {
+            return false
+        }
+
+        let inputEpoch = inputMonitor.armMonitoringFailClosedWithEpoch { [weak self] in
+            self?.inputMonitorObservedDrift = true
+        }
+        guard let inputEpoch else {
+            inputMonitor.stopMonitoring()
+            return false
+        }
+
+        let activationEpoch = activationMonitor.armMonitoringFailClosedWithEpoch { [weak self] _ in
+            self?.activationMonitorObservedDrift = true
+        }
+        guard let activationEpoch else {
+            inputMonitor.stopMonitoring()
+            activationMonitor.stopMonitoring()
+            return false
+        }
+
+        inputBaseline = inputEpoch
+        activationBaseline = activationEpoch
+        inputMonitorObservedDrift = false
+        activationMonitorObservedDrift = false
+        isArmed = true
+        return true
+    }
+
+    func captureBaselines() -> Bool {
+        guard isArmed,
+              inputMonitor.supportsReviewDeliveryEpoch,
+              activationMonitor.supportsReviewDeliveryEpoch,
+              !inputMonitorObservedDrift,
+              !activationMonitorObservedDrift else {
+            return false
+        }
+        inputBaseline = inputMonitor.interferenceEpoch
+        activationBaseline = activationMonitor.activationEpoch
+        return true
+    }
+
+    func beginPostActivationSampling() {
+        inputMonitorObservedDrift = false
+        activationMonitorObservedDrift = false
+    }
+
+    func stabilizeCombinedSessionModifiers() async -> Bool {
+        // maskFunction is represented by maskSecondaryFn on modern macOS.
+        let relevantFlags: CGEventFlags = [
+            .maskCommand,
+            .maskShift,
+            .maskControl,
+            .maskAlternate,
+            .maskSecondaryFn,
+            .maskAlphaShift
+        ]
+        let deadline = DispatchTime.now().uptimeNanoseconds + 500_000_000
+        var consecutiveEmptySamples = 0
+
+        while DispatchTime.now().uptimeNanoseconds < deadline {
+            guard !Task.isCancelled else { return false }
+            let sample = modifierSampler()
+            if sample.isDisjoint(with: relevantFlags) {
+                consecutiveEmptySamples += 1
+                if consecutiveEmptySamples >= 2 {
+                    return true
+                }
+            } else {
+                consecutiveEmptySamples = 0
+            }
+
+            guard await modifierSleeper(10_000_000) else { return false }
+        }
+        return false
+    }
+
+    func performFinalPair(_ postPair: @escaping () -> Void) -> Bool {
+        guard isArmed,
+              let expectedInputEpoch = inputBaseline,
+              let expectedActivationEpoch = activationBaseline,
+              !inputMonitorObservedDrift,
+              !activationMonitorObservedDrift else {
+            return false
+        }
+
+        // Fixed ordering: activation lock first, then CurrentFocusInput's
+        // epoch lock inside postCompleteSyntheticPairIf...(). No recheck is
+        // performed between the poster's down and mandatory up callbacks.
+        activationLock.lock()
+        defer { activationLock.unlock() }
+        guard activationMonitor.activationEpoch == expectedActivationEpoch else {
+            return false
+        }
+
+        var postPairEntered = false
+        let inputGateEntered = inputMonitor
+            .postCompleteSyntheticPairIfInterferenceEpochIsUnchanged(
+                expectedEpoch: expectedInputEpoch
+            ) {
+                guard activationMonitor.activationEpoch == expectedActivationEpoch,
+                      inputMonitor.interferenceEpoch == expectedInputEpoch,
+                      !inputMonitorObservedDrift,
+                      !activationMonitorObservedDrift,
+                      modifierSampler().isDisjoint(with: [
+                          .maskCommand,
+                          .maskShift,
+                          .maskControl,
+                          .maskAlternate,
+                          .maskSecondaryFn,
+                          .maskAlphaShift
+                      ]) else {
+                    return
+                }
+                postPairEntered = true
+                postPair()
+            }
+        return inputGateEntered && postPairEntered
+    }
+
+    func postflightIsStable() -> Bool {
+        guard isArmed,
+              let expectedInputEpoch = inputBaseline,
+              let expectedActivationEpoch = activationBaseline,
+              !inputMonitorObservedDrift,
+              !activationMonitorObservedDrift else {
+            return false
+        }
+        let relevantFlags: CGEventFlags = [
+            .maskCommand,
+            .maskShift,
+            .maskControl,
+            .maskAlternate,
+            .maskSecondaryFn,
+            .maskAlphaShift
+        ]
+        activationLock.lock()
+        defer { activationLock.unlock() }
+        return activationMonitor.activationEpoch == expectedActivationEpoch
+            && inputMonitor.interferenceEpoch == expectedInputEpoch
+            && !inputMonitorObservedDrift
+            && !activationMonitorObservedDrift
+            && modifierSampler().isDisjoint(with: relevantFlags)
+    }
+
+    func stop() {
+        guard isArmed else { return }
+        isArmed = false
+        inputBaseline = nil
+        activationBaseline = nil
+        inputMonitorObservedDrift = false
+        activationMonitorObservedDrift = false
+        inputMonitor.stopMonitoring()
+        activationMonitor.stopMonitoring()
+    }
+
+}
+
 @MainActor
 final class SystemReviewDestinationDelivery: ReviewDestinationDelivering {
     static let activationTimeoutNanoseconds: UInt64 = 2_000_000_000
@@ -260,6 +458,10 @@ final class SystemReviewDestinationDelivery: ReviewDestinationDelivering {
     private let accessibilityTrustProvider: AccessibilityTrustProviding
     private let secureInputStateProvider: SecureInputStateProviding
     private let frontmostProcessProvider: FrontmostProcessProviding
+    private let inputMonitor: CurrentFocusInputMonitoring
+    private let activationMonitor: CurrentFocusActivationMonitoring
+    private let modifierSampler: () -> CGEventFlags
+    private let modifierSleeper: (UInt64) async -> Bool
 
     init(
         applicationRuntime: ReviewApplicationRuntime,
@@ -268,7 +470,11 @@ final class SystemReviewDestinationDelivery: ReviewDestinationDelivering {
         finalTextOutput: FinalTextOutput,
         accessibilityTrustProvider: AccessibilityTrustProviding? = nil,
         secureInputStateProvider: SecureInputStateProviding? = nil,
-        frontmostProcessProvider: FrontmostProcessProviding? = nil
+        frontmostProcessProvider: FrontmostProcessProviding? = nil,
+        inputMonitor: CurrentFocusInputMonitoring? = nil,
+        activationMonitor: CurrentFocusActivationMonitoring? = nil,
+        modifierSampler: (() -> CGEventFlags)? = nil,
+        modifierSleeper: ((UInt64) async -> Bool)? = nil
     ) {
         self.applicationRuntime = applicationRuntime
         self.applicationActivator = applicationActivator
@@ -284,6 +490,19 @@ final class SystemReviewDestinationDelivery: ReviewDestinationDelivering {
         self.frontmostProcessProvider = frontmostProcessProvider
             ?? environment?.reviewFrontmostProcessProvider
             ?? ReviewRuntimeFrontmostProcessProvider(applicationRuntime: applicationRuntime)
+        self.inputMonitor = inputMonitor ?? WorkspaceCurrentFocusInputMonitor()
+        self.activationMonitor = activationMonitor ?? WorkspaceCurrentFocusActivationMonitor()
+        self.modifierSampler = modifierSampler ?? {
+            CGEventSource.flagsState(.combinedSessionState)
+        }
+        self.modifierSleeper = modifierSleeper ?? { nanoseconds in
+            do {
+                try await Task.sleep(nanoseconds: nanoseconds)
+                return true
+            } catch {
+                return false
+            }
+        }
     }
 
     convenience init() {
@@ -356,6 +575,17 @@ final class SystemReviewDestinationDelivery: ReviewDestinationDelivering {
             return validationFailure
         }
 
+        let monitoring = ReviewDeliveryMonitoringSession(
+            inputMonitor: inputMonitor,
+            activationMonitor: activationMonitor,
+            modifierSampler: modifierSampler,
+            modifierSleeper: modifierSleeper
+        )
+        guard monitoring.arm() else {
+            return .deliveryFailed
+        }
+        defer { monitoring.stop() }
+
         let activation = await applicationActivator.activateAndWait(
             for: destination.application,
             timeoutNanoseconds: Self.activationTimeoutNanoseconds
@@ -363,14 +593,50 @@ final class SystemReviewDestinationDelivery: ReviewDestinationDelivering {
         guard !Task.isCancelled else { return .cancelled }
         guard activation == .activated else { return activationFailure(for: activation) }
 
+        return await deliverAfterActivation(
+            frozenText,
+            to: destination,
+            monitoring: monitoring
+        )
+    }
+
+    private func deliverAfterActivation(
+        _ frozenText: String,
+        to destination: ReviewDestinationToken,
+        monitoring: ReviewDeliveryMonitoringSession
+    ) async -> ReviewDeliveryResult {
+
         guard destinationIsCurrent(destination) else {
             return .identityChanged
         }
 
-        let insertionResult: FinalTextInsertionResult
+        monitoring.beginPostActivationSampling()
+        guard await monitoring.stabilizeCombinedSessionModifiers() else {
+            return Task.isCancelled ? .cancelled : .deliveryFailed
+        }
+        guard monitoring.captureBaselines() else {
+            return .deliveryFailed
+        }
+
+        let insertionResult = insertReviewText(
+            frozenText,
+            to: destination,
+            monitoring: monitoring
+        )
+        return reviewDeliveryResult(
+            for: insertionResult,
+            monitoring: monitoring
+        )
+    }
+
+    private func insertReviewText(
+        _ frozenText: String,
+        to destination: ReviewDestinationToken,
+        monitoring: ReviewDeliveryMonitoringSession
+    ) -> FinalTextInsertionResult {
         switch destination.binding {
         case .exactCursor(let cursor):
-            insertionResult = finalTextOutput.insertOnce(
+            return finalTextOutput.insertOnce(
                 frozenText,
                 destination: cursor,
                 validateBeforeMutation: { [weak self] in
@@ -378,10 +644,13 @@ final class SystemReviewDestinationDelivery: ReviewDestinationDelivering {
                 },
                 validateAfterPosting: { [weak self] in
                     self?.validateExactAfterPosting(destination) == .valid
+                },
+                postPairIfPreflightRemainsValid: { [monitoring] postPair in
+                    monitoring.performFinalPair(postPair)
                 }
             )
         case .applicationCurrentFocus:
-            insertionResult = finalTextOutput.insertReviewAtCurrentFocusOnce(
+            return finalTextOutput.insertReviewAtCurrentFocusOnce(
                 frozenText,
                 processIdentifier: destination.application.processIdentifier,
                 validateBeforeMutation: { [weak self] in
@@ -391,11 +660,26 @@ final class SystemReviewDestinationDelivery: ReviewDestinationDelivering {
                 validateAfterPosting: { [weak self] in
                     self?.validateApplicationCurrentFocusAfterPosting(destination)
                         ?? .destinationInvalid
+                },
+                postPairIfPreflightRemainsValid: { [monitoring] postPair in
+                    monitoring.performFinalPair(postPair)
                 }
             )
         }
+    }
 
-        guard !Task.isCancelled else { return .cancelled }
+    private func reviewDeliveryResult(
+        for insertionResult: FinalTextInsertionResult,
+        monitoring: ReviewDeliveryMonitoringSession
+    ) -> ReviewDeliveryResult {
+        switch insertionResult {
+        case .submittedUnverified, .deliveryUncertain:
+            guard monitoring.postflightIsStable() else {
+                return .deliveryUncertain
+            }
+        default:
+            break
+        }
 
         return reviewDeliveryResult(for: insertionResult)
     }
@@ -457,7 +741,6 @@ final class SystemReviewDestinationDelivery: ReviewDestinationDelivering {
     private func validateExactBeforeMutation(
         _ destination: ReviewDestinationToken
     ) -> ReviewCurrentFocusValidation {
-        guard !Task.isCancelled else { return .destinationInvalid }
         guard destinationIsCurrent(destination) else { return .identityChanged }
         guard case .exactCursor(let cursor) = destination.binding else {
             return .destinationInvalid
@@ -475,7 +758,6 @@ final class SystemReviewDestinationDelivery: ReviewDestinationDelivering {
     private func validateExactAfterPosting(
         _ destination: ReviewDestinationToken
     ) -> ReviewCurrentFocusValidation {
-        guard !Task.isCancelled else { return .destinationInvalid }
         guard destinationIsCurrent(destination) else { return .identityChanged }
         guard case .exactCursor(let cursor) = destination.binding else {
             return .destinationInvalid
@@ -512,8 +794,7 @@ final class SystemReviewDestinationDelivery: ReviewDestinationDelivering {
     private func applicationCurrentFocusSample(
         _ destination: ReviewDestinationToken
     ) -> ReviewCurrentFocusValidation {
-        guard !Task.isCancelled,
-              destination.application.processIdentifier > 0 else {
+        guard destination.application.processIdentifier > 0 else {
             return .destinationInvalid
         }
 
@@ -590,7 +871,11 @@ final class SystemReviewDestinationDelivery: ReviewDestinationDelivering {
     ) -> ReviewDeliveryResult {
         switch insertionResult {
         case .inserted:
-            return .inserted
+            // Legacy output implementations cannot prove target consumption.
+            // Preserve the conservative review vocabulary at this boundary.
+            return .submittedUnverified
+        case .submittedUnverified:
+            return .submittedUnverified
         case .securityRejected:
             return .securityRejected
         case .identityChanged:

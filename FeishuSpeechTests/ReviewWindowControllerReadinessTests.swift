@@ -5,6 +5,8 @@ import XCTest
 
 @MainActor
 final class ReviewWindowControllerReadinessTests: XCTestCase {
+    private var requestOrdinal: UInt64 = 0
+
     func test_activationRequestFailureIsAdvisoryWhenPredicatesAreReady() async {
         let clock = ReviewReadinessClock()
         let probe = ReviewReadinessProbe()
@@ -15,14 +17,13 @@ final class ReviewWindowControllerReadinessTests: XCTestCase {
 
         var discardCallCount = 0
         controller.renderDraft(
-            state: .editablePending(
+            state: .editable(
                 draft: "PRIVATE_CONTROLLER_DRAFT",
                 isPossiblyIncomplete: false,
-                readiness: .preparing(attempt: 1)
+                feedback: nil
             ),
             onDraftChange: { _ in },
-            onConfirm: {},
-            onRetryReadiness: {},
+            onConfirm: { _ in },
             onDiscard: { discardCallCount += 1 }
         )
         guard let initialPanel = reviewPanel() else {
@@ -30,11 +31,11 @@ final class ReviewWindowControllerReadinessTests: XCTestCase {
             return
         }
 
-        let result = await controller.requestEditableReadiness()
+        let result = await controller.requestPresentationFocus(makeRequest())
 
         XCTAssertEqual(
-            result,
-            .ready,
+            result.result,
+            .focused,
             "an activation request failure must remain advisory when real readiness predicates are already true"
         )
         XCTAssertTrue(initialPanel.isVisible)
@@ -62,11 +63,11 @@ final class ReviewWindowControllerReadinessTests: XCTestCase {
             return
         }
 
-        let result = await controller.requestEditableReadiness()
+        let result = await controller.requestPresentationFocus(makeRequest())
 
         XCTAssertEqual(
-            result,
-            .ready,
+            result.result,
+            .focused,
             "an activation request failure must not prevent polling real application/key predicates"
         )
         XCTAssertGreaterThanOrEqual(clock.sleepCallCount, 2)
@@ -90,14 +91,14 @@ final class ReviewWindowControllerReadinessTests: XCTestCase {
             return
         }
 
-        let result = await controller.requestEditableReadiness()
+        let result = await controller.requestPresentationFocus(makeRequest())
 
         XCTAssertEqual(
-            result,
-            .pending(.timedOut(lastUnmet: .applicationActive)),
+            result.result,
+            .notFocused(.timedOut(lastUnmet: .applicationActive)),
             "failure must be typed from the actual unmet predicate, never as activationRejected"
         )
-        XCTAssertNotEqual(result, .ready, "an actually unready surface must never become confirmable")
+        XCTAssertNotEqual(result.result, .focused, "an actually unready surface must never become confirmable")
         XCTAssertTrue(panel.isVisible)
         XCTAssertTrue(reviewPanel() === panel)
         XCTAssertEqual(probe.activationRequestCount, 1)
@@ -115,9 +116,9 @@ final class ReviewWindowControllerReadinessTests: XCTestCase {
             return
         }
 
-        let result = await controller.requestEditableReadiness()
+        let result = await controller.requestPresentationFocus(makeRequest())
 
-        XCTAssertEqual(result, .pending(.timedOut(lastUnmet: .applicationActive)))
+        XCTAssertEqual(result.result, .notFocused(.timedOut(lastUnmet: .applicationActive)))
         XCTAssertTrue(panel.isVisible)
         XCTAssertTrue(reviewPanel() === panel)
     }
@@ -134,15 +135,15 @@ final class ReviewWindowControllerReadinessTests: XCTestCase {
             return
         }
 
-        let result = await controller.requestEditableReadiness()
+        let result = await controller.requestPresentationFocus(makeRequest())
 
-        XCTAssertEqual(result, .pending(.timedOut(lastUnmet: .panelKey)))
+        XCTAssertEqual(result.result, .notFocused(.timedOut(lastUnmet: .panelKey)))
         XCTAssertTrue(panel.isVisible)
         XCTAssertTrue(reviewPanel() === panel)
     }
 
     func test_editorMaterializationAttachmentAndFirstResponderPredicatesAreTyped() async {
-        let cases: [(String, (ReviewReadinessProbe) -> Void, ReviewEditableReadinessPredicate)] = [
+        let cases: [(String, (ReviewReadinessProbe) -> Void, ReviewPresentationFocusPredicate)] = [
             (
                 "materialization",
                 { probe in probe.editor = nil },
@@ -172,12 +173,12 @@ final class ReviewWindowControllerReadinessTests: XCTestCase {
             testCase.1(probe)
             let controller = makeController(probe: probe, clock: clock)
             renderDraft(on: controller, draft: "PRIVATE_EDITOR_DRAFT_\(offset)")
-            let result = await controller.requestEditableReadiness()
+            let result = await controller.requestPresentationFocus(makeRequest())
             controller.dismiss()
 
             XCTAssertEqual(
-                result,
-                .pending(.timedOut(lastUnmet: testCase.2)),
+                result.result,
+                .notFocused(.timedOut(lastUnmet: testCase.2)),
                 "the production controller must identify the unmet \(testCase.0) predicate"
             )
         }
@@ -195,16 +196,19 @@ final class ReviewWindowControllerReadinessTests: XCTestCase {
             return
         }
 
-        let timedOut = await controller.requestEditableReadiness()
+        let timedOut = await controller.requestPresentationFocus(makeRequest())
 
-        XCTAssertEqual(timedOut, .pending(.timedOut(lastUnmet: .editorMaterialized)))
+        XCTAssertEqual(
+            timedOut.result,
+            .notFocused(.timedOut(lastUnmet: .editorMaterialized))
+        )
         XCTAssertTrue(panel.isVisible)
         XCTAssertTrue(reviewPanel() === panel)
 
         probe.editor = probe.makeEditor()
-        let retry = await controller.requestEditableReadiness()
+        let retry = await controller.requestPresentationFocus(makeRequest())
 
-        XCTAssertEqual(retry, .ready)
+        XCTAssertEqual(retry.result, .focused)
         XCTAssertTrue(reviewPanel() === panel, "retry must reuse the same production panel")
         XCTAssertEqual(probe.firstResponderAssignmentCount, 1)
     }
@@ -216,14 +220,13 @@ final class ReviewWindowControllerReadinessTests: XCTestCase {
         defer { controller.dismiss() }
         var discardCallCount = 0
         controller.renderDraft(
-            state: .editablePending(
+            state: .editable(
                 draft: "PRIVATE_CANCELLED_CONTROLLER_DRAFT",
                 isPossiblyIncomplete: false,
-                readiness: .preparing(attempt: 1)
+                feedback: nil
             ),
             onDraftChange: { _ in },
-            onConfirm: {},
-            onRetryReadiness: {},
+            onConfirm: { _ in },
             onDiscard: { discardCallCount += 1 }
         )
         guard let panel = reviewPanel() else {
@@ -231,8 +234,9 @@ final class ReviewWindowControllerReadinessTests: XCTestCase {
             return
         }
 
+        let request = makeRequest()
         let readinessTask = Task { @MainActor in
-            await controller.requestEditableReadiness()
+            await controller.requestPresentationFocus(request)
         }
         for _ in 0 ..< 20 where clock.sleepCallCount == 0 {
             await Task.yield()
@@ -240,7 +244,10 @@ final class ReviewWindowControllerReadinessTests: XCTestCase {
         readinessTask.cancel()
         let result = await readinessTask.value
 
-        XCTAssertEqual(result, .pending(.cancelled(lastUnmet: .editorMaterialized)))
+        XCTAssertEqual(
+            result.result,
+            .notFocused(.cancelled(lastUnmet: .editorMaterialized))
+        )
         XCTAssertTrue(panel.isVisible)
         XCTAssertTrue(reviewPanel() === panel)
         XCTAssertTrue(controller.windowShouldClose(panel))
@@ -259,9 +266,9 @@ final class ReviewWindowControllerReadinessTests: XCTestCase {
             return
         }
 
-        let result = await controller.requestEditableReadiness()
+        let result = await controller.requestPresentationFocus(makeRequest())
 
-        XCTAssertEqual(result, .ready)
+        XCTAssertEqual(result.result, .focused)
         XCTAssertTrue(panel.isVisible)
         XCTAssertEqual(probe.editorLookupCount, 1)
         XCTAssertEqual(probe.editorAttachedCount, 1)
@@ -296,14 +303,13 @@ final class ReviewWindowControllerReadinessTests: XCTestCase {
 
         var discardCallCount = 0
         controller.renderDraft(
-            state: .editablePending(
+            state: .editable(
                 draft: "PRIVATE_REAL_EDITOR_DRAFT",
                 isPossiblyIncomplete: false,
-                readiness: .preparing(attempt: 1)
+                feedback: nil
             ),
             onDraftChange: { _ in },
-            onConfirm: {},
-            onRetryReadiness: {},
+            onConfirm: { _ in },
             onDiscard: { discardCallCount += 1 }
         )
         guard let panel = reviewPanel() else {
@@ -316,10 +322,10 @@ final class ReviewWindowControllerReadinessTests: XCTestCase {
             "the retained panel must host the real TranscriptionReviewView"
         )
         clock.setAdvanceToDeadlineOnNextSleep()
-        let firstResult = await controller.requestEditableReadiness()
+        let firstResult = await controller.requestPresentationFocus(makeRequest())
         XCTAssertEqual(
-            firstResult,
-            .pending(.timedOut(lastUnmet: .editorFirstResponder)),
+            firstResult.result,
+            .notFocused(.timedOut(lastUnmet: .editorFirstResponder)),
             "the first readiness attempt must reach the real editor before the deterministic responder gate"
         )
 
@@ -335,9 +341,9 @@ final class ReviewWindowControllerReadinessTests: XCTestCase {
         XCTAssertTrue(panel.isVisible)
 
         firstResponderGate.isReady = true
-        let retryResult = await controller.requestEditableReadiness()
+        let retryResult = await controller.requestPresentationFocus(makeRequest())
 
-        XCTAssertEqual(retryResult, .ready)
+        XCTAssertEqual(retryResult.result, .focused)
         XCTAssertTrue(reviewPanel() === panel, "readiness retry must reuse the same panel")
         let editorAfterRetry = try XCTUnwrap(editableTextView(in: panel.contentView))
         XCTAssertTrue(editorAfterRetry.window === panel)
@@ -346,6 +352,31 @@ final class ReviewWindowControllerReadinessTests: XCTestCase {
             "the retained discard callback must remain wired after readiness retry"
         )
         XCTAssertEqual(discardCallCount, 1)
+    }
+
+    func test_v4PresentationFocusCompletionIsFencedByReviewGenerationAndAttempt() throws {
+        let source = try productionSource(relativePath: "FeishuSpeech/Controllers/ReviewWindowController.swift")
+        for identity in ["reviewID", "generation", "focusAttemptID"] {
+            XCTAssertTrue(
+                source.contains(identity),
+                "presentation focus completion must echo and validate \(identity)"
+            )
+        }
+        XCTAssertTrue(source.contains("requestPresentationFocus"))
+        XCTAssertFalse(source.contains("requestEditableReadiness"))
+        XCTAssertFalse(source.contains("onRetryReadiness"))
+        XCTAssertTrue(
+            source.contains("late") || source.contains("stale") || source.contains("isCurrent"),
+            "a late focus completion must be inert after a newer render/generation"
+        )
+    }
+
+    private func productionSource(relativePath: String) throws -> String {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent(relativePath)
+        return try String(contentsOf: url, encoding: .utf8)
     }
 
     private func makeController(
@@ -390,15 +421,23 @@ final class ReviewWindowControllerReadinessTests: XCTestCase {
         draft: String = "PRIVATE_CONTROLLER_DRAFT"
     ) {
         controller.renderDraft(
-            state: .editablePending(
+            state: .editable(
                 draft: draft,
                 isPossiblyIncomplete: false,
-                readiness: .preparing(attempt: 1)
+                feedback: nil
             ),
             onDraftChange: { _ in },
-            onConfirm: {},
-            onRetryReadiness: {},
+            onConfirm: { _ in },
             onDiscard: {}
+        )
+    }
+
+    private func makeRequest() -> ReviewPresentationFocusRequest {
+        requestOrdinal &+= 1
+        return ReviewPresentationFocusRequest(
+            reviewID: UUID(uuidString: "00000000-0000-0000-0000-000000000040")!,
+            generation: 40,
+            focusAttemptID: requestOrdinal
         )
     }
 

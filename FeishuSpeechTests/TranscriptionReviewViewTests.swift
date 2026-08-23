@@ -76,31 +76,17 @@ final class TranscriptionReviewViewTests: XCTestCase {
             source.contains("重试编辑"),
             "the frozen editable review must not expose the obsolete retry-editing control or text"
         )
+        XCTAssertFalse(
+            source.contains("editablePending"),
+            "v4 must not expose focus readiness as a durable product state"
+        )
+        XCTAssertFalse(
+            source.contains("onRetryReadiness"),
+            "v4 must not expose a user-facing focus-readiness retry callback"
+        )
         XCTAssertTrue(
             source.contains("Button(\"发送\")"),
             "the frozen editable review must retain an explicit Send confirmation control"
-        )
-
-        let pendingWindow = makeWindow(
-            rootView: TranscriptionReviewView(
-                state: .editablePending(
-                    draft: "PRIVATE_PENDING_DRAFT",
-                    isPossiblyIncomplete: false,
-                    readiness: .blocked(
-                        attempt: 1,
-                        failure: .surfaceInvalidated
-                    ),
-                    feedback: nil
-                )
-            )
-        )
-        defer {
-            pendingWindow.orderOut(nil)
-            pendingWindow.close()
-        }
-        XCTAssertNil(
-            button(titled: "重试编辑", in: pendingWindow.contentView),
-            "no review state may render the removed retry-editing control"
         )
 
         let editableWindow = makeWindow(
@@ -260,8 +246,7 @@ final class TranscriptionReviewViewTests: XCTestCase {
                 feedback: nil
             ),
             onDraftChange: { _ in },
-            onConfirm: {},
-            onRetryReadiness: {},
+            onConfirm: { _ in },
             onDiscard: {}
         )
         panel.displayIfNeeded()
@@ -328,8 +313,12 @@ final class TranscriptionReviewViewTests: XCTestCase {
             "the canonical surface owns editable/pending/confirming draft states"
         )
         XCTAssertTrue(
+            source.contains("requestPresentationFocus("),
+            "focus assistance must remain a typed telemetry-only seam"
+        )
+        XCTAssertFalse(
             source.contains("requestEditableReadiness()"),
-            "editable authority must be granted through the typed readiness seam"
+            "editable authority must not be granted through focus readiness"
         )
 
         XCTAssertTrue(source.contains("width: 520"))
@@ -402,6 +391,84 @@ final class TranscriptionReviewViewTests: XCTestCase {
         XCTAssertFalse(windowSource.contains("logger.info(\"\\(draft"))
     }
 
+    @MainActor
+    func test_v4OnlyOpaqueIntentFromQualifiedNativeReturnCanAuthorizeDelivery() throws {
+        var confirmCount = 0
+        let window = makeWindow(
+            rootView: TranscriptionReviewView(
+                state: .editable(
+                    draft: "PRIVATE_PERFORM_CLICK_DRAFT",
+                    isPossiblyIncomplete: false,
+                    feedback: nil
+                ),
+                onConfirm: { _ in confirmCount += 1 }
+            )
+        )
+        defer {
+            window.orderOut(nil)
+            window.close()
+        }
+
+        let editor = try XCTUnwrap(
+            editableTextView(in: window.contentView),
+            "the real frozen-draft native editor must be present"
+        )
+        XCTAssertTrue(window.makeFirstResponder(editor))
+        let returnEvent = try XCTUnwrap(
+            NSEvent.keyEvent(
+                with: .keyDown,
+                location: .zero,
+                modifierFlags: [],
+                timestamp: 0,
+                windowNumber: window.windowNumber,
+                context: nil,
+                characters: "\r",
+                charactersIgnoringModifiers: "\r",
+                isARepeat: false,
+                keyCode: 36
+            )
+        )
+        editor.keyDown(with: returnEvent)
+        XCTAssertEqual(
+            confirmCount,
+            1,
+            "qualified native Return must create exactly one UI confirmation"
+        )
+
+        let viewSource = try productionSource(relativePath: "FeishuSpeech/Views/TranscriptionReviewView.swift")
+        let coordinatorSource = try productionSource(relativePath: "FeishuSpeech/ViewModels/MainViewModel.swift")
+        XCTAssertTrue(viewSource.contains("ReviewConfirmationIntent"))
+        XCTAssertTrue(viewSource.contains("fileprivate"))
+        XCTAssertTrue(viewSource.contains("keyDown(with event: NSEvent)"))
+        XCTAssertFalse(
+            coordinatorSource.contains("func confirmReviewDraft()"),
+            "the coordinator must not expose a forgeable zero-argument confirmation entry point"
+        )
+        XCTAssertFalse(
+            coordinatorSource.contains("callbackRevision: UInt64?"),
+            "an optional revision must not authorize a programmatic or stale confirmation"
+        )
+        XCTAssertFalse(
+            coordinatorSource.contains("confirmReviewDraft(reviewID: reviewID)"),
+            "review ID alone is not an opaque UI intent"
+        )
+    }
+
+    func test_v4NoProgrammaticOrStaleConfirmationPathCanBypassTheOpaqueIntentFence() throws {
+        let viewSource = try productionSource(relativePath: "FeishuSpeech/Views/TranscriptionReviewView.swift")
+        let windowSource = try productionSource(relativePath: "FeishuSpeech/Controllers/ReviewWindowController.swift")
+        let coordinatorSource = try productionSource(relativePath: "FeishuSpeech/ViewModels/MainViewModel.swift")
+        XCTAssertTrue(viewSource.contains("ReviewConfirmationIntent"))
+        XCTAssertTrue(windowSource.contains("ReviewConfirmationIntent"))
+        XCTAssertFalse(coordinatorSource.contains("onConfirm: { [weak self]"))
+        XCTAssertFalse(windowSource.contains("onConfirm: @escaping @MainActor () -> Void"))
+        XCTAssertFalse(viewSource.contains("onConfirm: (@MainActor () -> Void)?"))
+        XCTAssertTrue(
+            viewSource.contains("hasCommand") && viewSource.contains("hasShift"),
+            "native Return/Enter qualification must remain explicit and modifier-aware"
+        )
+    }
+
     private func productionSource(relativePath: String) throws -> String {
         let url = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -460,7 +527,10 @@ final class TranscriptionReviewViewTests: XCTestCase {
     @MainActor
     private func button(titled title: String, in view: NSView?) -> NSButton? {
         guard let view else { return nil }
-        if let button = view as? NSButton, button.title == title {
+        if let button = view as? NSButton,
+           button.title == title ||
+            button.accessibilityTitle() == title ||
+            button.accessibilityLabel() == title {
             return button
         }
         for subview in view.subviews.reversed() {
@@ -470,6 +540,7 @@ final class TranscriptionReviewViewTests: XCTestCase {
         }
         return nil
     }
+
 }
 
 @MainActor
@@ -492,7 +563,7 @@ final class TranscriptionReviewViewKeyboardTests: XCTestCase {
         let (window, editor) = try makeEditableSurface(
             draft: currentDraft,
             onDraftChange: { currentDraft = $0 },
-            onConfirm: { confirmedDrafts.append(currentDraft) },
+            onConfirm: { _ in confirmedDrafts.append(currentDraft) },
             onDiscard: { discardCount += 1 }
         )
 
@@ -518,7 +589,7 @@ final class TranscriptionReviewViewKeyboardTests: XCTestCase {
         let (window, editor) = try makeEditableSurface(
             draft: currentDraft,
             onDraftChange: { currentDraft = $0 },
-            onConfirm: { confirmedDrafts.append(currentDraft) },
+            onConfirm: { _ in confirmedDrafts.append(currentDraft) },
             onDiscard: {}
         )
 
@@ -539,7 +610,7 @@ final class TranscriptionReviewViewKeyboardTests: XCTestCase {
         let (window, editor) = try makeEditableSurface(
             draft: currentDraft,
             onDraftChange: { currentDraft = $0 },
-            onConfirm: { confirmedDrafts.append(currentDraft) },
+            onConfirm: { _ in confirmedDrafts.append(currentDraft) },
             onDiscard: {}
         )
 
@@ -568,7 +639,7 @@ final class TranscriptionReviewViewKeyboardTests: XCTestCase {
             let (window, editor) = try makeEditableSurface(
                 draft: currentDraft,
                 onDraftChange: { currentDraft = $0 },
-                onConfirm: { confirmedDrafts.append(currentDraft) },
+                onConfirm: { _ in confirmedDrafts.append(currentDraft) },
                 onDiscard: {}
             )
 
@@ -600,7 +671,7 @@ final class TranscriptionReviewViewKeyboardTests: XCTestCase {
             let (window, editor) = try makeEditableSurface(
                 draft: currentDraft,
                 onDraftChange: { currentDraft = $0 },
-                onConfirm: { confirmCount += 1 },
+                onConfirm: { _ in confirmCount += 1 },
                 onDiscard: {}
             )
 
@@ -637,7 +708,7 @@ final class TranscriptionReviewViewKeyboardTests: XCTestCase {
             let (window, editor) = try makeEditableSurface(
                 draft: currentDraft,
                 onDraftChange: { currentDraft = $0 },
-                onConfirm: { confirmCount += 1 },
+                onConfirm: { _ in confirmCount += 1 },
                 onDiscard: {}
             )
 
@@ -670,7 +741,7 @@ final class TranscriptionReviewViewKeyboardTests: XCTestCase {
             let (window, editor) = try makeEditableSurface(
                 draft: currentDraft,
                 onDraftChange: { currentDraft = $0 },
-                onConfirm: { confirmCount += 1 },
+                onConfirm: { _ in confirmCount += 1 },
                 onDiscard: {}
             )
             let insertionPoint = editor.string.utf16.count
@@ -706,7 +777,7 @@ final class TranscriptionReviewViewKeyboardTests: XCTestCase {
         let (window, editor) = try makeEditableSurface(
             draft: currentDraft,
             onDraftChange: { currentDraft = $0 },
-            onConfirm: { confirmedDrafts.append(currentDraft) },
+            onConfirm: { _ in confirmedDrafts.append(currentDraft) },
             onDiscard: {}
         )
         let replacementRange = NSRange(location: 0, length: editor.string.utf16.count)
@@ -732,7 +803,7 @@ final class TranscriptionReviewViewKeyboardTests: XCTestCase {
             let (window, editor) = try makeEditableSurface(
                 draft: currentDraft,
                 onDraftChange: { currentDraft = $0 },
-                onConfirm: { confirmCount += 1 },
+                onConfirm: { _ in confirmCount += 1 },
                 onDiscard: {}
             )
 
@@ -755,7 +826,7 @@ final class TranscriptionReviewViewKeyboardTests: XCTestCase {
         let (_, editor) = try makeEditableSurface(
             draft: currentDraft,
             onDraftChange: { currentDraft = $0 },
-            onConfirm: {},
+            onConfirm: { _ in },
             onDiscard: {}
         )
         let selectedRange = NSRange(location: 0, length: "original".utf16.count)
@@ -793,7 +864,7 @@ final class TranscriptionReviewViewKeyboardTests: XCTestCase {
         let (_, editor) = try makeEditableSurface(
             draft: draft,
             onDraftChange: { _ in },
-            onConfirm: {},
+            onConfirm: { _ in },
             onDiscard: {}
         )
 
@@ -807,7 +878,7 @@ final class TranscriptionReviewViewKeyboardTests: XCTestCase {
         let (window, _) = try makeEditableSurface(
             draft: "discard me",
             onDraftChange: { _ in },
-            onConfirm: { confirmCount += 1 },
+            onConfirm: { _ in confirmCount += 1 },
             onDiscard: { discardCount += 1 }
         )
 
@@ -836,7 +907,7 @@ final class TranscriptionReviewViewKeyboardTests: XCTestCase {
         let (_, editor) = try makeEditableSurface(
             draft: longDraft,
             onDraftChange: { _ in },
-            onConfirm: {},
+            onConfirm: { _ in },
             onDiscard: {}
         )
         let scrollView = try XCTUnwrap(editor.enclosingScrollView)
@@ -871,7 +942,7 @@ final class TranscriptionReviewViewKeyboardTests: XCTestCase {
     private func makeEditableSurface(
         draft: String,
         onDraftChange: @escaping @MainActor (String) -> Void,
-        onConfirm: @escaping @MainActor () -> Void,
+        onConfirm: @escaping @MainActor (ReviewConfirmationIntent) -> Void,
         onDiscard: @escaping @MainActor () -> Void,
         size: NSSize = NSSize(width: 520, height: 320)
     ) throws -> (NSWindow, NSTextView) {

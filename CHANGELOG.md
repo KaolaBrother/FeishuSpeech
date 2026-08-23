@@ -2,14 +2,23 @@
 
 ## [Unreleased]
 
+### Changed — Issue #40 v4 confirmation/output boundary (automated validation green; install/UAT pending)
+- action 2 与 recorder barrier 现在在同一保留面板直接冻结并发布 `.editable` 草稿；Send 和符合 D-39 规则的 Return/Enter 在 focus telemetry 尚未完成时也立即可用。`editablePending`、readiness retry 和「重试编辑」不再是产品 authority 或 UI。
+- 录音、识别、预览、封存、focus assistance、每次编辑字符、取消和失败路径在显式确认前均不得产生目标 AX setter、键盘/CGEvent、pasteboard 读写、copy/paste、delivery、retry 或 retarget。录音与识别两条异步根保持不变；提交 gate 在短临界区外完成 binding-specific 身份/信任/Secure Input/frontmost 校验，随后按 activation→input 顺序在短区内重查 live epoch 与 Command/Shift/Control/Option/Fn/Caps Lock modifiers，再发送准备好的 Unicode pair。
+- v4 删除 review pasteboard snapshot/write/restore 和 Cmd+V。真实 Send 或 qualified Return/Enter 只授权一次带 tag/PID/source provenance、无修饰键的完整 Unicode down/up pair；产品上限为 16,384 个 UTF-16 code units，LF 保持为文本数据，超限或任何 pre-boundary gate 失败都零投递。
+- `CGEventPostToPid` 没有目标消费确认；down 之后的结果使用 submitted-unverified/uncertain 语义，不声称目标已经接受文字，并将精确冻结草稿保留在可编辑面板，后续尝试必须再次由用户显式确认。R4 focused matrix 为 265 executed / 0 skipped / 0 failures；完整 macOS target 为 483 passed、1 个无关 live-TCP skip、0 failures。
+- bounded drain 到期会先 snapshot 最新预览并 fence 迟到 review callback；若它属于同 generation、非空、safe、未超 16,384 UTF-16（包括 LF），则保留同一面板的 durable、非权威 `ReviewReadOnlyPhase.recovery` 只读恢复面。该分支没有 Send/qualified Return、编辑或 delivery authority，不 append、不做 AX/Unicode/keyboard/clipboard 输出、不 retry/retarget；只有权威 action 2 加 recorder barrier 才能进入 `.editable`。空、unsafe 或超限值继续走固定 failure/preservation 分支。
+- 既有 v3 安装候选 `4f9908f` 已因 Cancel-only/inert Return 及此前图片残留风险拒绝并停止；v4 尚未安装，Issue #40 仍 open，替换 Release 与 owner UAT 未完成。
+
 ### Changed — Issue #40 v3 installed-UAT correction (validation remains open)
-- 安装版 UAT 暴露的界面问题已对齐当前契约：流式预览与原生多行编辑器统一使用 18pt transcript 字体，审阅面板仍保持初始 520×320、最小 420×240、最大 760×600，不因字体调整而放大。
-- pending UI 不再显示「重试编辑」；readiness 未满足时草稿仍留在同一面板且不可确认，只有实际进入 `.editable` 后才显示「发送」并接受未修饰 Return/Enter 或 Command+Return。Shift+Return/Enter 换行语义保持不变。
-- accessory-app 激活请求仅为 advisory；application active、panel key、编辑器 materialization/attachment 与 first-responder 等实际 readiness predicates 仍逐项 fail closed。只读正文移除 `.fullSizeContentView`，保持在标题栏/traffic-light 控件下方。
+- [历史候选，已由 v4 supersede] v3 的 readiness gating 说明只记录当时的失败与修正背景；当前 `.editable` 不再等待 focus readiness，Send/Return 不由 readiness 隐藏或禁用。
+- [历史候选] 安装版 UAT 暴露的界面问题已对齐当时契约：流式预览与原生多行编辑器统一使用 18pt transcript 字体，审阅面板仍保持初始 520×320、最小 420×240、最大 760×600，不因字体调整而放大。
+- [历史候选，已由 v4 修订] pending UI 不再显示「重试编辑」；当时 readiness 未满足时草稿仍留在同一面板且不可确认，只有实际进入 `.editable` 后才显示「发送」。当前 v4 在 focus telemetry 完成前即提供 Send/Return；Shift+Return/Enter 换行语义保持不变。
+- [历史候选] accessory-app 激活请求仅为 advisory；当时的 application active、panel key、编辑器 materialization/attachment 与 first-responder predicates 仍逐项 fail closed。只读正文移除 `.fullSizeContentView`，保持在标题栏/traffic-light 控件下方。
 - 本次是 UI/readiness presentation correction，不改变 capture/recording 与 recognition/provider 的独立异步根、action 2 + recorder barrier 的 durable draft、显式 Send/Return 输出门或 exact-target/fixed-PID fallback 安全边界。安装版 UAT v3 仍失败且 Issue #40 仍 open；本条不代表 Release UAT 或 issue 关闭。
 
-### Changed — Issue #40 v2
-- 所有 accepted Fn 交互统一进入一条审阅路线：`streaming -> sealing -> editablePending -> editable`。捕获/录音与识别/provider/retry/replay 仍是独立异步根，互不等待面板、编辑器就绪、ack 或交付。
+### Changed — Issue #40 v2 (historical; v4 supersedes readiness and review delivery transaction)
+- 所有 accepted Fn 交互统一进入一条审阅路线；v2 的 `streaming -> sealing -> editablePending -> editable` 状态图已由 v4 的 `streaming -> sealing -> editable -> confirming` 取代。捕获/录音与识别/provider/retry/replay 仍是独立异步根，互不等待面板、编辑器就绪、ack 或交付。
 - `reviewBeforeInsert` 与 `autoInsert` 的两个持久化值均只保留 Codable 解码/迁移兼容性，不能关闭预览、恢复连续/直接输出或绕过显式确认；设置界面不再提供 bypass 控件。
 - Fn release 只关闭 capture；action 2 与 recorder barrier 在同一面板冻结 durable editable draft。只有显式「发送」、裸 Return/Enter 或 Command+Return 可开始一次 delivery；Shift+Return/Enter 只插入一个 LF。
 - readiness、激活、key-window、编辑器 materialization、first-responder、取消/超时，以及 delivery/security failure 都保留同一面板中的精确草稿和固定反馈；无自动复制、直接输出、重试、换目标或 retarget。后续 delivery 只能由用户再次显式确认触发。
@@ -17,11 +26,11 @@
 
 ### Added
 > 以下 issue #26/#27 条目保留此前实现的历史记录。其直接/连续/final-only/手动恢复输出部分已由
-> Issue #40 v2 的单一审阅路线取代；捕获、识别、回放、重试、release drain 与安全边界仍按各条目所述保留。
+> Issue #40 的单一审阅路线取代；捕获、识别、回放、重试、release drain 与安全边界仍按各条目所述保留。
 
 - 新增「输入前预览」：每次 accepted Fn 交互都在同一非激活面板以只读方式展示完整不透明 snapshot，松开后保持 sealing；权威 `action=2` 与 recorder barrier 都结算后，同一面板才转为多行草稿。用户可编辑并通过「发送」/Return/Command+Return 显式确认，或通过「取消」/Escape/关窗丢弃且零写入（issue #38；路线由 issue #40 v2 统一）
 - 调整输入前预览编辑器的确认键语义：未修饰 Return（含数字键盘 Enter）确认当前草稿，Shift+Return/Shift+Enter 插入换行，Command+Return 保持显式确认快捷键；marked text 中的 Return 交给输入法，取消/Escape/关窗丢弃，纯空白不能确认（issue #39）
-- 为审阅目标增加普通非安全 AX 严格光标缺失时的应用绑定 fallback：exact AX 元素/原选区仍优先；fallback 在面板打开前绑定完整原应用，确认时只重新激活该应用并执行两次连续复合检查（Secure Input 开始 → raw PID → running/frontmost 完整身份 → Secure Input 结束），再向固定 PID 发送一次 multiline-safe Cmd+V；postflight 使用等价复合安全检查。该 fallback 证明原应用而非原控件或 caret；安全输入、身份不完整或漂移仍拒绝（issue #40）
+- [v2 historical; v4 superseded] 为审阅目标增加普通非安全 AX 严格光标缺失时的应用绑定 fallback：exact AX 元素/原选区仍优先；v4 保留两次复合安全检查，但交付改为固定 PID 的单次 Unicode 文本 pair，不再使用 Cmd+V 或 pasteboard。
 - 新增审阅第三异步轴与原目标交付权限：审阅状态/渲染不给 capture-to-journal 生产线或 recognition consumer/retry/replay 消费线增加依赖、等待或 backpressure；旧版 route-setting 仍可解码但不能改变运行时路线（issue #38/#40）
 - `reviewBeforeInsert` 偏好默认为 `true`；旧版 UserDefaults JSON 缺少字段时通过 `decodeIfPresent` 安全迁移，两个历史值均进入审阅路线且不改写凭据或其他偏好（issue #40）
 - 新增完整 snapshot reconciliation：packet replay ownership 与识别状态分离；任意当前焦点目标以 Swift `Character` 最长公共前缀计算恰好所需的 Backspace，再输入 replacement suffix（issue #27）
@@ -37,11 +46,11 @@
 - 新增 `MainViewModelTests` 覆盖 `MonitoringState` 失败映射、恢复清除和 cleanup 订阅释放路径（issues #22/#23/#24）
 
 ### Fixed
-> 以下 issue #26/#27 条目保留此前实现的历史记录。直接/连续/final-only/剪贴板恢复输出部分不是当前 Issue #40 v2 路线；当前路线要求同一面板保留精确草稿并等待用户显式重试/丢弃。
+> 以下 issue #26/#27 条目保留此前实现的历史记录。直接/连续/final-only/剪贴板恢复输出部分不是当前 Issue #40 v4 路线；当前路线要求同一面板保留精确草稿，任何再次投递都必须由用户重新显式确认。
 
-- [历史候选行为，已由 Issue #40 v2 取代] 审阅确认在开始音频/网络前捕获 PID、bundle ID、executable URL、launch date、精确 AX 元素和原选区；后续仍保留身份/焦点/选区/Secure Input fail-closed 与一次 Cmd+V，但 readiness/delivery 失败不再复制草稿，改为在同一面板保留草稿供显式重试/丢弃（issue #38/#40）
-- 修复普通非安全 final-only/可编辑 AX 目标因严格光标捕获能力缺失而在审阅启动时错误显示「无法确认输入位置」：先绑定完整原应用，继续使用同一预览/封存/编辑流程；确认时 fallback 只向该原应用的固定 PID 发送一次 Cmd+V，不递归发现当前焦点、不跨应用、不自动重试（issue #40）
-- 审阅粘贴成功路径现保存原剪贴板的每个 item 及其全部 data-bearing type，仅在进程定向 Cmd+V 和 postflight 都成功后安排一次有界恢复；调度时和真正恢复前都以本次写入的 `changeCount` 为门，不覆盖第三方剪贴板变化。按键投递或 postflight 不确定时不自动恢复、不重试，并在同一审阅面板保留精确草稿（issue #38/#40）
+- [v2 historical; v4 superseded] 审阅确认在开始音频/网络前捕获 PID、bundle ID、executable URL、launch date、精确 AX 元素和原选区；v4 仍保留身份/焦点/选区/Secure Input fail-closed，但不再使用 Cmd+V 或 pasteboard。
+- [v2 historical; v4 superseded] 普通非安全 final-only/可编辑 AX 目标的 fallback 曾向固定 PID 发送 Cmd+V；v4 改为固定 PID 的一次 Unicode 文本 pair，不递归发现当前焦点、不跨应用、不自动重试。
+- [v2 historical; v4 removed] 审阅 pasteboard item/type snapshot、changeCount 恢复和 Cmd+V 交易已删除；图片残留诊断证明目标消费不可由 changeCount 可靠确认，当前任何审阅阶段都不读取、写入或恢复用户剪贴板。
 - 修复 VPN 开启时流式识别仍走海外 CDN / TUN：keep-alive 在运行时物理网卡上做 bound UDP/53 DNS（DHCP option 6，再回退 recursor 主机名 `dns.alidns.com` / `public1.114dns.com`，跳过 `198.18.0.0/15`），TCP `IP_BOUND_IF` + CFStream TLS（SNI `open.feishu.cn`，证书链校验开启）。无 IP 字面量、不绑定 `en0`、无自定义 TLS verify。factory/packet/finish 在 keep-alive 连接类失败时不再 hop 到 URLSession。整文件识别仍走 URLSession（issue #34）
 - 修复 build 12 每次启动都要重填 App ID/Secret：#35 的 data-protection keychain 在无 `application-identifier` 时返回 -34018，读不到仍在 login keychain 的凭据。恢复 issue #18 的 login-keychain 读写；AppDelegate 仍只用 `launchAtLoginPreference(from:)` 同步开机启动（issue #36）
 - 修复 VPN 开启时流式识别不稳定：keep-alive 直连改为 primary 并禁止 TUN（`.other`），不绑定 `en0`；同一 watched factory/packet/finish 操作仅在无 HTTP 响应时 hop 一次到 URLSession。已完成 HTTP（含 4xx）与 CancellationError 不 hop；keep-alive 成功后粘性直连，URLSession 回退成功后粘性 URLSession；下一 attempt 重新从 keep-alive 开始（issue #33）
@@ -111,15 +120,15 @@
 ### Verification
 
 - issue #27 的最终候选 Release 1.0 build 8 已通过 316/316 完整测试、strict SwiftLint、Debug 与 Release 构建。发布 drain、权威 final、重复 `10024` 恢复、watchdog、deadline race、迟到回调和 fixed-target 安全边界均有自动化覆盖；这些本地门槛不证明真实凭据服务或目标控件实际接受 PID-targeted 事件。
-- Issue #40 v2 的聚焦串行套件（destination capture/coordinator/final output/pasteboard/application fallback/readiness）通过 79/79；完整串行套件通过 442（1 个预期 live-TCP skip），覆盖 identity-first capture、exact 优先、普通非安全 AX miss、固定 PID multiline Cmd+V、两次连续复合安全/PID/完整身份检查、同面板 readiness re-evaluation、交付不确定和零 copy draft retention。该结果不替代安装版 Release UAT。
+- Issue #40 v4 R4 final focused serialized matrix passed 265 executed tests with 0 skipped and 0 failures. All 105 `StreamingMainViewModelTests` execute and pass; the R4 selectors pass 3/3, and the full macOS target passed 483 tests with 1 unrelated live-TCP environmental skip and 0 failures. Coverage includes direct freeze-to-editable, real Send/qualified Return intent, zero pre-confirm side effects, no-pasteboard/no-Cmd+V output, 16,384 UTF-16 limits, Unicode pair readback/provenance, final modifier/epoch/PID/tag ordering, non-authoritative LF-preserving recovery, action-2 confirmation authority, and retained drafts. This automated result does not replace replacement Release installation or owner UAT.
 
 ### Verification pending
 
 - 既有安装版 UAT 已证明 held-time snapshot replacement 基本符合预期，并暴露 build 7 在 Fn-up 后抑制有效 tail/final 的截断；build 8 已在本地修复为 release drain，但尚未经过本轮真实凭据与目标应用 UAT，不声明端到端通过。
-- `CGEventPostToPid` 没有目标控件接受确认；本地 `.posted` 仅证明完整 PID-bound replacement transaction 已提交，不能证明目标完成了可见替换。当前修正仍须安装版 owner UAT，若无可见输出应报告 PARTIAL，不能通过全局 HID、重复事件、回滚或不确定后的剪贴板回退扩展行为。
+- `CGEventPostToPid` 没有目标控件接受确认；v4 的 `submittedUnverified` 仅记录一次 pair 已跨过本地 submission boundary，不能证明目标完成了可见替换。仍须安装版 owner UAT，若无可见输出应报告 PARTIAL，不能通过全局 HID、重复事件、回滚或剪贴板回退扩展行为。
 - 真实飞书凭据下的后续 action、终止请求空音频编码、首次 token 刷新同序列重试、PCM/tail 兼容性和慢网行为仍需安装版 Release UAT。issue #26 的本地拼接策略已由 build 6 证据否定；issue #27 将响应按可相同、变长、缩短或修订的完整不透明 snapshot 替换，仍不推断稳定词或做文本归一化。
 - TextEdit/原生控件、浏览器、Electron、终端和富文本编辑器的 Accessibility 范围、焦点干扰、Unicode 与 undo 行为仍需跨应用实机 UAT；当前不声明广泛兼容性。
-- Issue #40 还需安装版 UAT：一个此前因普通非安全 strict-AX miss 显示「无法确认输入位置」的目标、一个 exact-AX 目标、Secure Input/密码框拒绝、确认期间跨应用切换、多行草稿，以及强制 post/postflight 不确定后的草稿保留、显式重试/丢弃。fallback 只证明原应用，不证明原控件或 caret 已消费 Cmd+V。
+- Issue #40 仍需 replacement Release 安装和 owner UAT：一个此前因普通非安全 strict-AX miss 显示「无法确认输入位置」的目标、一个 exact-AX 目标、Secure Input/密码框拒绝、确认期间跨应用切换、多行草稿、非 BMP/16,384 边界，以及强制 post/postflight 不确定后的草稿保留。fallback 只证明原应用，不证明原控件或 caret 已消费 Unicode pair；当前没有安装版 v4 通过声明。
 
 ## [0.3.0] - 2025
 

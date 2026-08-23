@@ -595,6 +595,74 @@ final class CurrentFocusAppendSessionTests: XCTestCase {
         )
     }
 
+    func test_syntheticEventEpochExemptionRequiresOwnPIDAndExactTag() {
+        let epoch = CurrentFocusInputInterferenceEpoch()
+        let ownTaggedEvent = makeTaggedEpochEvent(
+            processIdentifier: getpid(),
+            tag: FeishuSpeechSyntheticEventTag.value
+        )
+        epoch.observePreDispatch(type: .keyDown, event: ownTaggedEvent)
+        XCTAssertEqual(epoch.value, 0, "our tagged event must not advance the physical-input epoch")
+
+        let foreignTaggedEvent = makeTaggedEpochEvent(
+            processIdentifier: getpid() + 1,
+            tag: FeishuSpeechSyntheticEventTag.value
+        )
+        epoch.observePreDispatch(type: .keyDown, event: foreignTaggedEvent)
+        XCTAssertEqual(
+            epoch.value,
+            1,
+            "a foreign process carrying our tag is physical input and must advance the epoch"
+        )
+
+        let zeroPIDTaggedEvent = makeTaggedEpochEvent(
+            processIdentifier: 0,
+            tag: FeishuSpeechSyntheticEventTag.value
+        )
+        epoch.observePreDispatch(type: .keyDown, event: zeroPIDTaggedEvent)
+        XCTAssertEqual(epoch.value, 2, "a zero-PID tagged event must fail closed")
+
+        let missingTagOwnPIDEvent = makeTaggedEpochEvent(
+            processIdentifier: getpid(),
+            tag: nil
+        )
+        epoch.observePreDispatch(type: .keyDown, event: missingTagOwnPIDEvent)
+        XCTAssertEqual(epoch.value, 3, "an untagged event from our PID is still physical input")
+
+        let wrongTagOwnPIDEvent = makeTaggedEpochEvent(
+            processIdentifier: getpid(),
+            tag: FeishuSpeechSyntheticEventTag.value ^ 1
+        )
+        epoch.observePreDispatch(type: .keyDown, event: wrongTagOwnPIDEvent)
+        XCTAssertEqual(epoch.value, 4, "a wrong tag must not receive the synthetic exemption")
+
+        epoch.observePreDispatch(type: .tapDisabledByTimeout, event: ownTaggedEvent)
+        XCTAssertEqual(
+            epoch.value,
+            5,
+            "tap-disabled events always advance even when tag and PID appear synthetic"
+        )
+    }
+
+    private func makeTaggedEpochEvent(
+        processIdentifier: pid_t,
+        tag: Int64?
+    ) -> CGEvent {
+        let event = CGEvent(
+            keyboardEventSource: nil,
+            virtualKey: 0,
+            keyDown: true
+        )!
+        event.setIntegerValueField(
+            .eventSourceUnixProcessID,
+            value: Int64(processIdentifier)
+        )
+        if let tag {
+            event.setIntegerValueField(.eventSourceUserData, value: tag)
+        }
+        return event
+    }
+
     func test_tapDisabledEpochDriftSuppressesActiveSessionBeforeRecoveryCallbacks() {
         for input in [
             TestPreDispatchInputKind.tapDisabledByTimeout,
@@ -677,6 +745,10 @@ final class CurrentFocusAppendSessionTests: XCTestCase {
             keyDown: true
         )!
         taggedCGEvent.setIntegerValueField(
+            .eventSourceUnixProcessID,
+            value: Int64(getpid())
+        )
+        taggedCGEvent.setIntegerValueField(
             .eventSourceUserData,
             value: FeishuSpeechSyntheticEventTag.value
         )
@@ -689,8 +761,44 @@ final class CurrentFocusAppendSessionTests: XCTestCase {
                 keyCode: 63
             )
         )
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01))
 
         XCTAssertEqual(suspensionCount, 0)
+
+        let foreignTaggedCGEvent = taggedCGEvent.copy()!
+        foreignTaggedCGEvent.setIntegerValueField(
+            .eventSourceUnixProcessID,
+            value: Int64(getpid() + 1)
+        )
+        NSApplication.shared.sendEvent(NSEvent(cgEvent: foreignTaggedCGEvent)!)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01))
+        XCTAssertEqual(
+            suspensionCount,
+            1,
+            "the AppKit local/global monitor must not exempt a foreign PID merely because its tag matches"
+        )
+
+        let zeroPIDTaggedCGEvent = taggedCGEvent.copy()!
+        zeroPIDTaggedCGEvent.setIntegerValueField(.eventSourceUnixProcessID, value: 0)
+        NSApplication.shared.sendEvent(NSEvent(cgEvent: zeroPIDTaggedCGEvent)!)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01))
+        XCTAssertEqual(suspensionCount, 2, "zero PID must fail closed in the AppKit monitor")
+
+        let missingTagCGEvent = makeTaggedEpochEvent(
+            processIdentifier: getpid(),
+            tag: nil
+        )
+        NSApplication.shared.sendEvent(NSEvent(cgEvent: missingTagCGEvent)!)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01))
+        XCTAssertEqual(suspensionCount, 3, "missing tag must remain physical input")
+
+        let wrongTagCGEvent = makeTaggedEpochEvent(
+            processIdentifier: getpid(),
+            tag: FeishuSpeechSyntheticEventTag.value ^ 1
+        )
+        NSApplication.shared.sendEvent(NSEvent(cgEvent: wrongTagCGEvent)!)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01))
+        XCTAssertEqual(suspensionCount, 4, "wrong tag must remain physical input")
     }
 
     func test_sameAppPhysicalInputSuspendsBeforeQueuedReplacementTransaction() {

@@ -16,12 +16,6 @@ nonisolated enum TranscriptionReviewState: Equatable, Sendable {
         isPossiblyIncomplete: Bool,
         feedback: ReviewDraftFeedback? = nil
     )
-    case editablePending(
-        draft: String,
-        isPossiblyIncomplete: Bool,
-        readiness: ReviewEditableReadinessState,
-        feedback: ReviewDraftFeedback? = nil
-    )
     case confirming(
         draft: String = "",
         isPossiblyIncomplete: Bool = false
@@ -31,14 +25,15 @@ nonisolated enum TranscriptionReviewState: Equatable, Sendable {
 nonisolated enum ReviewReadOnlyPhase: Equatable, Sendable {
     case streaming
     case sealing
+    case recovery
 }
 
-nonisolated enum ReviewEditableTransitionResult: Equatable, Sendable {
-    case ready
-    case pending(ReviewEditableReadinessFailure)
+nonisolated enum ReviewPresentationFocusResult: Equatable, Sendable {
+    case focused
+    case notFocused(ReviewPresentationFocusFailure)
 }
 
-nonisolated enum ReviewEditableReadinessPredicate: String, Equatable, Sendable {
+nonisolated enum ReviewPresentationFocusPredicate: String, Equatable, Sendable {
     case activationRequest
     case applicationActive
     case panelKey
@@ -47,18 +42,26 @@ nonisolated enum ReviewEditableReadinessPredicate: String, Equatable, Sendable {
     case editorFirstResponder
 }
 
-nonisolated enum ReviewEditableReadinessFailure: Equatable, Sendable {
-    case activationRejected
-    case timedOut(lastUnmet: ReviewEditableReadinessPredicate)
-    case cancelled(lastUnmet: ReviewEditableReadinessPredicate?)
+nonisolated enum ReviewPresentationFocusFailure: Equatable, Sendable {
+    case timedOut(lastUnmet: ReviewPresentationFocusPredicate)
+    case cancelled(lastUnmet: ReviewPresentationFocusPredicate?)
     case surfaceInvalidated
 }
 
-extension ReviewEditableReadinessFailure {
+nonisolated struct ReviewPresentationFocusRequest: Equatable, Sendable {
+    let reviewID: UUID
+    let generation: UInt64
+    let focusAttemptID: UInt64
+}
+
+nonisolated struct ReviewPresentationFocusOutcome: Equatable, Sendable {
+    let request: ReviewPresentationFocusRequest
+    let result: ReviewPresentationFocusResult
+}
+
+extension ReviewPresentationFocusFailure {
     var telemetryResult: String {
         switch self {
-        case .activationRejected:
-            return "activationRejected"
         case .timedOut:
             return "timedOut"
         case .cancelled:
@@ -69,10 +72,8 @@ extension ReviewEditableReadinessFailure {
     }
 
     var telemetryPredicate: String? {
-        let predicate: ReviewEditableReadinessPredicate?
+        let predicate: ReviewPresentationFocusPredicate?
         switch self {
-        case .activationRejected:
-            predicate = .activationRequest
         case .timedOut(let lastUnmet):
             predicate = lastUnmet
         case .cancelled(let lastUnmet):
@@ -89,11 +90,6 @@ extension ReviewEditableReadinessFailure {
     }
 }
 
-nonisolated enum ReviewEditableReadinessState: Equatable, Sendable {
-    case preparing(attempt: UInt64)
-    case blocked(attempt: UInt64, failure: ReviewEditableReadinessFailure)
-}
-
 nonisolated enum ReviewDraftFeedback: Equatable, Sendable {
     case activationFailed
     case destinationChanged
@@ -102,4 +98,5 @@ nonisolated enum ReviewDraftFeedback: Equatable, Sendable {
     case deliveryFailed
     case deliveryUncertain
     case deliveryCancelled
+    case draftTooLong
 }

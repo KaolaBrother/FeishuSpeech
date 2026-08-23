@@ -110,12 +110,34 @@ extension CurrentFocusProvisionalOutputSessionFactory {
 
 @MainActor
 protocol CurrentFocusActivationMonitoring: AnyObject {
+    /// Review delivery requires an observable activation epoch in addition to
+    /// the older destination-change callback used by provisional output.
+    /// Implementations that cannot prove installation fail closed for review.
+    var supportsReviewDeliveryEpoch: Bool { get }
+    var activationEpoch: UInt64 { get }
     func startMonitoring(_ handler: @escaping @MainActor (pid_t) -> Void)
+    func armMonitoringFailClosedWithEpoch(
+        _ handler: @escaping @MainActor (pid_t) -> Void
+    ) -> UInt64?
     func stopMonitoring()
+}
+
+extension CurrentFocusActivationMonitoring {
+    var supportsReviewDeliveryEpoch: Bool { false }
+    var activationEpoch: UInt64 { 0 }
+
+    func armMonitoringFailClosedWithEpoch(
+        _: @escaping @MainActor (pid_t) -> Void
+    ) -> UInt64? {
+        nil
+    }
 }
 
 @MainActor
 protocol CurrentFocusInputMonitoring: AnyObject {
+    /// Review delivery may only proceed with a monitor that can atomically
+    /// arm and capture its interference epoch.
+    var supportsReviewDeliveryEpoch: Bool { get }
     var interferenceEpoch: UInt64 { get }
     func startMonitoring(_ handler: @escaping @MainActor () -> Void)
     func armMonitoringFailClosed(_ handler: @escaping @MainActor () -> Void) -> Bool
@@ -130,6 +152,7 @@ protocol CurrentFocusInputMonitoring: AnyObject {
 }
 
 extension CurrentFocusInputMonitoring {
+    var supportsReviewDeliveryEpoch: Bool { false }
     var interferenceEpoch: UInt64 { 0 }
     func armMonitoringFailClosed(_: @escaping @MainActor () -> Void) -> Bool { true }
 
@@ -183,8 +206,10 @@ nonisolated final class CurrentFocusInputInterferenceEpoch: @unchecked Sendable 
             advance()
             return
         }
-        guard event.getIntegerValueField(.eventSourceUserData) != FeishuSpeechSyntheticEventTag.value,
-              Self.isInterferingPhysicalInput(type: type, event: event) else {
+        guard Self.isInterferingPhysicalInput(type: type, event: event) else {
+            return
+        }
+        guard !FeishuSpeechSyntheticEventTag.isSelfIdentified(event) else {
             return
         }
         advance()
@@ -710,6 +735,8 @@ final class WorkspaceCurrentFocusInputMonitor: CurrentFocusInputMonitoring {
     private var globalMonitor: Any?
     private var pendingArmResult: PendingArmResult?
 
+    var supportsReviewDeliveryEpoch: Bool { true }
+
     var interferenceEpoch: UInt64 {
         CurrentFocusInputInterferenceEpoch.shared.value
     }
@@ -806,8 +833,8 @@ final class WorkspaceCurrentFocusInputMonitor: CurrentFocusInputMonitoring {
 
     private static func isExternalCaretAffectingEvent(_ event: NSEvent) -> Bool {
         guard event.type != .flagsChanged else { return false }
-        let tag = event.cgEvent?.getIntegerValueField(.eventSourceUserData)
-        return tag != FeishuSpeechSyntheticEventTag.value
+        guard let cgEvent = event.cgEvent else { return true }
+        return !FeishuSpeechSyntheticEventTag.isSelfIdentified(cgEvent)
     }
 }
 
@@ -815,6 +842,16 @@ final class WorkspaceCurrentFocusInputMonitor: CurrentFocusInputMonitoring {
 final class WorkspaceCurrentFocusActivationMonitor: NSObject, CurrentFocusActivationMonitoring {
     private var handler: (@MainActor (pid_t) -> Void)?
     private var isMonitoring = false
+    private let epochLock = NSLock()
+    private var rawActivationEpoch: UInt64 = 0
+
+    var supportsReviewDeliveryEpoch: Bool { true }
+
+    var activationEpoch: UInt64 {
+        epochLock.lock()
+        defer { epochLock.unlock() }
+        return rawActivationEpoch
+    }
 
     func startMonitoring(_ handler: @escaping @MainActor (pid_t) -> Void) {
         self.handler = handler
@@ -826,6 +863,14 @@ final class WorkspaceCurrentFocusActivationMonitor: NSObject, CurrentFocusActiva
             name: NSWorkspace.didActivateApplicationNotification,
             object: nil
         )
+    }
+
+    func armMonitoringFailClosedWithEpoch(
+        _ handler: @escaping @MainActor (pid_t) -> Void
+    ) -> UInt64? {
+        startMonitoring(handler)
+        guard isMonitoring else { return nil }
+        return activationEpoch
     }
 
     func stopMonitoring() {
@@ -844,6 +889,9 @@ final class WorkspaceCurrentFocusActivationMonitor: NSObject, CurrentFocusActiva
                 as? NSRunningApplication else {
             return
         }
+        epochLock.lock()
+        rawActivationEpoch &+= 1
+        epochLock.unlock()
         handler?(application.processIdentifier)
     }
 

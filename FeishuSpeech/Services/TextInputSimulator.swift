@@ -26,12 +26,31 @@ protocol FinalTextOutput: AnyObject {
         validateAfterPosting: () -> ReviewCurrentFocusValidation
     ) -> FinalTextInsertionResult
     func insertAtCurrentFocusOnce(_ text: String) -> FinalTextInsertionResult
+
+    /// Review delivery may provide one final, synchronously-held critical
+    /// section around the complete Unicode pair. The default keeps older
+    /// doubles source-compatible while the system implementation uses it to
+    /// bind activation and physical-input epochs through both posts.
+    func insertOnce(
+        _ text: String,
+        destination: CursorDestinationToken,
+        validateBeforeMutation: @escaping () throws -> Bool,
+        validateAfterPosting: () throws -> Bool,
+        postPairIfPreflightRemainsValid pairGate: (@escaping () -> Void) -> Bool
+    ) -> FinalTextInsertionResult
+
+    func insertReviewAtCurrentFocusOnce(
+        _ text: String,
+        processIdentifier: pid_t,
+        validateBeforeMutation: @escaping () -> ReviewCurrentFocusValidation,
+        validateAfterPosting: () -> ReviewCurrentFocusValidation,
+        postPairIfPreflightRemainsValid pairGate: (@escaping () -> Void) -> Bool
+    ) -> FinalTextInsertionResult
 }
 
 extension FinalTextOutput {
-    /// Keeps pre-issue output implementations source-compatible while exposing the
-    /// two-phase contract to review-first delivery. Concrete implementations should
-    /// override this when they own the pasteboard and key-event boundary.
+    /// Older output implementations cannot prove the v4 pair/epoch contract.
+    /// Keep their source compatibility, but fail closed for explicit review.
     func insertOnce(
         _ text: String,
         destination: CursorDestinationToken,
@@ -66,97 +85,85 @@ extension FinalTextOutput {
     ) -> FinalTextInsertionResult {
         .destinationInvalid
     }
+
+    func insertOnce(
+        _ text: String,
+        destination: CursorDestinationToken,
+        validateBeforeMutation: @escaping () throws -> Bool,
+        validateAfterPosting: () throws -> Bool,
+        postPairIfPreflightRemainsValid pairGate: (@escaping () -> Void) -> Bool
+    ) -> FinalTextInsertionResult {
+        .deliveryFailed
+    }
+
+    func insertReviewAtCurrentFocusOnce(
+        _ text: String,
+        processIdentifier: pid_t,
+        validateBeforeMutation: @escaping () -> ReviewCurrentFocusValidation,
+        validateAfterPosting: () -> ReviewCurrentFocusValidation,
+        postPairIfPreflightRemainsValid pairGate: (@escaping () -> Void) -> Bool
+    ) -> FinalTextInsertionResult {
+        .deliveryFailed
+    }
+}
+
+nonisolated enum ReviewUnicodeOutputFailure: Equatable, Sendable {
+    case unsafeText
+    case draftTooLong
+    case constructionFailed
+    case provenanceMismatch
+    case secureInput
+    case cancelledBeforeSubmission
+    case preflightRejected
+}
+
+nonisolated enum ReviewUnicodePostflight: Equatable, Sendable {
+    case valid
+    case uncertain
+}
+
+/// A review output attempt is deliberately phase-aware. Once key-down is
+/// submitted the result can never be represented as cancellation or a failed
+/// preflight, because the process cannot retract that event.
+nonisolated enum ReviewUnicodeOutputResult: Equatable, Sendable {
+    case failedBeforeSubmission(ReviewUnicodeOutputFailure)
+    case cancelledBeforeSubmission
+    case submittedUnverified(ReviewUnicodePostflight)
 }
 
 @MainActor
 final class SystemFinalTextOutput: FinalTextOutput, ReviewCurrentFocusEnvironmentProviding {
-    private typealias ReviewPasteboardSnapshot = [[String: Data]]
-
-    private let pasteboardWriter: FinalTextPasteboardWriting
-    private let keyEventPoster: FinalTextKeyEventPosting
     private let currentFocusEventPoster: FinalTextCurrentFocusEventPosting
     private let secureInputStateProvider: SecureInputStateProviding
     private let frontmostProcessProvider: FrontmostProcessProviding
-    private let reviewPasteboardSnapshot: () -> ReviewPasteboardSnapshot
-    private let reviewPasteboardChangeCount: () -> Int
-    private let reviewPasteboardRestore: (ReviewPasteboardSnapshot, Int) -> Void
-    private let reviewPasteboardRestoreScheduler: (@escaping () -> Void) -> Void
 
     init(
-        pasteboardWriter: FinalTextPasteboardWriting,
-        keyEventPoster: FinalTextKeyEventPosting,
+        pasteboardWriter _: FinalTextPasteboardWriting,
+        keyEventPoster _: FinalTextKeyEventPosting,
         secureInputStateProvider: SecureInputStateProviding? = nil,
-        frontmostProcessProvider: FrontmostProcessProviding? = nil,
-        reviewPasteboardSnapshot: (() -> [[String: Data]])? = nil,
-        reviewPasteboardChangeCount: (() -> Int)? = nil,
-        reviewPasteboardRestore: (([[String: Data]], Int) -> Void)? = nil,
-        reviewPasteboardRestoreScheduler: ((@escaping () -> Void) -> Void)? = nil
+        frontmostProcessProvider: FrontmostProcessProviding? = nil
     ) {
-        self.pasteboardWriter = pasteboardWriter
-        self.keyEventPoster = keyEventPoster
         currentFocusEventPoster = SystemFinalTextCurrentFocusEventPoster()
         self.secureInputStateProvider = secureInputStateProvider ?? SystemSecureInputStateProvider()
         self.frontmostProcessProvider = frontmostProcessProvider ?? SystemFrontmostProcessProvider()
-        self.reviewPasteboardSnapshot = reviewPasteboardSnapshot ?? {
-            TextInputSimulator.captureReviewPasteboardSnapshot()
-        }
-        self.reviewPasteboardChangeCount = reviewPasteboardChangeCount ?? {
-            NSPasteboard.general.changeCount
-        }
-        self.reviewPasteboardRestore = reviewPasteboardRestore ?? { snapshot, expectedChangeCount in
-            TextInputSimulator.restoreReviewPasteboardSnapshot(
-                snapshot,
-                ifChangeCount: expectedChangeCount
-            )
-        }
-        self.reviewPasteboardRestoreScheduler = reviewPasteboardRestoreScheduler ?? { operation in
-            DispatchQueue.global(qos: .userInteractive).async {
-                Thread.sleep(forTimeInterval: 1.0)
-                operation()
-            }
-        }
     }
 
     init(
-        pasteboardWriter: FinalTextPasteboardWriting,
-        keyEventPoster: FinalTextKeyEventPosting,
+        pasteboardWriter _: FinalTextPasteboardWriting,
+        keyEventPoster _: FinalTextKeyEventPosting,
         currentFocusEventPoster: FinalTextCurrentFocusEventPosting,
         secureInputStateProvider: SecureInputStateProviding,
-        frontmostProcessProvider: FrontmostProcessProviding,
-        reviewPasteboardSnapshot: (() -> [[String: Data]])? = nil,
-        reviewPasteboardChangeCount: (() -> Int)? = nil,
-        reviewPasteboardRestore: (([[String: Data]], Int) -> Void)? = nil,
-        reviewPasteboardRestoreScheduler: ((@escaping () -> Void) -> Void)? = nil
+        frontmostProcessProvider: FrontmostProcessProviding
     ) {
-        self.pasteboardWriter = pasteboardWriter
-        self.keyEventPoster = keyEventPoster
         self.currentFocusEventPoster = currentFocusEventPoster
         self.secureInputStateProvider = secureInputStateProvider
         self.frontmostProcessProvider = frontmostProcessProvider
-        self.reviewPasteboardSnapshot = reviewPasteboardSnapshot ?? {
-            TextInputSimulator.captureReviewPasteboardSnapshot()
-        }
-        self.reviewPasteboardChangeCount = reviewPasteboardChangeCount ?? {
-            NSPasteboard.general.changeCount
-        }
-        self.reviewPasteboardRestore = reviewPasteboardRestore ?? { snapshot, expectedChangeCount in
-            TextInputSimulator.restoreReviewPasteboardSnapshot(
-                snapshot,
-                ifChangeCount: expectedChangeCount
-            )
-        }
-        self.reviewPasteboardRestoreScheduler = reviewPasteboardRestoreScheduler ?? { operation in
-            DispatchQueue.global(qos: .userInteractive).async {
-                Thread.sleep(forTimeInterval: 1.0)
-                operation()
-            }
-        }
     }
 
     convenience init() {
         self.init(
-            pasteboardWriter: SystemFinalTextPasteboardWriter(),
-            keyEventPoster: SystemFinalTextKeyEventPoster(),
+            pasteboardWriter: ReviewOutputCompatibilityWriter(),
+            keyEventPoster: ReviewOutputCompatibilityPoster(),
             secureInputStateProvider: SystemSecureInputStateProvider(),
             frontmostProcessProvider: SystemFrontmostProcessProvider()
         )
@@ -175,7 +182,7 @@ final class SystemFinalTextOutput: FinalTextOutput, ReviewCurrentFocusEnvironmen
         destination: CursorDestinationToken,
         validateDestination: () throws -> Bool
     ) -> FinalTextInsertionResult {
-        guard TextInputSimulator.isSafeForAutomaticPaste(text) else {
+        guard TextInputSimulator.isSafeForReviewConfirmation(text) else {
             return .deliveryFailed
         }
         do {
@@ -183,15 +190,23 @@ final class SystemFinalTextOutput: FinalTextOutput, ReviewCurrentFocusEnvironmen
         } catch {
             return .destinationInvalid
         }
-        guard pasteboardWriter.replaceContents(with: text),
-              keyEventPoster.postCommandV(to: destination.processIdentifier) else {
-            return .deliveryFailed
-        }
-        do {
-            return try validateDestination() ? .inserted : .destinationInvalid
-        } catch {
-            return .destinationInvalid
-        }
+        return insertReviewPair(
+            text,
+            processIdentifier: destination.processIdentifier,
+            validateAfterPosting: {
+                do {
+                    return try validateDestination()
+                        ? .valid
+                        : .destinationInvalid
+                } catch {
+                    return .destinationInvalid
+                }
+            },
+            pairGate: { postPair in
+                postPair()
+                return true
+            }
+        )
     }
 
     func insertOnce(
@@ -200,28 +215,51 @@ final class SystemFinalTextOutput: FinalTextOutput, ReviewCurrentFocusEnvironmen
         validateBeforeMutation: () throws -> Bool,
         validateAfterPosting: () throws -> Bool
     ) -> FinalTextInsertionResult {
+        withoutActuallyEscaping(validateBeforeMutation) { validation in
+            insertOnce(
+                text,
+                destination: destination,
+                validateBeforeMutation: validation,
+                validateAfterPosting: validateAfterPosting,
+                postPairIfPreflightRemainsValid: { postPair in
+                    postPair()
+                    return true
+                }
+            )
+        }
+    }
+
+    func insertOnce(
+        _ text: String,
+        destination: CursorDestinationToken,
+        validateBeforeMutation: @escaping () throws -> Bool,
+        validateAfterPosting: () throws -> Bool,
+        postPairIfPreflightRemainsValid pairGate: (@escaping () -> Void) -> Bool
+    ) -> FinalTextInsertionResult {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               TextInputSimulator.isSafeForReviewConfirmation(text) else {
             return .deliveryFailed
         }
-        return performReviewPaste(
+        do {
+            guard try validateBeforeMutation() else {
+                return .destinationInvalid
+            }
+        } catch {
+            return .destinationInvalid
+        }
+        let result = insertReviewPair(
             text,
             processIdentifier: destination.processIdentifier,
-            validateBeforeMutation: {
-                do {
-                    return try validateBeforeMutation() ? .valid : .destinationInvalid
-                } catch {
-                    return .destinationInvalid
-                }
-            },
             validateAfterPosting: {
                 do {
                     return try validateAfterPosting() ? .valid : .destinationInvalid
                 } catch {
                     return .destinationInvalid
                 }
-            }
+            },
+            pairGate: { postPair in pairGate(postPair) }
         )
+        return result
     }
 
     func insertReviewAtCurrentFocusOnce(
@@ -229,6 +267,27 @@ final class SystemFinalTextOutput: FinalTextOutput, ReviewCurrentFocusEnvironmen
         processIdentifier: pid_t,
         validateBeforeMutation: () -> ReviewCurrentFocusValidation,
         validateAfterPosting: () -> ReviewCurrentFocusValidation
+    ) -> FinalTextInsertionResult {
+        withoutActuallyEscaping(validateBeforeMutation) { validation in
+            insertReviewAtCurrentFocusOnce(
+                text,
+                processIdentifier: processIdentifier,
+                validateBeforeMutation: validation,
+                validateAfterPosting: validateAfterPosting,
+                postPairIfPreflightRemainsValid: { postPair in
+                    postPair()
+                    return true
+                }
+            )
+        }
+    }
+
+    func insertReviewAtCurrentFocusOnce(
+        _ text: String,
+        processIdentifier: pid_t,
+        validateBeforeMutation: @escaping () -> ReviewCurrentFocusValidation,
+        validateAfterPosting: () -> ReviewCurrentFocusValidation,
+        postPairIfPreflightRemainsValid pairGate: (@escaping () -> Void) -> Bool
     ) -> FinalTextInsertionResult {
         guard processIdentifier > 0,
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -240,43 +299,28 @@ final class SystemFinalTextOutput: FinalTextOutput, ReviewCurrentFocusEnvironmen
         guard preflightResult == .valid else {
             return finalTextInsertionResult(for: preflightResult)
         }
-
-        return performReviewPaste(
+        let result = insertReviewPair(
             text,
             processIdentifier: processIdentifier,
-            validateBeforeMutation: { preflightResult },
-            validateAfterPosting: validateAfterPosting
+            validateAfterPosting: validateAfterPosting,
+            pairGate: { postPair in pairGate(postPair) }
         )
+        return result
     }
 
-    private func performReviewPaste(
+    private func insertReviewPair(
         _ text: String,
         processIdentifier: pid_t,
-        validateBeforeMutation: () -> ReviewCurrentFocusValidation,
-        validateAfterPosting: () -> ReviewCurrentFocusValidation
+        validateAfterPosting: () -> ReviewCurrentFocusValidation,
+        pairGate: (@escaping () -> Void) -> Bool
     ) -> FinalTextInsertionResult {
-        let preflightResult = validateBeforeMutation()
-        guard preflightResult == .valid else {
-            return finalTextInsertionResult(for: preflightResult)
-        }
-
-        let reviewPasteboardSnapshot = reviewPasteboardSnapshot()
-        guard pasteboardWriter.replaceContents(with: text) else {
-            return .deliveryFailed
-        }
-        let postWriteChangeCount = reviewPasteboardChangeCount()
-        guard keyEventPoster.postCommandV(to: processIdentifier) else {
-            return .deliveryUncertain
-        }
-
-        guard validateAfterPosting() == .valid else {
-            return .deliveryUncertain
-        }
-        scheduleReviewPasteboardRestore(
-            reviewPasteboardSnapshot,
-            expectedChangeCount: postWriteChangeCount
+        let result = currentFocusEventPoster.postReviewUnicodePair(
+            text,
+            to: processIdentifier,
+            postPairIfPreflightRemainsValid: pairGate,
+            validateAfterPosting: validateAfterPosting
         )
-        return .inserted
+        return finalTextInsertionResult(for: result)
     }
 
     private func finalTextInsertionResult(
@@ -284,7 +328,7 @@ final class SystemFinalTextOutput: FinalTextOutput, ReviewCurrentFocusEnvironmen
     ) -> FinalTextInsertionResult {
         switch validation {
         case .valid:
-            return .inserted
+            return .submittedUnverified
         case .securityRejected:
             return .securityRejected
         case .identityChanged:
@@ -294,18 +338,23 @@ final class SystemFinalTextOutput: FinalTextOutput, ReviewCurrentFocusEnvironmen
         }
     }
 
-    private func scheduleReviewPasteboardRestore(
-        _ snapshot: ReviewPasteboardSnapshot,
-        expectedChangeCount: Int
-    ) {
-        let changeCount = reviewPasteboardChangeCount
-        let restore = reviewPasteboardRestore
-        reviewPasteboardRestoreScheduler {
-            guard changeCount() == expectedChangeCount else {
-                logger.debug("Review pasteboard changed after insertion; skipping restoration")
-                return
+    private func finalTextInsertionResult(
+        for result: ReviewUnicodeOutputResult
+    ) -> FinalTextInsertionResult {
+        switch result {
+        case .failedBeforeSubmission(let failure):
+            switch failure {
+            case .secureInput:
+                return .securityRejected
+            default:
+                return .deliveryFailed
             }
-            restore(snapshot, expectedChangeCount)
+        case .cancelledBeforeSubmission:
+            return .deliveryFailed
+        case .submittedUnverified(.valid):
+            return .submittedUnverified
+        case .submittedUnverified(.uncertain):
+            return .deliveryUncertain
         }
     }
 
@@ -340,12 +389,10 @@ final class SystemFinalTextOutput: FinalTextOutput, ReviewCurrentFocusEnvironmen
 
 @MainActor
 protocol FinalTextPasteboardWriting: AnyObject {
-    func replaceContents(with text: String) -> Bool
 }
 
 @MainActor
 protocol FinalTextKeyEventPosting: AnyObject {
-    func postCommandV(to processIdentifier: pid_t) -> Bool
 }
 
 @MainActor
@@ -373,6 +420,15 @@ protocol FinalTextCurrentFocusEventPosting: AnyObject {
             (_ postPair: () -> Void) -> Bool
         )
     ) -> FinalTextCurrentFocusPostResult
+    func postReviewUnicodePair(
+        _ text: String,
+        to processIdentifier: pid_t,
+        postPairIfPreflightRemainsValid pairGate: (
+            (_ postPair: @escaping () -> Void
+            ) -> Bool
+        ),
+        validateAfterPosting: () -> ReviewCurrentFocusValidation
+    ) -> ReviewUnicodeOutputResult
 }
 
 extension FinalTextCurrentFocusEventPosting {
@@ -416,6 +472,37 @@ extension FinalTextCurrentFocusEventPosting {
             to: processIdentifier
         )
     }
+
+    func postReviewUnicodePair(
+        _ text: String,
+        to processIdentifier: pid_t,
+        postPairIfPreflightRemainsValid pairGate: (
+            (_ postPair: @escaping () -> Void
+            ) -> Bool
+        ),
+        validateAfterPosting: () -> ReviewCurrentFocusValidation
+        ) -> ReviewUnicodeOutputResult {
+        guard processIdentifier > 0,
+              TextInputSimulator.isSafeForReviewConfirmation(text) else {
+            return .failedBeforeSubmission(.unsafeText)
+        }
+        var postResult: FinalTextCurrentFocusPostResult = .deliveryFailed
+        guard pairGate({
+            postResult = self.postUnicodeText(text, to: processIdentifier)
+        }) else {
+            return .failedBeforeSubmission(.preflightRejected)
+        }
+        switch postResult {
+        case .posted:
+            return validateAfterPosting() == .valid
+                ? .submittedUnverified(.valid)
+                : .submittedUnverified(.uncertain)
+        case .securityRejected:
+            return .failedBeforeSubmission(.secureInput)
+        case .deliveryFailed:
+            return .failedBeforeSubmission(.constructionFailed)
+        }
+    }
 }
 
 nonisolated enum FinalTextCurrentFocusPostResult: Equatable, Sendable {
@@ -434,6 +521,18 @@ protocol FinalTextUnicodeEventSourceHandle: AnyObject {}
 
 @MainActor
 protocol FinalTextUnicodeEventHandle: AnyObject {}
+
+@MainActor
+struct FinalTextUnicodeReadback {
+    let event: any FinalTextUnicodeEventHandle
+    let source: any FinalTextUnicodeEventSourceHandle
+    let expectedPhase: FinalTextUnicodeEventPhase
+    let expectedUTF16: [UInt16]
+    let expectedFlags: CGEventFlags
+    let expectedUserData: Int64
+    let expectedSourceProcessIdentifier: pid_t
+    let expectedTargetProcessIdentifier: pid_t
+}
 
 @MainActor
 protocol FinalTextUnicodeEventBackend: AnyObject {
@@ -456,6 +555,11 @@ protocol FinalTextUnicodeEventBackend: AnyObject {
         _ userData: Int64,
         for event: any FinalTextUnicodeEventHandle
     )
+    func setTargetProcessIdentifier(
+        _ processIdentifier: pid_t,
+        for event: any FinalTextUnicodeEventHandle
+    )
+    func readbackEvent(_ expectation: FinalTextUnicodeReadback) -> Bool
     func postUnicodeEvent(
         _ event: any FinalTextUnicodeEventHandle,
         to processIdentifier: pid_t
@@ -476,10 +580,71 @@ extension FinalTextUnicodeEventBackend {
         _: Int64,
         for _: any FinalTextUnicodeEventHandle
     ) {}
+
+    /// Compatibility default for pre-v4 fakes. The production backend below
+    /// overrides this with a complete CoreGraphics readback; new fakes should
+    /// override it as well so missing provenance capability fails closed.
+    func setTargetProcessIdentifier(
+        _: pid_t,
+        for _: any FinalTextUnicodeEventHandle
+    ) {}
+
+    func readbackEvent(_: FinalTextUnicodeReadback) -> Bool {
+        false
+    }
 }
 
 nonisolated enum FeishuSpeechSyntheticEventTag {
     static let value: Int64 = 0x4653_5350_4545_4348
+
+    /// Synthetic identity is deliberately conjunctive. A fixed public tag is
+    /// not sufficient to suppress physical-input interference from a foreign
+    /// or malformed event source.
+    static func isSelfIdentified(_ event: CGEvent) -> Bool {
+        event.getIntegerValueField(.eventSourceUserData) == value
+            && event.getIntegerValueField(.eventSourceUnixProcessID) == Int64(getpid())
+    }
+}
+
+nonisolated enum ReviewUnicodeSubmissionPhase: Equatable, Sendable {
+    case notStarted
+    case submissionBoundaryCrossed
+}
+
+/// Dependency-free fault and cancellation seams for the review pair. The
+/// production value performs no mutation and reports the live task state;
+/// tests may replace individual hooks without changing the transaction order.
+@MainActor
+struct ReviewUnicodePosterHooks {
+    let beforeBuild: () -> Bool
+    let afterBuild: () -> Bool
+    let beforeDown: () -> Bool
+    let afterDown: () -> Bool
+    let beforeUp: () -> Bool
+    let afterUp: () -> Bool
+    let postflight: () -> Bool
+    let cancellation: () -> Bool
+
+    init(
+        beforeBuild: @escaping () -> Bool = { true },
+        afterBuild: @escaping () -> Bool = { true },
+        beforeDown: @escaping () -> Bool = { true },
+        afterDown: @escaping () -> Bool = { true },
+        beforeUp: @escaping () -> Bool = { true },
+        afterUp: @escaping () -> Bool = { true },
+        postflight: @escaping () -> Bool = { true },
+        cancellation: @escaping () -> Bool = { Task.isCancelled }
+    ) {
+        self.beforeBuild = beforeBuild
+        self.afterBuild = afterBuild
+        self.beforeDown = beforeDown
+        self.afterDown = afterDown
+        self.beforeUp = beforeUp
+        self.afterUp = afterUp
+        self.postflight = postflight
+        self.cancellation = cancellation
+    }
+
 }
 
 @MainActor
@@ -498,60 +663,232 @@ protocol ReviewCurrentFocusEnvironmentProviding: AnyObject {
     var reviewFrontmostProcessProvider: FrontmostProcessProviding { get }
 }
 
+/// Marker implementations retained only so older dependency-injection call
+/// sites can compile. Review output never reads or writes a pasteboard and
+/// never emits a virtual-key command event.
 @MainActor
-private final class SystemFinalTextPasteboardWriter: FinalTextPasteboardWriting {
-    func replaceContents(with text: String) -> Bool {
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        return pasteboard.setString(text, forType: .string)
-    }
-}
+private final class ReviewOutputCompatibilityWriter: FinalTextPasteboardWriting {}
 
 @MainActor
-private final class SystemFinalTextKeyEventPoster: FinalTextKeyEventPosting {
-    func postCommandV(to processIdentifier: pid_t) -> Bool {
-        guard let source = CGEventSource(stateID: .hidSystemState),
-              let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: true),
-              let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: false) else {
-            return false
-        }
-        keyDown.flags = .maskCommand
-        keyUp.flags = .maskCommand
-        keyDown.postToPid(processIdentifier)
-        keyUp.postToPid(processIdentifier)
-        return true
-    }
-}
+private final class ReviewOutputCompatibilityPoster: FinalTextKeyEventPosting {}
 
 @MainActor
 final class SystemFinalTextCurrentFocusEventPoster: FinalTextCurrentFocusEventPosting {
     private let backend: FinalTextUnicodeEventBackend
     private let secureInputStateProvider: SecureInputStateProviding
+    private let hooks: ReviewUnicodePosterHooks
 
     convenience init() {
         self.init(
             backend: SystemFinalTextUnicodeEventBackend(),
-            secureInputStateProvider: SystemSecureInputStateProvider()
+            secureInputStateProvider: SystemSecureInputStateProvider(),
+            hooks: ReviewUnicodePosterHooks()
         )
     }
 
     init(
         backend: FinalTextUnicodeEventBackend,
-        secureInputStateProvider: SecureInputStateProviding
+        secureInputStateProvider: SecureInputStateProviding,
+        hooks: ReviewUnicodePosterHooks? = nil
     ) {
         self.backend = backend
         self.secureInputStateProvider = secureInputStateProvider
+        self.hooks = hooks ?? ReviewUnicodePosterHooks()
+    }
+
+    private struct PreparedReviewUnicodePair {
+        let keyDown: any FinalTextUnicodeEventHandle
+        let keyUp: any FinalTextUnicodeEventHandle
+    }
+
+    private enum ReviewUnicodePreparation {
+        case ready(PreparedReviewUnicodePair)
+        case failed(ReviewUnicodeOutputResult)
+    }
+
+    private struct ReviewUnicodeSubmissionState {
+        var phase = ReviewUnicodeSubmissionPhase.notStarted
+        var postAttemptHadFault = false
+        var postPairWasEntered = false
+        var preBoundaryFailure = false
     }
 
     func postUnicodeText(
         _ text: String,
         to processIdentifier: pid_t
     ) -> FinalTextCurrentFocusPostResult {
-        postReplacement(
-            deleteCharacterCount: 0,
-            insertText: text,
-            to: processIdentifier
-        )
+        switch postReviewUnicodePair(
+            text,
+            to: processIdentifier,
+            postPairIfPreflightRemainsValid: { postPair in
+                postPair()
+                return true
+            },
+            validateAfterPosting: { .valid }
+        ) {
+        case .failedBeforeSubmission(let failure):
+            switch failure {
+            case .secureInput:
+                return .securityRejected
+            default:
+                return .deliveryFailed
+            }
+        case .cancelledBeforeSubmission:
+            return .deliveryFailed
+        case .submittedUnverified(.valid):
+            return .posted
+        case .submittedUnverified(.uncertain):
+            return .deliveryFailed
+        }
+    }
+
+    /// Posts exactly one fully prepared Unicode key-down/key-up pair. The
+    /// complete pair is constructed, tagged, targeted, and read back before
+    /// the first post. `submissionBoundaryCrossed` is set at the down call;
+    /// every path after that boundary attempts the up event and returns
+    /// `submittedUnverified`, never cancellation.
+    func postReviewUnicodePair(
+        _ text: String,
+        to processIdentifier: pid_t,
+        postPairIfPreflightRemainsValid pairGate: (
+            (_ postPair: @escaping () -> Void
+            ) -> Bool
+        ),
+        validateAfterPosting: () -> ReviewCurrentFocusValidation
+    ) -> ReviewUnicodeOutputResult {
+        switch prepareReviewUnicodePair(text, processIdentifier: processIdentifier) {
+        case .failed(let result):
+            return result
+        case .ready(let preparedPair):
+            guard !secureInputStateProvider.isSecureInputEnabled() else {
+                return .failedBeforeSubmission(.secureInput)
+            }
+            return submitReviewUnicodePair(
+                preparedPair,
+                to: processIdentifier,
+                pairGate: pairGate,
+                validateAfterPosting: validateAfterPosting
+            )
+        }
+    }
+
+    private func prepareReviewUnicodePair(
+        _ text: String,
+        processIdentifier: pid_t
+    ) -> ReviewUnicodePreparation {
+        guard processIdentifier > 0,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return .failed(.failedBeforeSubmission(.unsafeText))
+        }
+        guard TextInputSimulator.isSafeForReviewConfirmation(text) else {
+            return .failed(.failedBeforeSubmission(.unsafeText))
+        }
+        guard text.utf16.count <= TextInputSimulator.reviewMaximumUTF16CodeUnits else {
+            return .failed(.failedBeforeSubmission(.draftTooLong))
+        }
+        guard !hooks.cancellation() else {
+            return .failed(.cancelledBeforeSubmission)
+        }
+        guard hooks.beforeBuild() else {
+            return .failed(.failedBeforeSubmission(.constructionFailed))
+        }
+
+        let utf16 = Array(text.utf16)
+        guard let source = backend.makeEventSource(stateID: .privateState),
+              let keyDown = backend.makeUnicodeEvent(
+                  source: source,
+                  phase: .keyDown,
+                  utf16: utf16,
+                  flags: []
+              ),
+              let keyUp = backend.makeUnicodeEvent(
+                  source: source,
+                  phase: .keyUp,
+                  utf16: utf16,
+                  flags: []
+              ) else {
+            return .failed(.failedBeforeSubmission(.constructionFailed))
+        }
+
+        let events: [(any FinalTextUnicodeEventHandle, FinalTextUnicodeEventPhase)] = [
+            (keyDown, .keyDown),
+            (keyUp, .keyUp)
+        ]
+        for (event, _) in events {
+            backend.setUserData(FeishuSpeechSyntheticEventTag.value, for: event)
+            backend.setTargetProcessIdentifier(processIdentifier, for: event)
+        }
+        guard events.allSatisfy({ event, expectedPhase in
+            backend.readbackEvent(FinalTextUnicodeReadback(
+                event: event,
+                source: source,
+                expectedPhase: expectedPhase,
+                expectedUTF16: utf16,
+                expectedFlags: [],
+                expectedUserData: FeishuSpeechSyntheticEventTag.value,
+                expectedSourceProcessIdentifier: getpid(),
+                expectedTargetProcessIdentifier: processIdentifier
+            ))
+        }) else {
+            return .failed(.failedBeforeSubmission(.provenanceMismatch))
+        }
+        guard hooks.afterBuild() else {
+            return .failed(.failedBeforeSubmission(.constructionFailed))
+        }
+        return .ready(PreparedReviewUnicodePair(keyDown: keyDown, keyUp: keyUp))
+    }
+
+    private func submitReviewUnicodePair(
+        _ preparedPair: PreparedReviewUnicodePair,
+        to processIdentifier: pid_t,
+        pairGate: (
+            (_ postPair: @escaping () -> Void
+            ) -> Bool
+        ),
+        validateAfterPosting: () -> ReviewCurrentFocusValidation
+    ) -> ReviewUnicodeOutputResult {
+        var state = ReviewUnicodeSubmissionState()
+        let entered = pairGate { [self] in
+            guard !self.hooks.cancellation(), self.hooks.beforeDown() else {
+                state.preBoundaryFailure = true
+                return
+            }
+            self.backend.postUnicodeEvent(preparedPair.keyDown, to: processIdentifier)
+            state.phase = .submissionBoundaryCrossed
+            state.postPairWasEntered = true
+
+            // The boundary is irreversible. These hooks may report a fault,
+            // but they must never suppress the mandatory key-up attempt.
+            if !self.hooks.afterDown() { state.postAttemptHadFault = true }
+            if !self.hooks.beforeUp() { state.postAttemptHadFault = true }
+            self.backend.postUnicodeEvent(preparedPair.keyUp, to: processIdentifier)
+            if !self.hooks.afterUp() { state.postAttemptHadFault = true }
+        }
+
+        guard state.postPairWasEntered,
+              state.phase == .submissionBoundaryCrossed else {
+            return preBoundaryResult(entered: entered, state: state)
+        }
+
+        let postflight = validateAfterPosting()
+        guard !state.postAttemptHadFault,
+              !hooks.cancellation(),
+              hooks.postflight(),
+              postflight == .valid else {
+            return .submittedUnverified(.uncertain)
+        }
+        return .submittedUnverified(.valid)
+    }
+
+    private func preBoundaryResult(
+        entered: Bool,
+        state: ReviewUnicodeSubmissionState
+    ) -> ReviewUnicodeOutputResult {
+        guard !hooks.cancellation() else {
+            return .cancelledBeforeSubmission
+        }
+        let rejected = state.preBoundaryFailure || !entered
+        return .failedBeforeSubmission(rejected ? .preflightRejected : .constructionFailed)
     }
 
     func postReplacement(
@@ -696,12 +1033,21 @@ private final class SystemFinalTextUnicodeEventBackend: FinalTextUnicodeEventBac
                 keyboardEventSource: source.source,
                 virtualKey: 0,
                 keyDown: phase == .keyDown
-              ) else {
+        ) else {
             return nil
         }
         event.flags = flags
+        event.setIntegerValueField(
+            .eventSourceUnixProcessID,
+            value: Int64(getpid())
+        )
         event.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: utf16)
-        return SystemFinalTextUnicodeEventHandle(event: event)
+        return SystemFinalTextUnicodeEventHandle(
+            event: event,
+            phase: phase,
+            utf16: utf16,
+            source: source
+        )
     }
 
     func makeKeyboardEvent(
@@ -715,11 +1061,21 @@ private final class SystemFinalTextUnicodeEventBackend: FinalTextUnicodeEventBac
                 keyboardEventSource: source.source,
                 virtualKey: virtualKey,
                 keyDown: phase == .keyDown
-              ) else {
+        ) else {
             return nil
         }
         event.flags = flags
-        return SystemFinalTextUnicodeEventHandle(event: event)
+        event.setIntegerValueField(
+            .eventSourceUnixProcessID,
+            value: Int64(getpid())
+        )
+        return SystemFinalTextUnicodeEventHandle(
+            event: event,
+            phase: phase,
+            utf16: [],
+            source: source,
+            virtualKey: virtualKey
+        )
     }
 
     func setUserData(
@@ -730,12 +1086,58 @@ private final class SystemFinalTextUnicodeEventBackend: FinalTextUnicodeEventBac
         event.event.setIntegerValueField(.eventSourceUserData, value: userData)
     }
 
+    func setTargetProcessIdentifier(
+        _ processIdentifier: pid_t,
+        for event: any FinalTextUnicodeEventHandle
+    ) {
+        guard let event = event as? SystemFinalTextUnicodeEventHandle else { return }
+        event.targetProcessIdentifier = processIdentifier
+    }
+
+    func readbackEvent(_ expectation: FinalTextUnicodeReadback) -> Bool {
+        guard let event = expectation.event as? SystemFinalTextUnicodeEventHandle,
+              let expectedSource = expectation.source as? SystemFinalTextUnicodeEventSourceHandle,
+              event.source === expectedSource,
+              event.phase == expectation.expectedPhase,
+              event.targetProcessIdentifier == expectation.expectedTargetProcessIdentifier,
+              event.event.flags == expectation.expectedFlags,
+              event.event.getIntegerValueField(.eventSourceUserData)
+                == expectation.expectedUserData,
+              event.event.getIntegerValueField(.eventSourceUnixProcessID)
+                == Int64(expectation.expectedSourceProcessIdentifier) else {
+            return false
+        }
+
+        guard expectation.expectedPhase == event.phase else { return false }
+        guard expectation.expectedUTF16 == event.utf16 else { return false }
+        guard expectation.expectedUTF16.isEmpty
+                || readbackUnicodeString(from: event.event) == expectation.expectedUTF16 else {
+            return false
+        }
+        return true
+    }
+
     func postUnicodeEvent(
         _ event: any FinalTextUnicodeEventHandle,
         to processIdentifier: pid_t
     ) {
         guard let event = event as? SystemFinalTextUnicodeEventHandle else { return }
         event.event.postToPid(processIdentifier)
+    }
+
+    private func readbackUnicodeString(from event: CGEvent) -> [UInt16] {
+        var actualLength = 0
+        let capacity = max(1, TextInputSimulator.reviewMaximumUTF16CodeUnits)
+        var buffer = [UniChar](repeating: 0, count: capacity)
+        buffer.withUnsafeMutableBufferPointer { buffer in
+            event.keyboardGetUnicodeString(
+                maxStringLength: buffer.count,
+                actualStringLength: &actualLength,
+                unicodeString: buffer.baseAddress
+            )
+        }
+        guard actualLength >= 0, actualLength <= buffer.count else { return [] }
+        return Array(buffer.prefix(actualLength))
     }
 }
 
@@ -751,9 +1153,24 @@ private final class SystemFinalTextUnicodeEventSourceHandle: FinalTextUnicodeEve
 @MainActor
 private final class SystemFinalTextUnicodeEventHandle: FinalTextUnicodeEventHandle {
     let event: CGEvent
+    let phase: FinalTextUnicodeEventPhase
+    let utf16: [UInt16]
+    let source: SystemFinalTextUnicodeEventSourceHandle
+    let virtualKey: CGKeyCode?
+    var targetProcessIdentifier: pid_t?
 
-    init(event: CGEvent) {
+    init(
+        event: CGEvent,
+        phase: FinalTextUnicodeEventPhase,
+        utf16: [UInt16],
+        source: SystemFinalTextUnicodeEventSourceHandle,
+        virtualKey: CGKeyCode? = nil
+    ) {
         self.event = event
+        self.phase = phase
+        self.utf16 = utf16
+        self.source = source
+        self.virtualKey = virtualKey
     }
 }
 
@@ -772,6 +1189,8 @@ final class SystemFrontmostProcessProvider: FrontmostProcessProviding {
 }
 
 enum TextInputSimulator {
+    static let reviewMaximumUTF16CodeUnits = 16_384
+
     static func isSafeForAutomaticPaste(_ text: String) -> Bool {
         !text.unicodeScalars.contains { scalar in
             scalar.value < 0x20 || scalar.value == 0x7F || (0x80 ... 0x9F).contains(scalar.value)
@@ -780,7 +1199,7 @@ enum TextInputSimulator {
 
     /// Review confirmation preserves the exact multiline draft. LF is the only
     /// control scalar admitted here; tabs, CR, NUL, DEL, and C1 controls remain
-    /// rejected before any destination or pasteboard mutation.
+    /// rejected before destination validation or event construction.
     static func isSafeForReviewConfirmation(_ text: String) -> Bool {
         !text.unicodeScalars.contains { scalar in
             let value = scalar.value
@@ -800,45 +1219,4 @@ enum TextInputSimulator {
     static func isSafeForAutomaticKeyboardEventText(_ text: String) -> Bool {
         isSafeForAutomaticPaste(text)
     }
-
-    /// Captures all data-bearing types from every existing pasteboard item for
-    /// the review-confirmation transaction.
-    fileprivate static func captureReviewPasteboardSnapshot() -> [[String: Data]] {
-        (NSPasteboard.general.pasteboardItems ?? []).map { item in
-            var dataByType: [String: Data] = [:]
-            for pasteboardType in item.types {
-                if let data = item.data(forType: pasteboardType) {
-                    dataByType[pasteboardType.rawValue] = data
-                }
-            }
-            return dataByType
-        }
-    }
-
-    /// Restores the full review snapshot only while the paste written by this
-    /// process is still the current pasteboard contents.
-    fileprivate static func restoreReviewPasteboardSnapshot(
-        _ snapshot: [[String: Data]],
-        ifChangeCount expectedChangeCount: Int
-    ) {
-        let pasteboard = NSPasteboard.general
-        guard pasteboard.changeCount == expectedChangeCount else {
-            logger.debug("Review pasteboard changed before restoration; leaving it untouched")
-            return
-        }
-
-        let restoredItems = snapshot.map { dataByType -> NSPasteboardItem in
-            let item = NSPasteboardItem()
-            for (rawType, data) in dataByType {
-                item.setData(data, forType: NSPasteboard.PasteboardType(rawValue: rawType))
-            }
-            return item
-        }
-        pasteboard.clearContents()
-        if !restoredItems.isEmpty {
-            pasteboard.writeObjects(restoredItems)
-        }
-        logger.debug("Restored \(restoredItems.count) review pasteboard item(s)")
-    }
-
 }

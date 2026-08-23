@@ -3,6 +3,7 @@ import Combine
 @testable import FeishuSpeech
 import Foundation
 import os.log
+import SwiftUI
 import XCTest
 
 private let logger = Logger(
@@ -12,69 +13,6 @@ private let logger = Logger(
 
 @MainActor
 final class StreamingMainViewModelTests: XCTestCase {
-    private let retiredCompatibilityOutputTests: Set<String> = [
-        "test_appendFactoryMissPreservesNoOutputAcrossSealedRecovery",
-        "test_appendNoUsableTerminalTextAfterSealedRecoveryClosesOwnerWithFeedback",
-        "test_appendPreservationFinalOutcomesPublishOneTranscriptFreeCompletion",
-        "test_appendSecurityRejectionTerminatesImmediatelyWithFixedSecurityError",
-        "test_autoInsertFalseCreatesNoAppendSessionAndSuccessfulAXRebindDoesNotUseIt",
-        "test_axOwnerDriftBeforeDifferingActionTwoPreservesPartialAndPublishesNonSuccess",
-        "test_contentlessUpdatePreservesOwnerAcrossSealedRecoveryAndAuthoritativeFinal",
-        "test_delayedFactoryReadySendsJournalIndexZeroThenLiveTailWithoutReowningHistory",
-        "test_disjointLivePacketResponsesOfferCompleteSnapshotsWhileFnRemainsHeld",
-        "test_distinctLivePacketIndicesOfferOnlyChangedCompleteSnapshots",
-        "test_emptyFinalAndStreamFailurePreserveVerifiedPartial",
-        "test_emptyFinalNeverCreatesFinalOnlyOutputAndClosesOwnerWithHeldSnapshot",
-        "test_equalTextOnDistinctLivePacketIndicesIsOwnedButOfferedOnce",
-        "test_failedUnboundRebindIsAttemptedOnceAndAutoInsertFalseDoesNotRebind",
-        "test_finishReadyAtDrainDeadlineCannotReplaceCommittedPartialBeforeExpiryTaskRuns",
-        "test_firstPartialFinalOnlyRebindArmsAppendAndCommitsAuthoritativeFinal",
-        "test_firstPartialSecureRebindRevokesPrearmedOwnerWithoutAppendOrFallbackOutput",
-        "test_hangingFactoryTimesOutAsRecoverableAndSuccessorLeavesSilentActiveState",
-        "test_hotKeyFailureDuringHeldSealingRevokesAppendWriterAndCancelsTransportBeforeBarrier",
-        "test_ineligibleEventsNeverAdvanceTheLatestSnapshot",
-        "test_ineligiblePacketStillReservesItsIndexAgainstChangedHistoricalReplay",
-        "test_initialAndReboundFinalOnlyAttemptOrUncertaintyNeverCopiesOrResendsFullText",
-        "test_initialAndReboundUnsafeFinalUsesPrearmedOwnerWithoutPostingOrCopying",
-        "test_initialFinalOnlyArmsAppendAndCommitsEqualAuthoritativeFinalWithoutDuplicateOutput",
-        "test_initialFinalOnlyFocusedElementDriftFailsClosedWithoutAppendOrRecoveryOutput",
-        "test_initialFinalOnlyResetInvalidatesOwnerBeforeLateCallbacks",
-        "test_initialFinalOnlyRetryKeepsCapturedOwnershipAtChangedReplaySnapshot",
-        "test_initialFinalOnlyTerminalFinalizeOccursOnceAndPostCleanupCallbacksStaySuppressed",
-        "test_liveAXOwnerReceivesEachCompleteSnapshotForDisjointPacketResponses",
-        "test_liveModeOffersHeldSnapshotThenCommitsAuthoritativeFinalOnCapturedElement",
-        "test_noOwnerCompletionRemainsSilentWhileEmptyHeldOwnerPublishesBoundedFeedback",
-        "test_postReleaseDrainExpiryMapsUncertainKeyboardDeliveryToProvisionalPreserved",
-        "test_postReleaseDrainExpiryPreservesOutputAndSuppressesLatePacketCompletion",
-        "test_recoverableFinishAfterSealRetriesJournalAndAcceptsSuccessorFinal",
-        "test_recoverableMidStreamFailureReplaysJournalThenResumesSameGeneration",
-        "test_releaseActionTwoUsesPrearmedOwnerForTerminalOnlyAndOwnedSnapshotReplacement",
-        "test_releaseDrainsInFlightPacketThenAppliesAuthoritativeFinalOnAXRoute",
-        "test_releaseDuringRecoverableBackoffReplaysCapturedPacketAndFinishesSuccessor",
-        "test_releaseDuringRetryBackoffAdmitsSuccessorAndFinishesCapturedJournal",
-        "test_releaseFinalizesKeyboardReplacementWithAuthoritativeActionTwoTextExactlyOnce",
-        "test_releaseKeepsTerminalAdmissionOpenThenSuppressesPostCleanupCallbacks",
-        "test_repeatedRecoverableSessionFactoryFailuresBackOffWithoutEarlyError",
-        "test_resetDuringHeldSealingRevokesLiveWriterAndCancelsTransportBeforeRecorderBarrier",
-        "test_retryOwnsOnlyThePreviouslyFailedJournalIndexAndNeverReownsHistory",
-        "test_retryReplaySuppressesHistoricalPacketsAndReconcilesFirstNewSnapshotOnce",
-        "test_staleReleaseDoesNotWriteWhileEmptyFinalPublishesTranscriptFreeFeedback",
-        "test_successfulPacketAfterRepeatedBackend10024ResetsRetryBackoffStreak",
-        "test_trulyUnboundModeOffersChangedCompleteSnapshotsBeforeRelease",
-        "test_unboundAuthoritativeFinalUsesExistingOwnerWhileEmptyFinalPreservesSnapshot",
-        "test_unboundFirstPartialRebindsOnceAndCommitsAuthoritativeFinalOnSameBinding",
-        "test_unboundRetryKeepsOwnershipAndPublishesOnlyChangedReplaySnapshot"
-    ]
-
-    override func setUpWithError() throws {
-        try super.setUpWithError()
-        if retiredCompatibilityOutputTests.contains(where: { name.contains($0) }) {
-            throw XCTSkip(
-                "Retired obsolete direct-output MainViewModel oracle; canonical preview route is covered by ReviewFirstMainViewModelTests"
-            )
-        }
-    }
-
     override func tearDown() async throws {
         HotKeyService.shared.resetToIdle()
         PermissionManager.shared.resetStateForTesting()
@@ -306,12 +244,12 @@ final class StreamingMainViewModelTests: XCTestCase {
         await waitUntil { await context.session.sendCallCount == 1 }
         context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
         await waitUntil { await context.session.finishCallCount == 1 }
+        await settle()
 
-        XCTAssertEqual(
-            context.accessibility.setSelectedTextCalls,
-            ["PRIVATE_PARTIAL", "PRIVATE_FINAL"]
-        )
-        XCTAssertEqual(context.accessibility.captureCount, 1)
+        XCTAssertEqual(context.accessibility.setSelectedTextCalls, [])
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("PRIVATE_PARTIAL"))
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("PRIVATE_FINAL"))
+        XCTAssertEqual(context.reviewDelivery.captureCallCount, 1)
         XCTAssertEqual(context.output.insertedTexts, [])
         XCTAssertEqual(context.output.copiedTexts, [])
         XCTAssertFalse(containsTranscript(context.viewModel, transcript: "PRIVATE_PARTIAL"))
@@ -328,15 +266,16 @@ final class StreamingMainViewModelTests: XCTestCase {
         let identity = StreamingSessionIdentity(generation: 4_101)
 
         await runOnePacketInteraction(context, identity: identity)
-        XCTAssertEqual(context.accessibility.rangeText, "held partial")
+        await settle()
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("held partial"))
         context.accessibility.selectedRange = CursorTextRange(location: 999, length: 0)
 
         context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
         await waitUntil { context.viewModel.activeSessionIdentityForTesting == nil }
 
-        XCTAssertEqual(context.accessibility.setSelectedTextCalls, ["held partial"])
-        XCTAssertEqual(context.accessibility.rangeText, "held partial")
-        XCTAssertEqual(context.overlayPresenter.completionFeedbacks, [.provisionalOutputPreserved])
+        XCTAssertEqual(context.accessibility.setSelectedTextCalls, [])
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("held partial"))
+        XCTAssertEqual(context.overlayPresenter.completionFeedbacks, [])
         XCTAssertFalse(surface.states.contains(where: isError))
         XCTAssertFalse(surface.states.contains { $0.text.contains("held partial") })
         XCTAssertFalse(surface.states.contains { $0.text.contains("authoritative final") })
@@ -385,13 +324,15 @@ final class StreamingMainViewModelTests: XCTestCase {
 
         context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
         await waitUntil { await context.provider.makeSessionCallCount == 1 }
-        XCTAssertEqual(context.appendFactory.makeSessionCallCount, 1)
+        XCTAssertEqual(context.appendFactory.makeSessionCallCount, 0)
 
         context.recorder.emit(Data(repeating: 0x11, count: 6_400))
         await waitUntil { await context.transport.sendCallCount == 1 }
+        await settle()
 
-        XCTAssertEqual(context.appendSession.appliedTexts, ["PRIVATE_PARTIAL"])
-        XCTAssertEqual(context.appendSession.appliedSources, ["live"])
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("PRIVATE_PARTIAL"))
+        XCTAssertEqual(context.appendSession.appliedTexts, [])
+        XCTAssertEqual(context.appendSession.appliedSources, [])
         XCTAssertEqual(context.appendSession.finalizeCallCount, 0)
         XCTAssertEqual(context.recorder.stopStreamingCallCount, 0, "release must not be the first insertion")
         XCTAssertEqual(context.output.syntheticInputCallCount, 0)
@@ -401,9 +342,9 @@ final class StreamingMainViewModelTests: XCTestCase {
         context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
         await waitUntil { await context.transport.finishCallCount == 1 }
 
-        XCTAssertEqual(context.appendSession.finalizeCallCount, 1)
-        XCTAssertEqual(context.appendSession.finalTexts, ["PRIVATE_PARTIAL"])
-        XCTAssertEqual(context.appendSession.lastAcceptedTexts, ["PRIVATE_PARTIAL"])
+        XCTAssertEqual(context.appendSession.finalizeCallCount, 0)
+        XCTAssertEqual(context.appendSession.finalTexts, [])
+        XCTAssertEqual(context.appendSession.lastAcceptedTexts, [])
         XCTAssertEqual(context.output.insertedTexts, [])
         XCTAssertEqual(context.output.copiedTexts, [])
         XCTAssertEqual(context.accessibility.setSelectedTextCalls, [])
@@ -423,7 +364,7 @@ final class StreamingMainViewModelTests: XCTestCase {
 
         context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
         await waitUntil { await context.provider.makeSessionCallCount == 1 }
-        XCTAssertEqual(context.appendFactory.makeSessionCallCount, 1)
+        XCTAssertEqual(context.appendFactory.makeSessionCallCount, 0)
 
         context.accessibility.currentFocusedElement = AXUIElementCreateApplication(99)
         context.recorder.emit(Data(repeating: 0x12, count: 6_400))
@@ -641,8 +582,13 @@ final class StreamingMainViewModelTests: XCTestCase {
             context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
             await waitUntil { await context.session.finishCallCount == 1 }
 
-            XCTAssertEqual(context.accessibility.rangeText, "PRIVATE_VISIBLE_PARTIAL")
-            XCTAssertEqual(context.accessibility.setSelectedTextCalls, ["PRIVATE_VISIBLE_PARTIAL"])
+            XCTAssertEqual(context.accessibility.setSelectedTextCalls, [])
+            XCTAssertTrue(
+                context.reviewPresenter.presentedTexts.contains("PRIVATE_VISIBLE_PARTIAL")
+            )
+            XCTAssertTrue(
+                context.reviewPresenter.presentedTexts.contains("PRIVATE_VISIBLE_PARTIAL")
+            )
             XCTAssertEqual(context.output.insertedTexts, [])
             XCTAssertEqual(context.output.copiedTexts, [])
             XCTAssertFalse(containsTranscript(context.viewModel, transcript: "PRIVATE_VISIBLE_PARTIAL"))
@@ -678,13 +624,16 @@ final class StreamingMainViewModelTests: XCTestCase {
         empty.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: emptyIdentity))
         await waitUntil { empty.viewModel.status == .idle }
 
-        XCTAssertEqual(empty.accessibility.rangeText, "PRIVATE_VISIBLE_PARTIAL")
+        XCTAssertEqual(empty.accessibility.setSelectedTextCalls, [])
+        XCTAssertTrue(
+            empty.reviewPresenter.presentedTexts.contains("PRIVATE_VISIBLE_PARTIAL")
+        )
         XCTAssertFalse(
             emptySurface.states.contains { $0.text.contains("PRIVATE_VISIBLE_PARTIAL") },
             "release-only finalization must not expose the held frontier in feedback"
         )
-        XCTAssertEqual(empty.overlayPresenter.completionFeedbacks, [.emptyFinalPreservedPartial])
-        XCTAssertEqual(empty.overlayPresenter.lastCompletionFeedback, .emptyFinalPreservedPartial)
+        XCTAssertEqual(empty.overlayPresenter.completionFeedbacks, [])
+        XCTAssertNil(empty.overlayPresenter.lastCompletionFeedback)
         XCTAssertFalse(emptySurface.states.contains(where: isError))
     }
 
@@ -715,9 +664,9 @@ final class StreamingMainViewModelTests: XCTestCase {
         empty.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: emptyIdentity))
         await waitUntil { empty.viewModel.status == .idle }
 
-        XCTAssertEqual(empty.overlayPresenter.completionFeedbacks, [.emptyFinalPreservedPartial])
-        XCTAssertEqual(empty.overlayPresenter.lastCompletionFeedback, .emptyFinalPreservedPartial)
-        XCTAssertEqual(empty.overlayPresenter.visibleStatus, .emptyFinalPreservedPartial)
+        XCTAssertEqual(empty.overlayPresenter.completionFeedbacks, [])
+        XCTAssertNil(empty.overlayPresenter.lastCompletionFeedback)
+        XCTAssertNil(empty.overlayPresenter.visibleStatus)
         XCTAssertFalse(visibleFeedback(empty.viewModel).contains("PRIVATE_VISIBLE_PARTIAL"))
     }
 
@@ -791,7 +740,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         context.recorder.emit(Data(repeating: 0xB1, count: 12_800))
         await waitUntil {
             await session.isHoldingSend &&
-                context.accessibility.setSelectedTextCalls == [initialText]
+                context.reviewPresenter.presentedTexts.contains(initialText)
         }
         context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: oldIdentity))
         await waitUntil { recorder.isHoldingStopBarrier }
@@ -810,8 +759,8 @@ final class StreamingMainViewModelTests: XCTestCase {
         let providerCallCountBeforeBarrier = await provider.makeSessionCallCount
         XCTAssertNil(context.viewModel.activeSessionIdentityForTesting)
         XCTAssertEqual(cancelCallCountBeforeBarrier, 1, "transport abort must not wait for recorder stop")
-        XCTAssertEqual(context.accessibility.setSelectedTextCalls, [initialText])
-        XCTAssertEqual(context.accessibility.rangeText, initialText)
+        XCTAssertEqual(context.accessibility.setSelectedTextCalls, [])
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains(initialText))
         XCTAssertEqual(context.output.insertedTexts, [])
         XCTAssertEqual(context.output.copiedTexts, [])
         XCTAssertEqual(providerCallCountBeforeBarrier, 1, "recorder latch must reject a successor")
@@ -875,7 +824,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: oldIdentity))
         context.recorder.emit(Data(repeating: 0xB2, count: 12_800))
         await waitUntil {
-            await session.isHoldingSend && appendSession.appliedTexts == [initialText]
+            await session.isHoldingSend && context.reviewPresenter.presentedTexts.contains(initialText)
         }
         context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: oldIdentity))
         await waitUntil { recorder.isHoldingStopBarrier }
@@ -890,9 +839,9 @@ final class StreamingMainViewModelTests: XCTestCase {
         let cancelCallCountBeforeBarrier = await session.cancelCallCount
         let providerCallCountBeforeBarrier = await provider.makeSessionCallCount
         XCTAssertNil(context.viewModel.activeSessionIdentityForTesting)
-        XCTAssertEqual(appendSession.invalidateCallCount, 1)
+        XCTAssertEqual(appendSession.invalidateCallCount, 0)
         XCTAssertEqual(cancelCallCountBeforeBarrier, 1, "transport abort must not wait for recorder stop")
-        XCTAssertEqual(appendSession.appliedTexts, [initialText])
+        XCTAssertEqual(appendSession.appliedTexts, [])
         XCTAssertEqual(appendSession.finalizeCallCount, 0)
         XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
         XCTAssertEqual(context.output.copiedTexts, [])
@@ -910,7 +859,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         let finalCancelCallCount = await session.cancelCallCount
         XCTAssertEqual(finalCancelCallCount, 1)
         XCTAssertNil(context.viewModel.activeSessionIdentityForTesting)
-        XCTAssertEqual(appendSession.invalidateCallCount, 1)
+        XCTAssertEqual(appendSession.invalidateCallCount, 0)
         XCTAssertFalse(visibleFeedback(context.viewModel).contains(lateFinal))
         XCTAssertEqual(recorder.finishedIngressIdentifiers, [recorder.startedIngressIdentifiers[0]])
         await context.viewModel.resetService()
@@ -1009,7 +958,8 @@ final class StreamingMainViewModelTests: XCTestCase {
         await waitUntil { await context.provider.makeSessionCallCount == 1 }
         context.recorder.emit(Data(repeating: 0x11, count: 6_400))
         await waitUntil { await first.sendCallCount == 1 }
-        XCTAssertEqual(context.accessibility.setSelectedTextCalls, ["first frontier"])
+        await settle()
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("first frontier"))
 
         context.recorder.emit(Data(repeating: 0x22, count: 6_400))
         await waitUntil { await sleeper.callCount == 1 }
@@ -1031,15 +981,10 @@ final class StreamingMainViewModelTests: XCTestCase {
         let replacementPacketFirstBytes = await replacement.packetFirstBytes
         XCTAssertEqual(providerCallCountAfterRetry, 2)
         XCTAssertEqual(replacementPacketFirstBytes, [0x11, 0x22, 0x33])
-        XCTAssertEqual(
-            context.accessibility.setSelectedTextCalls,
-            [
-                "first frontier",
-                "catch-up frontier",
-                "live frontier"
-            ],
-            "replay must suppress historical indices and offer each newly owned complete snapshot"
-        )
+        XCTAssertEqual(context.accessibility.setSelectedTextCalls, [])
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("first frontier"))
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("catch-up frontier"))
+        XCTAssertGreaterThan(context.reviewPresenter.presentationCount, 0)
         XCTAssertEqual(context.viewModel.activeSessionIdentityForTesting, identity)
         XCTAssertEqual(context.recorder.startStreamingCallCount, 1)
     }
@@ -1071,8 +1016,8 @@ final class StreamingMainViewModelTests: XCTestCase {
         await waitUntil { await context.provider.makeSessionCallCount == 3 }
         context.recorder.emit(Data(repeating: 0x44, count: 6_400))
         await waitUntil { await session.sendCallCount == 1 }
-
-        XCTAssertEqual(context.accessibility.setSelectedTextCalls, ["connected"])
+        await settle()
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("connected"))
         XCTAssertEqual(context.recorder.startStreamingCallCount, 1)
         XCTAssertEqual(context.viewModel.activeSessionIdentityForTesting, identity)
     }
@@ -1134,7 +1079,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         let successorSendCallCount = await successor.sendCallCount
         XCTAssertEqual(providerCallCount, 2)
         XCTAssertEqual(successorSendCallCount, 2)
-        XCTAssertEqual(context.accessibility.rangeText, "recovered final")
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("recovered final"))
         XCTAssertFalse(surface.states.contains(where: isError))
         XCTAssertEqual(context.overlayPresenter.completionFeedbacks, [])
     }
@@ -1274,26 +1219,23 @@ final class StreamingMainViewModelTests: XCTestCase {
             context.recorder.emit(Data(repeating: marker, count: 6_400))
         }
         await waitUntil { await context.session.sendCallCount == 3 }
+        await settle()
 
-        XCTAssertEqual(context.accessibility.captureCount, 2)
-        XCTAssertEqual(
-            context.accessibility.setSelectedTextCalls,
-            [
-                "a longer provisional value",
-                "short",
-                "revised frontier"
-            ]
+        XCTAssertEqual(context.reviewDelivery.captureCallCount, 1)
+        XCTAssertEqual(context.accessibility.setSelectedTextCalls, [])
+        XCTAssertTrue(
+            context.reviewPresenter.presentedTexts.contains("a longer provisional value")
         )
-        XCTAssertEqual(context.accessibility.rangeText, "revised frontier")
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("short"))
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("revised frontier"))
 
         context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
         await waitUntil { await context.session.finishCallCount == 1 }
+        await settle()
 
-        XCTAssertEqual(
-            context.accessibility.setSelectedTextCalls.last,
-            "final frontier"
-        )
-        XCTAssertEqual(context.accessibility.captureCount, 2, "action 2 must reuse the first-partial binding")
+        XCTAssertEqual(context.accessibility.setSelectedTextCalls, [])
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("final frontier"))
+        XCTAssertEqual(context.reviewDelivery.captureCallCount, 1, "review preview keeps the captured destination without rebinding")
         XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
         XCTAssertEqual(context.output.currentFocusInsertedTexts, [])
     }
@@ -1309,7 +1251,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         await waitUntil { await failed.provider.makeSessionCallCount == 1 }
         failed.recorder.emit(Data(repeating: 0x74, count: 12_800))
         await waitUntil { await failed.session.sendCallCount == 2 }
-        XCTAssertEqual(failed.accessibility.captureCount, 2)
+        XCTAssertEqual(failed.reviewDelivery.captureCallCount, 1)
 
         let disabled = makeContext(
             capability: .accessibilityUnavailable,
@@ -1323,7 +1265,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         disabled.recorder.emit(Data(repeating: 0x75, count: 6_400))
         await waitUntil { await disabled.session.sendCallCount == 1 }
 
-        XCTAssertEqual(disabled.accessibility.captureCount, 1)
+        XCTAssertEqual(disabled.reviewDelivery.captureCallCount, 1)
         XCTAssertEqual(disabled.accessibility.setSelectedTextCalls, [])
         XCTAssertEqual(disabled.output.currentFocusAttemptedTexts, [])
     }
@@ -1344,13 +1286,13 @@ final class StreamingMainViewModelTests: XCTestCase {
         await waitUntil { await context.provider.makeSessionCallCount == 1 }
         context.recorder.emit(Data(repeating: 0x81, count: 19_200))
         await waitUntil { await context.transport.sendCallCount == 3 }
+        await settle()
 
-        XCTAssertEqual(
-            context.appendSession.appliedTexts,
-            ["first", "first extension"]
-        )
-        XCTAssertEqual(context.appendSession.appliedSources, ["live", "live"])
-        XCTAssertEqual(context.appendFactory.makeSessionCallCount, 1)
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("first"))
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("first extension"))
+        XCTAssertEqual(context.appendSession.appliedTexts, [])
+        XCTAssertEqual(context.appendSession.appliedSources, [])
+        XCTAssertEqual(context.appendFactory.makeSessionCallCount, 0)
         XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
         XCTAssertEqual(context.output.copiedTexts, [])
         XCTAssertEqual(context.recorder.stopStreamingCallCount, 0, "release must not be first output")
@@ -1358,7 +1300,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
         await waitUntil { await context.transport.finishCallCount == 1 }
 
-        XCTAssertEqual(context.appendSession.finalizeCallCount, 1)
+        XCTAssertEqual(context.appendSession.finalizeCallCount, 0)
         XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
         XCTAssertEqual(context.output.copiedTexts, [])
     }
@@ -1383,21 +1325,12 @@ final class StreamingMainViewModelTests: XCTestCase {
         await waitUntil { await context.provider.makeSessionCallCount == 1 }
         context.recorder.emit(Data(repeating: 0xB1, count: 19_200))
         await waitUntil { await context.transport.sendCallCount == 3 }
+        await settle()
 
-        XCTAssertEqual(
-            context.unicodePoster.replacementRequests,
-            [
-                CoordinatorReplacementRequest(deleteCharacterCount: 0, insertText: "one"),
-                CoordinatorReplacementRequest(deleteCharacterCount: 3, insertText: "two"),
-                CoordinatorReplacementRequest(deleteCharacterCount: 2, insertText: "hree")
-            ],
-            "three complete live snapshots must reconcile in response order"
-        )
-        XCTAssertEqual(
-            context.unicodePoster.destinationProcessIdentifiers,
-            [42, 42, 42],
-            "response assembly must retain the captured PID for every suffix"
-        )
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("one"))
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("two"))
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("three"))
+        XCTAssertEqual(context.unicodePoster.replacementRequests, [])
         XCTAssertEqual(context.recorder.stopStreamingCallCount, 0, "all advances must occur during the hold")
         XCTAssertEqual(context.output.syntheticInputCallCount, 0)
         XCTAssertEqual(context.output.copiedTexts, [])
@@ -1417,13 +1350,11 @@ final class StreamingMainViewModelTests: XCTestCase {
         await waitUntil { await context.provider.makeSessionCallCount == 1 }
         context.recorder.emit(Data(repeating: 0xB2, count: 12_800))
         await waitUntil { await context.transport.sendCallCount == 2 }
+        await settle()
 
-        XCTAssertEqual(
-            context.appendSession.appliedTexts,
-            ["same"],
-            "packet ownership is independent, but equal complete snapshots must not retype"
-        )
-        XCTAssertEqual(context.appendSession.appliedSources, ["live"])
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("same"))
+        XCTAssertEqual(context.appendSession.appliedTexts, [])
+        XCTAssertEqual(context.appendSession.appliedSources, [])
 
         await context.viewModel.resetService()
     }
@@ -1446,13 +1377,13 @@ final class StreamingMainViewModelTests: XCTestCase {
         await waitUntil { await context.provider.makeSessionCallCount == 1 }
         context.recorder.emit(Data(repeating: 0xC1, count: 32_000))
         await waitUntil { await context.transport.sendCallCount == 5 }
+        await settle()
 
-        XCTAssertEqual(
-            context.appendSession.appliedTexts,
-            ["hello", "hello world", "hello", "yellow"],
-            "new packet ownership must not turn equal or changed complete snapshots into concatenated fragments"
-        )
-        XCTAssertEqual(context.appendSession.appliedSources, ["live", "live", "live", "live"])
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("hello"))
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("hello world"))
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("yellow"))
+        XCTAssertEqual(context.appendSession.appliedTexts, [])
+        XCTAssertEqual(context.appendSession.appliedSources, [])
 
         await context.viewModel.resetService()
     }
@@ -1483,14 +1414,12 @@ final class StreamingMainViewModelTests: XCTestCase {
 
         await sleeper.releaseNext()
         await waitUntil { await replacement.sendCallCount == 3 }
+        await settle()
 
-        XCTAssertEqual(
-            context.appendSession.appliedTexts,
-            ["stable", "revised"],
-            "historical replay is packet-suppressed, duplicate recovery snapshots are text-suppressed, and the first changed new index advances once"
-        )
-        // Backoff-queued new index is journaled before the next attempt is ready, so it is replayCatchUp.
-        XCTAssertEqual(context.appendSession.appliedSources, ["live", "replay"])
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("stable"))
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("revised"))
+        XCTAssertEqual(context.appendSession.appliedTexts, [])
+        XCTAssertEqual(context.appendSession.appliedSources, [])
 
         await context.viewModel.resetService()
     }
@@ -1519,9 +1448,11 @@ final class StreamingMainViewModelTests: XCTestCase {
             identity: identity
         )
 
-        XCTAssertEqual(context.appendSession.appliedTexts, ["visible before release"])
-        XCTAssertEqual(context.appendSession.finalizeCallCount, 1)
-        XCTAssertEqual(context.appendSession.finalTexts, ["terminal after release"])
+        await settle()
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("visible before release"))
+        XCTAssertEqual(context.appendSession.appliedTexts, [])
+        XCTAssertEqual(context.appendSession.finalizeCallCount, 0)
+        XCTAssertEqual(context.appendSession.finalTexts, [])
         XCTAssertEqual(context.output.syntheticInputCallCount, 0)
         XCTAssertEqual(context.output.copiedTexts, [])
     }
@@ -1550,7 +1481,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         context.recorder.emit(Data(repeating: 0xD0, count: 12_800))
         await waitUntil {
             await session.isHoldingSend &&
-                context.accessibility.setSelectedTextCalls == ["held snapshot"]
+                context.reviewPresenter.presentedTexts.contains("held snapshot")
         }
 
         context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
@@ -1559,9 +1490,12 @@ final class StreamingMainViewModelTests: XCTestCase {
 
         XCTAssertEqual(
             context.accessibility.setSelectedTextCalls,
-            ["held snapshot", "tail snapshot", "authoritative final"],
-            "Fn-up closes capture, but its in-flight packet and action-2 final remain output-eligible"
+            [],
+            "Fn-up review route must never write the accessibility target"
         )
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("held snapshot"))
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("tail snapshot"))
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("authoritative final"))
         let finishCallCount = await session.finishCallCount
         XCTAssertEqual(finishCallCount, 1)
 
@@ -1575,7 +1509,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         )
         XCTAssertEqual(
             context.accessibility.setSelectedTextCalls,
-            ["held snapshot", "tail snapshot", "authoritative final"],
+            [],
             "true terminal cleanup must still suppress stale and old-generation callbacks"
         )
     }
@@ -1594,19 +1528,16 @@ final class StreamingMainViewModelTests: XCTestCase {
         context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
         await waitUntil { await context.provider.makeSessionCallCount == 1 }
         context.recorder.emit(Data(repeating: 0xD1, count: 6_400))
-        await waitUntil { context.appendSession.appliedTexts == ["held snapshot"] }
+        await waitUntil { context.reviewPresenter.presentedTexts.contains("held snapshot") }
 
         context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
         await waitUntil { context.viewModel.status == .idle }
 
-        XCTAssertEqual(context.appendSession.appliedTexts, ["held snapshot"])
-        XCTAssertEqual(context.appendSession.finalizeCallCount, 1)
-        XCTAssertEqual(
-            context.appendSession.finalTexts,
-            ["authoritative final"],
-            "action 2 must replace the owned held snapshot instead of being discarded"
-        )
-        XCTAssertEqual(context.appendSession.lastAcceptedTexts, ["held snapshot"])
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("held snapshot"))
+        XCTAssertEqual(context.appendSession.appliedTexts, [])
+        XCTAssertEqual(context.appendSession.finalizeCallCount, 0)
+        XCTAssertEqual(context.appendSession.finalTexts, [])
+        XCTAssertEqual(context.appendSession.lastAcceptedTexts, [])
     }
 
     func test_releaseDuringRecoverableBackoffReplaysCapturedPacketAndFinishesSuccessor() async {
@@ -1641,10 +1572,10 @@ final class StreamingMainViewModelTests: XCTestCase {
         guard providerCallCount == 2 else { return }
 
         await waitUntil { await successor.finishCallCount == 1 }
-        XCTAssertEqual(
-            context.accessibility.setSelectedTextCalls,
-            ["recovered snapshot", "recovered final"]
-        )
+        await settle()
+        XCTAssertEqual(context.accessibility.setSelectedTextCalls, [])
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("recovered snapshot"))
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("recovered final"))
         let successorSendCallCount = await successor.sendCallCount
         XCTAssertEqual(successorSendCallCount, 1, "the captured journal packet must be replayed")
         XCTAssertEqual(context.viewModel.status, .idle)
@@ -1685,7 +1616,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         await sleeper.releaseNext()
         await waitUntil {
             await recoveredThenFailed.sendCallCount == 1 &&
-                context.accessibility.setSelectedTextCalls == ["recovered snapshot"]
+                context.reviewPresenter.presentedTexts.contains("recovered snapshot")
         }
 
         context.recorder.emit(Data(repeating: 0xD4, count: 6_400))
@@ -1699,11 +1630,10 @@ final class StreamingMainViewModelTests: XCTestCase {
 
         await sleeper.releaseNext()
         await waitUntil { await resumed.sendCallCount == 2 }
-        XCTAssertEqual(
-            context.accessibility.setSelectedTextCalls,
-            ["recovered snapshot", "resumed snapshot"],
-            "recovery must resume output after repeated backend 10024 responses"
-        )
+        await settle()
+        XCTAssertEqual(context.accessibility.setSelectedTextCalls, [])
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("recovered snapshot"))
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("resumed snapshot"))
         await context.viewModel.resetService()
     }
 
@@ -1755,7 +1685,8 @@ final class StreamingMainViewModelTests: XCTestCase {
 
         recorder.emit(Data(repeating: 0xD5, count: 6_400))
         await waitUntil { await successor.sendCallCount == 1 }
-        XCTAssertEqual(accessibility.setSelectedTextCalls, ["successor output"])
+        await settle()
+        XCTAssertTrue(reviewPresenter.presentedTexts.contains("successor output"))
         await viewModel.resetService()
     }
 
@@ -1886,25 +1817,21 @@ final class StreamingMainViewModelTests: XCTestCase {
         recorder.emit(Data(repeating: 0xD6, count: 12_800))
         await waitUntil {
             await session.isHoldingLatePacket &&
-                accessibility.setSelectedTextCalls == ["preserved output"]
+                reviewPresenter.presentedTexts.contains("preserved output")
         }
 
         viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
         await waitUntil { viewModel.activeSessionIdentityForTesting == nil }
 
-        XCTAssertEqual(accessibility.setSelectedTextCalls, ["preserved output"])
-        XCTAssertEqual(accessibility.rangeText, "preserved output")
-        XCTAssertEqual(
-            overlayPresenter.completionFeedbacks,
-            [.emptyFinalPreservedPartial],
-            "drain expiry with committed text must be observable and must not report ordinary success"
-        )
+        XCTAssertEqual(accessibility.setSelectedTextCalls, [])
+        XCTAssertTrue(reviewPresenter.presentedTexts.contains("preserved output"))
+        XCTAssertEqual(overlayPresenter.completionFeedbacks, [])
 
         await session.releaseLatePacketIfNeeded()
         await settle(iterations: 50)
         XCTAssertEqual(
             accessibility.setSelectedTextCalls,
-            ["preserved output"],
+            [],
             "a noncooperative completion after drain cleanup must be generation-suppressed"
         )
         XCTAssertNil(viewModel.activeSessionIdentityForTesting)
@@ -1957,14 +1884,59 @@ final class StreamingMainViewModelTests: XCTestCase {
             recorder.emit(Data(repeating: 0xE1, count: 12_800))
             await waitUntil { await session.isHoldingLatePacket }
             viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+            if !rejectedSnapshot.isEmpty {
+                await waitUntil {
+                    viewModel.transcriptionReviewState == .sealing(preview: rejectedSnapshot) &&
+                        reviewPresenter.readOnlyPreviews.last == rejectedSnapshot
+                }
+            }
             await waitUntil { viewModel.activeSessionIdentityForTesting == nil }
 
             XCTAssertEqual(appendSession.appliedTexts, [], "snapshot \(rejectedSnapshot.debugDescription)")
             XCTAssertEqual(overlayPresenter.completionFeedbacks, [])
-            XCTAssertEqual(surface.states.filter(isError).map(\.text), ["流式识别失败"])
             XCTAssertEqual(output.currentFocusAttemptedTexts, [])
             XCTAssertEqual(output.copiedTexts, [])
             XCTAssertEqual(output.syntheticInputCallCount, 0)
+
+            if rejectedSnapshot.isEmpty {
+                XCTAssertEqual(surface.states.filter(isError).map(\.text), ["流式识别失败"])
+            } else {
+                XCTAssertEqual(reviewPresenter.readOnlyPreviews.last, rejectedSnapshot)
+                XCTAssertFalse(
+                    surface.states.contains(where: isError),
+                    "a safe LF-containing partial must remain read-only recovery data, not a terminal error"
+                )
+                if case .editable = viewModel.transcriptionReviewState {
+                    XCTFail("drain expiry must not install ordinary editable confirmation authority")
+                }
+                XCTAssertEqual(reviewPresenter.renderDraftCallCount, 0)
+
+                let sendWasMaterialized = reviewPresenter.invokeSendButton()
+                let returnWasMaterialized = reviewPresenter.invokeQualifiedReturn()
+                await settle(iterations: 50)
+
+                XCTAssertFalse(sendWasMaterialized, "read-only recovery must not expose Send")
+                XCTAssertFalse(returnWasMaterialized, "read-only recovery must not expose qualified Return")
+                XCTAssertEqual(reviewDelivery.deliverCallCount, 0)
+                XCTAssertEqual(reviewDelivery.deliveredTexts, [])
+                XCTAssertEqual(reviewDelivery.copyCalls, 0)
+                XCTAssertEqual(accessibility.setSelectedTextCalls, [])
+                XCTAssertEqual(output.insertedTexts, [])
+                XCTAssertEqual(output.currentFocusInsertedTexts, [])
+                XCTAssertEqual(output.copiedTexts, [])
+                XCTAssertEqual(output.syntheticInputCallCount, 0)
+                XCTAssertEqual(appendSession.postAttemptCount, 0)
+                XCTAssertEqual(appendSession.finalizeCallCount, 0)
+                XCTAssertEqual(appendFactory.makeSessionCallCount, 0)
+                let providerMakeSessionCallCount = await provider.makeSessionCallCount
+                let sessionSendCallCount = await session.sendCallCount
+                XCTAssertEqual(providerMakeSessionCallCount, 1)
+                XCTAssertEqual(sessionSendCallCount, 2)
+
+                await session.releaseLatePacketIfNeeded()
+                await settle(iterations: 50)
+                XCTAssertEqual(reviewPresenter.readOnlyPreviews.last, rejectedSnapshot)
+            }
 
             await session.releaseLatePacketIfNeeded()
         }
@@ -2017,18 +1989,125 @@ final class StreamingMainViewModelTests: XCTestCase {
         viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
         recorder.emit(Data(repeating: 0xE2, count: 12_800))
         await waitUntil {
-            await session.isHoldingLatePacket && appendSession.appliedTexts == ["uncertain output"]
+            await session.isHoldingLatePacket && reviewPresenter.presentedTexts.contains("uncertain output")
         }
         viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
         await waitUntil { viewModel.activeSessionIdentityForTesting == nil }
 
-        XCTAssertEqual(appendSession.postAttemptCount, 1)
-        XCTAssertEqual(overlayPresenter.completionFeedbacks, [.provisionalOutputPreserved])
+        XCTAssertEqual(appendSession.postAttemptCount, 0)
+        XCTAssertEqual(overlayPresenter.completionFeedbacks, [])
         XCTAssertFalse(surface.states.contains(where: isError))
         XCTAssertEqual(output.currentFocusAttemptedTexts, [])
         XCTAssertEqual(output.copiedTexts, [])
 
         await session.releaseLatePacketIfNeeded()
+    }
+
+    func test_postReleaseDrainExpiryNeverAuthorizesPartialBeforeAction2ThroughEitherUISeam() async {
+        let partial = "safe partial retained until action two"
+        let context = makeDrainExpiryReviewContext(
+            partial: partial,
+            generation: 4_113
+        )
+        let identity = StreamingSessionIdentity(generation: 4_113)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        context.recorder.emit(Data(repeating: 0xE3, count: 12_800))
+        await waitUntil {
+            await context.session.isHoldingLatePacket &&
+                context.reviewPresenter.readOnlyPreviews.contains(partial)
+        }
+        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        await waitUntil {
+            context.viewModel.transcriptionReviewState == .sealing(preview: partial) &&
+                context.reviewPresenter.readOnlyPreviews.last == partial
+        }
+        await waitUntil { context.viewModel.activeSessionIdentityForTesting == nil }
+
+        XCTAssertEqual(context.reviewPresenter.readOnlyPreviews.last, partial)
+        if case .editable = context.viewModel.transcriptionReviewState {
+            XCTFail("action 2 never settled; expiry must not install ordinary editable authority")
+        }
+        XCTAssertFalse(
+            isError(context.viewModel.status),
+            "a safe partial must remain a durable recovery surface, not a terminal error"
+        )
+        XCTAssertEqual(context.reviewPresenter.renderDraftCallCount, 0)
+
+        let sendWasMaterialized = context.reviewPresenter.invokeSendButton()
+        let returnWasMaterialized = context.reviewPresenter.invokeQualifiedReturn()
+        await settle(iterations: 50)
+
+        XCTAssertFalse(sendWasMaterialized, "a read-only recovery surface must have no Send callback")
+        XCTAssertFalse(returnWasMaterialized, "a read-only recovery surface must have no Return editor")
+        XCTAssertEqual(context.reviewDelivery.deliverCallCount, 0)
+        XCTAssertEqual(context.reviewDelivery.deliveredTexts, [])
+        XCTAssertEqual(context.reviewDelivery.copyCalls, 0)
+        XCTAssertEqual(context.accessibility.setSelectedTextCalls, [])
+        XCTAssertEqual(context.output.insertedTexts, [])
+        XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
+        XCTAssertEqual(context.output.currentFocusInsertedTexts, [])
+        XCTAssertEqual(context.output.copiedTexts, [])
+        XCTAssertEqual(context.output.syntheticInputCallCount, 0)
+        XCTAssertEqual(context.appendSession.appliedTexts, [])
+        XCTAssertEqual(context.appendSession.postAttemptCount, 0)
+        XCTAssertEqual(context.appendSession.finalizeCallCount, 0)
+        XCTAssertEqual(context.appendFactory.makeSessionCallCount, 0)
+        let providerMakeSessionCallCount = await context.provider.makeSessionCallCount
+        let sessionSendCallCount = await context.session.sendCallCount
+        XCTAssertEqual(providerMakeSessionCallCount, 1)
+        XCTAssertEqual(sessionSendCallCount, 2)
+        XCTAssertEqual(context.reviewPresenter.readOnlyPreviews.last, partial)
+
+        await context.session.releaseLatePacketIfNeeded()
+        await settle(iterations: 50)
+        XCTAssertEqual(context.reviewPresenter.readOnlyPreviews.last, partial)
+    }
+
+    func test_postReleaseDrainExpiryRetainsMultilineLFAsInertReadOnlyData() async {
+        let multilinePartial = "first line\nsecond line\nthird line"
+        let context = makeDrainExpiryReviewContext(
+            partial: multilinePartial,
+            generation: 4_114
+        )
+        let identity = StreamingSessionIdentity(generation: 4_114)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        context.recorder.emit(Data(repeating: 0xE4, count: 12_800))
+        await waitUntil {
+            await context.session.isHoldingLatePacket &&
+                context.reviewPresenter.readOnlyPreviews.contains(multilinePartial)
+        }
+        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        await waitUntil {
+            context.viewModel.transcriptionReviewState == .sealing(preview: multilinePartial) &&
+                context.reviewPresenter.readOnlyPreviews.last == multilinePartial
+        }
+        await waitUntil { context.viewModel.activeSessionIdentityForTesting == nil }
+
+        XCTAssertEqual(context.reviewPresenter.readOnlyPreviews.last, multilinePartial)
+        if case .editable = context.viewModel.transcriptionReviewState {
+            XCTFail("LF-delimited partials are inert data and must remain durable/read-only after expiry")
+        }
+        XCTAssertFalse(
+            isError(context.viewModel.status),
+            "LF-delimited partials must not be destroyed as a terminal streaming failure"
+        )
+        XCTAssertEqual(context.reviewPresenter.renderDraftCallCount, 0)
+        XCTAssertEqual(context.reviewDelivery.deliverCallCount, 0)
+        XCTAssertEqual(context.reviewDelivery.deliveredTexts, [])
+        XCTAssertEqual(context.accessibility.setSelectedTextCalls, [])
+        XCTAssertEqual(context.output.insertedTexts, [])
+        XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
+        XCTAssertEqual(context.output.currentFocusInsertedTexts, [])
+        XCTAssertEqual(context.output.copiedTexts, [])
+        XCTAssertEqual(context.output.syntheticInputCallCount, 0)
+        XCTAssertEqual(context.appendSession.appliedTexts, [])
+        XCTAssertEqual(context.appendSession.postAttemptCount, 0)
+
+        await context.session.releaseLatePacketIfNeeded()
+        await settle(iterations: 50)
+        XCTAssertEqual(context.reviewPresenter.readOnlyPreviews.last, multilinePartial)
     }
 
     func test_packetReadyAtDrainDeadlineIsRejectedBeforeOutputEvenBeforeExpiryTaskRuns() async {
@@ -2132,7 +2211,7 @@ final class StreamingMainViewModelTests: XCTestCase {
 
         viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
         recorder.emit(Data(repeating: 0xE4, count: 6_400))
-        await waitUntil { accessibility.setSelectedTextCalls == ["committed partial"] }
+        await waitUntil { reviewPresenter.presentedTexts.contains("committed partial") }
         viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
         await waitUntil { await session.isHoldingFinish }
 
@@ -2140,9 +2219,9 @@ final class StreamingMainViewModelTests: XCTestCase {
         await session.releaseFinishIfNeeded()
         await waitUntil { viewModel.activeSessionIdentityForTesting == nil }
 
-        XCTAssertEqual(accessibility.setSelectedTextCalls, ["committed partial"])
-        XCTAssertEqual(accessibility.rangeText, "committed partial")
-        XCTAssertEqual(overlayPresenter.completionFeedbacks, [.emptyFinalPreservedPartial])
+        XCTAssertEqual(accessibility.setSelectedTextCalls, [])
+        XCTAssertTrue(reviewPresenter.presentedTexts.contains("committed partial"))
+        XCTAssertEqual(overlayPresenter.completionFeedbacks, [])
         XCTAssertEqual(output.currentFocusAttemptedTexts, [])
         XCTAssertEqual(output.copiedTexts, [])
     }
@@ -2239,29 +2318,25 @@ final class StreamingMainViewModelTests: XCTestCase {
         await waitUntil { await context.provider.makeSessionCallCount == 1 }
         context.recorder.emit(Data(repeating: 0xB3, count: 12_800))
         await waitUntil { await sleeper.callCount == 1 }
+        await settle()
 
-        XCTAssertEqual(context.appendSession.appliedTexts, ["same"])
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("same"))
+        XCTAssertEqual(context.appendSession.appliedTexts, [])
 
         await sleeper.releaseNext()
         await waitUntil { await replacement.sendCallCount == 2 }
 
-        XCTAssertEqual(
-            context.appendSession.appliedTexts,
-            ["same"],
-            "historical index 0 remains owned while an equal snapshot on newly owned index 1 is a no-op"
-        )
-        XCTAssertEqual(context.appendSession.appliedSources, ["live"])
+        XCTAssertEqual(context.appendSession.appliedTexts, [])
+        XCTAssertEqual(context.appendSession.appliedSources, [])
 
         context.recorder.emit(Data(repeating: 0xB4, count: 6_400))
         await waitUntil { await sleeper.callCount == 2 }
         await sleeper.releaseNext()
         await waitUntil { await secondReplacement.sendCallCount == 3 }
-        XCTAssertEqual(context.appendSession.appliedTexts, ["same", "tail"])
-        XCTAssertEqual(
-            context.appendSession.appliedSources,
-            ["live", "replay"],
-            "an index first owned during replay must become historical on every later replay"
-        )
+        await settle()
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("tail"))
+        XCTAssertEqual(context.appendSession.appliedTexts, [])
+        XCTAssertEqual(context.appendSession.appliedSources, [])
 
         await context.viewModel.resetService()
     }
@@ -2278,12 +2353,12 @@ final class StreamingMainViewModelTests: XCTestCase {
         await waitUntil { await context.provider.makeSessionCallCount == 1 }
         context.recorder.emit(Data(repeating: 0xB5, count: 19_200))
         await waitUntil { await context.session.sendCallCount == 3 }
+        await settle()
 
-        XCTAssertEqual(
-            context.accessibility.setSelectedTextCalls,
-            ["one", "two", "three"],
-            "the exact captured AX range must receive each raw complete snapshot"
-        )
+        XCTAssertEqual(context.accessibility.setSelectedTextCalls, [])
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("one"))
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("two"))
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("three"))
         XCTAssertEqual(context.output.syntheticInputCallCount, 0)
         XCTAssertEqual(context.output.copiedTexts, [])
 
@@ -2308,11 +2383,9 @@ final class StreamingMainViewModelTests: XCTestCase {
         context.recorder.emit(Data(repeating: 0xB6, count: 19_200))
         await waitUntil { await context.transport.sendCallCount == 3 }
 
-        XCTAssertEqual(
-            context.unicodePoster.requestedTexts,
-            ["safe"],
-            "contentless and unsafe packet responses must not advance the assembled snapshot"
-        )
+        await settle()
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("safe"))
+        XCTAssertEqual(context.unicodePoster.requestedTexts, [])
 
         context.viewModel.handleStreamingEventForTesting(
             .partial("stale"),
@@ -2323,8 +2396,8 @@ final class StreamingMainViewModelTests: XCTestCase {
         context.viewModel.handleStreamingEventForTesting(.final("late final"), identity: identity)
         await waitUntil { context.viewModel.status == .idle }
 
-        XCTAssertEqual(context.unicodePoster.requestedTexts, ["safe"])
-        XCTAssertEqual(context.unicodePoster.destinationProcessIdentifiers, [42])
+        XCTAssertEqual(context.unicodePoster.requestedTexts, [])
+        XCTAssertEqual(context.unicodePoster.destinationProcessIdentifiers, [])
         XCTAssertEqual(context.output.syntheticInputCallCount, 0)
         XCTAssertEqual(context.output.copiedTexts, [])
     }
@@ -2362,20 +2435,16 @@ final class StreamingMainViewModelTests: XCTestCase {
             context.recorder.emit(Data(repeating: 0xBA, count: 19_200))
 
             await waitUntil { await sleeper.callCount == 1 }
-            XCTAssertEqual(
-                context.appendSession.appliedTexts,
-                ["stable snapshot"],
-                "\(testCase.name) response must not mutate output before replay"
-            )
+            await settle()
+            XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("stable snapshot"))
+            XCTAssertEqual(context.appendSession.appliedTexts, [])
 
             await sleeper.releaseNext()
             await waitUntil { await replacementSession.sendCallCount == 3 }
 
-            XCTAssertEqual(
-                context.appendSession.appliedTexts,
-                ["stable snapshot", "next snapshot"],
-                "\(testCase.name) response must reserve packet index 1 so changed replay is historical"
-            )
+            await settle()
+            XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("next snapshot"))
+            XCTAssertEqual(context.appendSession.appliedTexts, [])
             await context.viewModel.resetService()
         }
     }
@@ -2482,16 +2551,11 @@ final class StreamingMainViewModelTests: XCTestCase {
             await waitUntil { await context.transport.sendCallCount == 1 }
             context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
             await waitUntil { context.viewModel.status == .idle }
+            await settle()
 
-            XCTAssertEqual(
-                context.unicodePoster.requestedTexts,
-                scenario.expected,
-                "action 2 must reconcile through the owner armed before release"
-            )
-            XCTAssertEqual(
-                context.unicodePoster.destinationProcessIdentifiers,
-                Array(repeating: pid_t(42), count: scenario.expected.count)
-            )
+            XCTAssertTrue(context.reviewPresenter.presentedTexts.contains(scenario.final))
+            XCTAssertEqual(context.unicodePoster.requestedTexts, [])
+            XCTAssertEqual(context.unicodePoster.destinationProcessIdentifiers, [])
             XCTAssertEqual(context.output.syntheticInputCallCount, 0)
             XCTAssertEqual(context.output.copiedTexts, [])
         }
@@ -2515,16 +2579,20 @@ final class StreamingMainViewModelTests: XCTestCase {
         await waitUntil { await context.provider.makeSessionCallCount == 1 }
         context.recorder.emit(Data(repeating: 0x82, count: 12_800))
         await waitUntil { await sleeper.callCount == 1 }
+        await settle()
 
-        XCTAssertEqual(context.appendSession.appliedTexts, ["prefix"])
-        XCTAssertEqual(context.appendSession.appliedSources, ["live"])
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("prefix"))
+        XCTAssertEqual(context.appendSession.appliedTexts, [])
+        XCTAssertEqual(context.appendSession.appliedSources, [])
 
         await sleeper.releaseNext()
         await waitUntil { await replacement.sendCallCount == 2 }
+        await settle()
 
-        XCTAssertEqual(context.appendFactory.makeSessionCallCount, 1)
-        XCTAssertEqual(context.appendSession.appliedTexts, ["prefix", "prefix extension"])
-        XCTAssertEqual(context.appendSession.appliedSources, ["live", "replay"])
+            XCTAssertEqual(context.appendFactory.makeSessionCallCount, 0)
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("prefix extension"))
+        XCTAssertEqual(context.appendSession.appliedTexts, [])
+        XCTAssertEqual(context.appendSession.appliedSources, [])
         XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
         XCTAssertEqual(context.output.copiedTexts, [])
     }
@@ -2549,19 +2617,20 @@ final class StreamingMainViewModelTests: XCTestCase {
         await waitUntil { await context.provider.makeSessionCallCount == 1 }
         context.recorder.emit(Data(repeating: 0xAA, count: 12_800))
         await waitUntil { await sleeper.callCount == 1 }
+        await settle()
 
-        XCTAssertEqual(context.appendSession.appliedTexts, ["captured prefix"])
-        XCTAssertEqual(context.appendSession.appliedSources, ["live"])
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("captured prefix"))
+        XCTAssertEqual(context.appendSession.appliedTexts, [])
+        XCTAssertEqual(context.appendSession.appliedSources, [])
 
         await sleeper.releaseNext()
         await waitUntil { await replacement.sendCallCount == 2 }
+        await settle()
 
-        XCTAssertEqual(context.appendFactory.makeSessionCallCount, 1)
-        XCTAssertEqual(
-            context.appendSession.appliedTexts,
-            ["captured prefix", "captured prefix extension"]
-        )
-        XCTAssertEqual(context.appendSession.appliedSources, ["live", "replay"])
+        XCTAssertEqual(context.appendFactory.makeSessionCallCount, 0)
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("captured prefix extension"))
+        XCTAssertEqual(context.appendSession.appliedTexts, [])
+        XCTAssertEqual(context.appendSession.appliedSources, [])
         XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
         XCTAssertEqual(context.output.insertedTexts, [])
         XCTAssertEqual(context.output.copiedTexts, [])
@@ -2583,12 +2652,11 @@ final class StreamingMainViewModelTests: XCTestCase {
             context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
             await waitUntil { await context.transport.finishCallCount == 1 }
 
-            XCTAssertEqual(context.appendSession.finalizeCallCount, 1)
-            XCTAssertEqual(
-                context.appendSession.finalTexts,
-                [finalText.isEmpty ? nil : finalText]
-            )
-            XCTAssertEqual(context.appendSession.lastAcceptedTexts, ["attempted realtime"])
+            await settle()
+            XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("attempted realtime"))
+            XCTAssertEqual(context.appendSession.finalizeCallCount, 0)
+            XCTAssertEqual(context.appendSession.finalTexts, [])
+            XCTAssertEqual(context.appendSession.lastAcceptedTexts, [])
             XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
             XCTAssertEqual(context.output.insertedTexts, [])
             XCTAssertEqual(context.output.copiedTexts, [])
@@ -2626,8 +2694,9 @@ final class StreamingMainViewModelTests: XCTestCase {
         await waitUntil { await rebound.provider.makeSessionCallCount == 1 }
         rebound.recorder.emit(Data(repeating: 0x85, count: 6_400))
         await waitUntil { await rebound.transport.sendCallCount == 1 }
+        await settle()
 
-        XCTAssertEqual(rebound.accessibility.setSelectedTextCalls, ["verified AX"])
+        XCTAssertTrue(rebound.reviewPresenter.presentedTexts.contains("verified AX"))
         XCTAssertEqual(rebound.appendSession.appliedTexts, [])
         XCTAssertEqual(rebound.output.currentFocusAttemptedTexts, [])
     }
@@ -2723,7 +2792,7 @@ final class StreamingMainViewModelTests: XCTestCase {
             XCTAssertEqual(sleeperCallCount, 1)
             let providerCallCount = await provider.makeSessionCallCount
             XCTAssertEqual(providerCallCount, 2)
-            XCTAssertEqual(context.accessibility.rangeText, "recovered final")
+            XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("recovered final"))
             XCTAssertEqual(context.output.insertedTexts, [])
             XCTAssertEqual(context.viewModel.status, .idle)
             XCTAssertNil(context.viewModel.activeSessionIdentityForTesting)
@@ -2843,7 +2912,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
         context.recorder.emit(Data(repeating: 0xA2, count: 6_400))
         await waitUntil { await session.sendCallCount == 1 }
-        XCTAssertEqual(missingAppendFactory.makeSessionCallCount, 1)
+        XCTAssertEqual(missingAppendFactory.makeSessionCallCount, 0)
         XCTAssertEqual(appendSession.appliedTexts, [])
 
         context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
@@ -3252,12 +3321,12 @@ final class StreamingMainViewModelTests: XCTestCase {
         let successorSendCallCount = await successor.sendCallCount
         XCTAssertEqual(providerCallCount, 2)
         XCTAssertEqual(successorSendCallCount, 3)
-        XCTAssertEqual(context.appendFactory.makeSessionCallCount, 1)
-        XCTAssertEqual(
-            context.appendSession.appliedTexts,
-            ["last usable value", "recovered usable value"]
-        )
-        XCTAssertEqual(context.appendSession.finalTexts, ["authoritative final value"])
+        XCTAssertEqual(context.appendFactory.makeSessionCallCount, 0)
+        await settle()
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("last usable value"))
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("recovered usable value"))
+        XCTAssertEqual(context.appendSession.appliedTexts, [])
+        XCTAssertEqual(context.appendSession.finalTexts, [])
         XCTAssertEqual(context.output.insertedTexts, [])
         XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
         XCTAssertEqual(context.output.copiedTexts, [])
@@ -3294,8 +3363,10 @@ final class StreamingMainViewModelTests: XCTestCase {
         append.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: appendIdentity))
         await waitUntil { append.viewModel.status == .idle }
 
-        XCTAssertEqual(append.appendSession.finalizeCallCount, 1)
-        XCTAssertEqual(append.appendSession.lastAcceptedTexts, ["last usable append"])
+        await settle()
+        XCTAssertTrue(append.reviewPresenter.presentedTexts.contains("last usable append"))
+        XCTAssertEqual(append.appendSession.finalizeCallCount, 0)
+        XCTAssertEqual(append.appendSession.lastAcceptedTexts, [])
         XCTAssertEqual(append.output.currentFocusAttemptedTexts, [])
         XCTAssertEqual(append.output.copiedTexts, [])
     }
@@ -3313,18 +3384,15 @@ final class StreamingMainViewModelTests: XCTestCase {
         context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
         await waitUntil { await context.provider.makeSessionCallCount == 1 }
         context.recorder.emit(Data(repeating: 0x99, count: 6_400))
-        await waitUntil {
-            await context.transport.sendCallCount == 1 &&
-                context.viewModel.activeSessionIdentityForTesting == nil
-        }
+        await waitUntil { await context.transport.sendCallCount == 1 }
+        await settle()
 
-        XCTAssertEqual(context.accessibility.captureCount, 2)
-        XCTAssertEqual(context.appendFactory.makeSessionCallCount, 1)
-        XCTAssertEqual(context.appendFactory.generations, [identity.generation])
+        XCTAssertEqual(context.reviewDelivery.captureCallCount, 1)
+        XCTAssertEqual(context.appendFactory.makeSessionCallCount, 0)
+        XCTAssertEqual(context.appendFactory.generations, [])
         XCTAssertEqual(context.appendSession.appliedTexts, [])
-        XCTAssertEqual(context.appendSession.invalidateCallCount, 1)
-        XCTAssertTrue(isError(context.viewModel.status))
-        XCTAssertTrue(context.viewModel.status.text.contains("安全输入"))
+        XCTAssertEqual(context.appendSession.invalidateCallCount, 0)
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains(transcript))
         XCTAssertFalse(visibleFeedback(context.viewModel).contains(transcript))
         XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
         XCTAssertEqual(context.output.copiedTexts, [])
@@ -3345,11 +3413,13 @@ final class StreamingMainViewModelTests: XCTestCase {
         await waitUntil { await context.provider.makeSessionCallCount == 1 }
         context.recorder.emit(Data(repeating: 0x9A, count: 6_400))
         await waitUntil { await context.transport.sendCallCount == 1 }
+        await settle()
 
-        XCTAssertEqual(context.accessibility.captureCount, 2)
-        XCTAssertEqual(context.appendFactory.makeSessionCallCount, 1)
-        XCTAssertEqual(context.appendSession.appliedTexts, ["provisional"])
-        XCTAssertEqual(context.appendSession.appliedSources, ["live"])
+        XCTAssertEqual(context.reviewDelivery.captureCallCount, 1)
+        XCTAssertEqual(context.appendFactory.makeSessionCallCount, 0)
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("provisional"))
+        XCTAssertEqual(context.appendSession.appliedTexts, [])
+        XCTAssertEqual(context.appendSession.appliedSources, [])
         XCTAssertEqual(context.appendSession.finalizeCallCount, 0)
         XCTAssertEqual(context.recorder.stopStreamingCallCount, 0, "triggering partial must be visible while Fn is held")
         XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
@@ -3360,9 +3430,9 @@ final class StreamingMainViewModelTests: XCTestCase {
         context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
         await waitUntil { context.viewModel.status == .idle }
 
-        XCTAssertEqual(context.appendSession.finalizeCallCount, 1)
-        XCTAssertEqual(context.appendSession.finalTexts, ["provisional suffix"])
-        XCTAssertEqual(context.appendSession.lastAcceptedTexts, ["provisional"])
+        XCTAssertEqual(context.appendSession.finalizeCallCount, 0)
+        XCTAssertEqual(context.appendSession.finalTexts, [])
+        XCTAssertEqual(context.appendSession.lastAcceptedTexts, [])
         XCTAssertEqual(context.output.insertedTexts, [])
         XCTAssertEqual(context.output.copiedTexts, [])
         XCTAssertEqual(context.output.syntheticInputCallCount, 0, "the existing owner handles terminal authority")
@@ -3404,13 +3474,9 @@ final class StreamingMainViewModelTests: XCTestCase {
             context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
             await waitUntil { context.viewModel.status == .idle }
 
-            XCTAssertEqual(
-                context.appendSession.finalizeCallCount,
-                1,
-                "both routes must close the owner armed before any unsafe response arrives"
-            )
-            XCTAssertEqual(context.appendFactory.makeSessionCallCount, 1, "route \(routeIndex)")
-            XCTAssertEqual(context.appendFactory.generations, [route.generation])
+            XCTAssertEqual(context.appendSession.finalizeCallCount, 0)
+            XCTAssertEqual(context.appendFactory.makeSessionCallCount, 0, "route \(routeIndex)")
+            XCTAssertEqual(context.appendFactory.generations, [])
             XCTAssertEqual(context.output.copiedTexts, [])
             XCTAssertEqual(context.output.syntheticInputCallCount, 0)
             XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
@@ -3523,17 +3589,18 @@ final class StreamingMainViewModelTests: XCTestCase {
 
                 context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
                 await waitUntil { await context.provider.makeSessionCallCount == 1 }
-                context.recorder.emit(Data(repeating: 0xA8, count: 6_400))
-                await waitUntil { await context.transport.sendCallCount == 1 }
-                context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+            context.recorder.emit(Data(repeating: 0xA8, count: 6_400))
+            await waitUntil { await context.transport.sendCallCount == 1 }
+            await settle()
+            context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
                 await waitUntil { context.viewModel.status == .idle }
 
-                XCTAssertEqual(context.appendSession.postAttemptCount, 1)
+                XCTAssertEqual(context.appendSession.postAttemptCount, 0)
                 XCTAssertEqual(context.output.copiedTexts, [])
                 XCTAssertEqual(context.output.insertedTexts, [])
                 XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
                 XCTAssertEqual(context.output.syntheticInputCallCount, 0)
-                XCTAssertEqual(context.overlayPresenter.completionFeedbacks, [.provisionalOutputPreserved])
+                XCTAssertEqual(context.overlayPresenter.completionFeedbacks, [])
             }
         }
     }
@@ -3591,17 +3658,19 @@ final class StreamingMainViewModelTests: XCTestCase {
         await waitUntil { await context.provider.makeSessionCallCount == 1 }
         context.recorder.emit(Data(repeating: 0xAB, count: 6_400))
         await waitUntil { await context.transport.sendCallCount == 1 }
-        XCTAssertEqual(context.appendSession.appliedTexts, ["visible"])
+        await settle()
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("visible"))
+        XCTAssertEqual(context.appendSession.appliedTexts, [])
 
         context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
         await waitUntil { context.viewModel.status == .idle }
         context.viewModel.handleStreamingEventForTesting(.partial("post-cleanup partial"), identity: identity)
         context.viewModel.handleStreamingEventForTesting(.final("post-cleanup final"), identity: identity)
 
-        XCTAssertEqual(context.appendSession.appliedTexts, ["visible"])
-        XCTAssertEqual(context.appendSession.finalizeCallCount, 1)
-        XCTAssertEqual(context.appendSession.finalTexts, ["visible final"])
-        XCTAssertEqual(context.appendSession.lastAcceptedTexts, ["visible"])
+        XCTAssertEqual(context.appendSession.appliedTexts, [])
+        XCTAssertEqual(context.appendSession.finalizeCallCount, 0)
+        XCTAssertEqual(context.appendSession.finalTexts, [])
+        XCTAssertEqual(context.appendSession.lastAcceptedTexts, [])
         XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
         XCTAssertEqual(context.output.insertedTexts, [])
         XCTAssertEqual(context.output.copiedTexts, [])
@@ -3626,8 +3695,8 @@ final class StreamingMainViewModelTests: XCTestCase {
         context.viewModel.handleStreamingEventForTesting(.partial("late partial"), identity: identity)
         context.viewModel.handleStreamingEventForTesting(.final("late final"), identity: identity)
 
-        XCTAssertEqual(context.appendSession.invalidateCallCount, 1)
-        XCTAssertEqual(context.appendSession.appliedTexts, ["visible"])
+        XCTAssertEqual(context.appendSession.invalidateCallCount, 0)
+        XCTAssertEqual(context.appendSession.appliedTexts, [])
         XCTAssertEqual(context.appendSession.finalizeCallCount, 0)
         XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
         XCTAssertEqual(context.output.insertedTexts, [])
@@ -3647,18 +3716,16 @@ final class StreamingMainViewModelTests: XCTestCase {
         context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
         await waitUntil { await context.provider.makeSessionCallCount == 1 }
         context.recorder.emit(Data(repeating: 0x9B, count: 6_400))
-        await waitUntil {
-            await context.transport.sendCallCount == 1 &&
-                context.viewModel.activeSessionIdentityForTesting == nil
-        }
+        await waitUntil { await context.transport.sendCallCount == 1 }
+        await settle()
 
-        XCTAssertNil(context.viewModel.activeSessionIdentityForTesting)
-        XCTAssertTrue(isError(context.viewModel.status))
-        XCTAssertTrue(context.viewModel.status.text.contains("安全输入"))
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains(transcript))
         XCTAssertFalse(visibleFeedback(context.viewModel).contains(transcript))
         XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
         XCTAssertEqual(context.output.insertedTexts, [])
         XCTAssertEqual(context.output.copiedTexts, [])
+        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        await waitUntil { context.viewModel.status == .idle }
         await context.viewModel.resetService()
     }
 
@@ -3685,10 +3752,7 @@ final class StreamingMainViewModelTests: XCTestCase {
             context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
             await waitUntil { context.viewModel.status == .idle }
 
-            XCTAssertEqual(context.overlayPresenter.completionFeedbacks.count, 1, "outcome \(outcome)")
-            let feedback = context.overlayPresenter.completionFeedbacks.first
-            XCTAssertFalse(feedback?.text.contains(transcript) == true)
-            XCTAssertFalse(feedback?.text.contains("attempted realtime") == true)
+            XCTAssertEqual(context.overlayPresenter.completionFeedbacks, [], "outcome \(outcome)")
             XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
             XCTAssertEqual(context.output.insertedTexts, [])
             XCTAssertEqual(context.output.copiedTexts, [])
@@ -3730,10 +3794,10 @@ final class StreamingMainViewModelTests: XCTestCase {
         let providerCallCount = await context.provider.makeSessionCallCount
         XCTAssertEqual(errorStates.count, 0)
         XCTAssertEqual(providerCallCount, 2)
-        XCTAssertEqual(context.appendSession.appliedTexts, [transcript])
-        XCTAssertEqual(context.appendSession.finalizeCallCount, 1)
-        XCTAssertEqual(context.appendSession.finalTexts, [nil])
-        XCTAssertEqual(context.overlayPresenter.completionFeedbacks, [.emptyFinalPreservedPartial])
+        XCTAssertEqual(context.appendSession.appliedTexts, [])
+        XCTAssertEqual(context.appendSession.finalizeCallCount, 0)
+        XCTAssertEqual(context.appendSession.finalTexts, [])
+        XCTAssertEqual(context.overlayPresenter.completionFeedbacks, [])
         XCTAssertFalse(surface.states.contains { $0.text.contains(transcript) })
         XCTAssertEqual(context.output.currentFocusAttemptedTexts, [])
         XCTAssertEqual(context.output.insertedTexts, [])
@@ -3822,7 +3886,8 @@ final class StreamingMainViewModelTests: XCTestCase {
 
         await provider.releaseFirstSessionIfNeeded()
         await waitUntil { await first.sendCallCount == 1 }
-        XCTAssertEqual(context.accessibility.setSelectedTextCalls, ["owned"])
+        await settle()
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("owned"))
 
         context.recorder.emit(Data(repeating: 0xC2, count: 6_400))
         await waitUntil { await sleeper.callCount == 1 }
@@ -3835,13 +3900,16 @@ final class StreamingMainViewModelTests: XCTestCase {
 
         await sleeper.releaseNext()
         await waitUntil { await replacement.sendCallCount == 2 }
+        await settle()
         let replacementPacketBytes = await replacement.packetFirstBytes
         XCTAssertEqual(replacementPacketBytes, [0xC1, 0xC2])
         XCTAssertEqual(
             context.accessibility.setSelectedTextCalls,
-            ["owned", "live tail"],
-            "already-owned journal index 0 must not write again on full replay"
+            [],
+            "review replay must never write the accessibility target"
         )
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("owned"))
+        XCTAssertTrue(context.reviewPresenter.presentedTexts.contains("live tail"))
         await context.viewModel.resetService()
     }
 
@@ -4452,7 +4520,71 @@ final class StreamingMainViewModelTests: XCTestCase {
             recorder: recorder,
             accessibility: accessibility,
             output: output,
-            overlayPresenter: overlayPresenter
+            overlayPresenter: overlayPresenter,
+            reviewPresenter: reviewPresenter
+        )
+    }
+
+    private func makeDrainExpiryReviewContext(
+        partial: String,
+        generation: UInt64
+    ) -> DrainExpiryReviewCoordinatorContext {
+        let session = ReviewNonCooperativeLatePacketSession(
+            firstEvent: .partial(partial),
+            lateEvent: .partial("late output suppressed after expiry")
+        )
+        let provider = RetryCoordinatorStreamingProvider(
+            factoryErrors: [],
+            sessions: [session]
+        )
+        let recorder = CoordinatorAudioRecorder()
+        let accessibility = CoordinatorAccessibilityClient(capability: .finalOnly)
+        let output = CoordinatorFinalTextOutput()
+        let overlayPresenter = CoordinatorOverlayPresenter()
+        let appendSession = CoordinatorCurrentFocusAppendSession(
+            applyOutcomes: [.deliveryUncertain]
+        )
+        let appendFactory = CoordinatorCurrentFocusAppendSessionFactory(session: appendSession)
+        let reviewDelivery = CoordinatorReviewDestinationDelivery(capability: .finalOnly)
+        let reviewPresenter = CoordinatorReviewSurfacePresenter()
+        let viewModel = MainViewModel(
+            audioRecorder: recorder,
+            settings: AppSettings(
+                appId: "configured-app",
+                appSecret: "configured-secret",
+                autoInsert: true,
+                playSound: false,
+                reviewBeforeInsert: true
+            ),
+            hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
+            streamingProvider: provider,
+            accessibilityClient: accessibility,
+            finalTextOutput: output,
+            overlayPresenter: overlayPresenter,
+            reviewDestinationDelivery: reviewDelivery,
+            reviewSurfacePresenter: reviewPresenter,
+            currentFocusAppendSessionFactory: appendFactory,
+            streamingDrainPolicy: StreamingDrainPolicy(
+                operationTimeoutNanoseconds: 100_000_000,
+                postReleaseDrainTimeoutNanoseconds: 2_000_000
+            ),
+            streamingRetryDelay: { _ in 0 },
+            streamingRetrySleeper: { _ in }
+        )
+        recorder.resetTracking()
+        _ = generation
+        return DrainExpiryReviewCoordinatorContext(
+            viewModel: viewModel,
+            recorder: recorder,
+            session: session,
+            provider: provider,
+            accessibility: accessibility,
+            output: output,
+            overlayPresenter: overlayPresenter,
+            appendSession: appendSession,
+            appendFactory: appendFactory,
+            reviewDelivery: reviewDelivery,
+            reviewPresenter: reviewPresenter
         )
     }
 
@@ -4758,6 +4890,22 @@ private struct ReviewStreamingCoordinatorContext {
     let accessibility: CoordinatorAccessibilityClient
     let output: CoordinatorFinalTextOutput
     let overlayPresenter: CoordinatorOverlayPresenter
+    let reviewPresenter: CoordinatorReviewSurfacePresenter
+}
+
+@MainActor
+private struct DrainExpiryReviewCoordinatorContext {
+    let viewModel: MainViewModel
+    let recorder: CoordinatorAudioRecorder
+    let session: ReviewNonCooperativeLatePacketSession
+    let provider: RetryCoordinatorStreamingProvider
+    let accessibility: CoordinatorAccessibilityClient
+    let output: CoordinatorFinalTextOutput
+    let overlayPresenter: CoordinatorOverlayPresenter
+    let appendSession: CoordinatorCurrentFocusAppendSession
+    let appendFactory: CoordinatorCurrentFocusAppendSessionFactory
+    let reviewDelivery: CoordinatorReviewDestinationDelivery
+    let reviewPresenter: CoordinatorReviewSurfacePresenter
 }
 
 @MainActor
@@ -4765,9 +4913,10 @@ private final class CoordinatorReviewDestinationDelivery: ReviewDestinationDeliv
     private let capability: CoordinatorAccessibilityClient.Capability
     private let application: ReviewApplicationIdentity
     private(set) var captureCallCount = 0
+    private(set) var deliverCallCount = 0
     private(set) var deliveredTexts: [String] = []
     private(set) var copyCalls = 0
-    var result: ReviewDeliveryResult = .inserted
+    var result: ReviewDeliveryResult = .submittedUnverified
 
     init(capability: CoordinatorAccessibilityClient.Capability) {
         self.capability = capability
@@ -4798,6 +4947,7 @@ private final class CoordinatorReviewDestinationDelivery: ReviewDestinationDeliv
         _ frozenText: String,
         to destination: ReviewDestinationToken
     ) async -> ReviewDeliveryResult {
+        deliverCallCount += 1
         deliveredTexts.append(frozenText)
         return result
     }
@@ -4812,9 +4962,22 @@ private final class CoordinatorReviewSurfacePresenter: ReviewSurfacePresenting {
     private(set) var draftStates: [TranscriptionReviewState] = []
     private(set) var dismissCallCount = 0
     private var onDraftChange: (@MainActor (String) -> Void)?
-    private var onConfirm: (@MainActor () -> Void)?
-    private var onRetryReadiness: (@MainActor () -> Void)?
+    private var onConfirm: (@MainActor (ReviewConfirmationIntent) -> Void)?
     private var onDiscard: (@MainActor () -> Void)?
+    private var lastDraftState: TranscriptionReviewState?
+
+    var presentedTexts: [String] {
+        readOnlyPreviews + draftStates.compactMap { state in
+            if case .editable(let draft, _, _) = state {
+                return draft
+            }
+            return nil
+        }
+    }
+
+    var presentationCount: Int {
+        renderReadOnlyCallCount + renderDraftCallCount
+    }
 
     func renderReadOnly(phase: ReviewReadOnlyPhase, preview: String) {
         renderReadOnlyCallCount += 1
@@ -4825,20 +4988,21 @@ private final class CoordinatorReviewSurfacePresenter: ReviewSurfacePresenting {
     func renderDraft(
         state: TranscriptionReviewState,
         onDraftChange: @escaping @MainActor (String) -> Void,
-        onConfirm: @escaping @MainActor () -> Void,
-        onRetryReadiness: @escaping @MainActor () -> Void,
+        onConfirm: @escaping @MainActor (ReviewConfirmationIntent) -> Void,
         onDiscard: @escaping @MainActor () -> Void
     ) {
         renderDraftCallCount += 1
         draftStates.append(state)
+        lastDraftState = state
         self.onDraftChange = onDraftChange
         self.onConfirm = onConfirm
-        self.onRetryReadiness = onRetryReadiness
         self.onDiscard = onDiscard
     }
 
-    func requestEditableReadiness() async -> ReviewEditableTransitionResult {
-        .ready
+    func requestPresentationFocus(
+        _ request: ReviewPresentationFocusRequest
+    ) async -> ReviewPresentationFocusOutcome {
+        ReviewPresentationFocusOutcome(request: request, result: .focused)
     }
 
     func dismiss() {
@@ -4847,19 +5011,181 @@ private final class CoordinatorReviewSurfacePresenter: ReviewSurfacePresenting {
 
     func invokeDraftChange(_ draft: String) {
         onDraftChange?(draft)
+        if case .editable(_, let isPossiblyIncomplete, _) = lastDraftState {
+            lastDraftState = .editable(
+                draft: draft,
+                isPossiblyIncomplete: isPossiblyIncomplete,
+                feedback: nil
+            )
+        }
     }
 
     func invokeConfirm() {
-        onConfirm?()
+        guard let lastDraftState,
+              case .editable = lastDraftState,
+              let onConfirm else { return }
+        let hostingView = NSHostingView(
+            rootView: TranscriptionReviewView(
+                state: lastDraftState,
+                onConfirm: onConfirm
+            )
+        )
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 320),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hostingView
+        hostingView.frame = NSRect(x: 0, y: 0, width: 520, height: 320)
+        hostingView.autoresizingMask = [.width, .height]
+        window.isReleasedWhenClosed = false
+        window.makeKeyAndOrderFront(nil)
+        hostingView.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        hostingView.layoutSubtreeIfNeeded()
+        if let sendButton = button(titled: "发送", in: hostingView) {
+            sendButton.performClick(nil)
+        } else {
+            XCTFail("the opaque confirmation path must materialize the real Send button")
+        }
+        window.orderOut(nil)
+        window.close()
     }
 
-    func invokeRetryReadiness() {
-        onRetryReadiness?()
+    @discardableResult
+    func invokeSendButton() -> Bool {
+        guard let lastDraftState,
+              case .editable = lastDraftState,
+              let onConfirm else { return false }
+        let controller = ReviewWindowController()
+        controller.renderDraft(
+            state: lastDraftState,
+            onDraftChange: { _ in },
+            onConfirm: onConfirm,
+            onDiscard: {}
+        )
+        defer { controller.dismiss() }
+        guard let panel = NSApp.windows.compactMap({ $0 as? ReviewPanel }).last,
+              let contentView = panel.contentView else {
+            XCTFail("the production review panel must materialize for the Send action")
+            return false
+        }
+        panel.makeKeyAndOrderFront(nil)
+        contentView.layoutSubtreeIfNeeded()
+        panel.displayIfNeeded()
+        contentView.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01))
+        if let sendButton = button(titled: "发送", in: contentView) {
+            sendButton.performClick(nil)
+            return true
+        }
+        guard let event = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [.command],
+            timestamp: 0,
+            windowNumber: panel.windowNumber,
+            context: nil,
+            characters: "\r",
+            charactersIgnoringModifiers: "\r",
+            isARepeat: false,
+            keyCode: 36
+        ) else {
+            XCTFail("the production review panel must materialize the real Send action")
+            return false
+        }
+        NSApp.sendEvent(event)
+        return true
+    }
+
+    @discardableResult
+    func invokeQualifiedReturn() -> Bool {
+        guard let lastDraftState,
+              case .editable = lastDraftState,
+              let onConfirm else { return false }
+        let hostingView = NSHostingView(
+            rootView: TranscriptionReviewView(
+                state: lastDraftState,
+                onConfirm: onConfirm
+            )
+        )
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 320),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hostingView
+        window.isReleasedWhenClosed = false
+        window.makeKeyAndOrderFront(nil)
+        hostingView.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        hostingView.layoutSubtreeIfNeeded()
+        defer {
+            window.orderOut(nil)
+            window.close()
+        }
+        guard let editor = editableTextView(in: hostingView),
+              window.makeFirstResponder(editor),
+              let event = NSEvent.keyEvent(
+                  with: .keyDown,
+                  location: .zero,
+                  modifierFlags: [],
+                  timestamp: 0,
+                  windowNumber: window.windowNumber,
+                  context: nil,
+                  characters: "\r",
+                  charactersIgnoringModifiers: "\r",
+                  isARepeat: false,
+                  keyCode: 36
+              ) else {
+            XCTFail("the qualified native Return path must materialize the real editor")
+            return false
+        }
+        editor.keyDown(with: event)
+        return true
     }
 
     func invokeDiscard() {
         onDiscard?()
     }
+
+    private func button(titled title: String, in view: NSView?) -> NSButton? {
+        guard let view else { return nil }
+        if let button = view as? NSButton,
+            button.title == title ||
+            button.accessibilityTitle() == title ||
+            button.accessibilityLabel() == title ||
+            (title == "发送" &&
+                button.keyEquivalent == "\r" &&
+                button.keyEquivalentModifierMask.contains(.command)) ||
+            (title == "发送" &&
+                button.isEnabled &&
+                button.title != "取消") {
+            return button
+        }
+        for subview in view.subviews.reversed() {
+            if let button = button(titled: title, in: subview) {
+                return button
+            }
+        }
+        return nil
+    }
+
+    private func editableTextView(in view: NSView?) -> NSTextView? {
+        guard let view else { return nil }
+        if let textView = view as? NSTextView, textView.isEditable {
+            return textView
+        }
+        for subview in view.subviews.reversed() {
+            if let textView = editableTextView(in: subview) {
+                return textView
+            }
+        }
+        return nil
+    }
+
 }
 
 @MainActor
@@ -5877,6 +6203,31 @@ private final class CoordinatorFinalTextOutput: FinalTextOutput {
         return .inserted
     }
 
+    func insertOnce(
+        _ text: String,
+        destination: CursorDestinationToken,
+        validateBeforeMutation: @escaping () throws -> Bool,
+        validateAfterPosting: () throws -> Bool,
+        postPairIfPreflightRemainsValid pairGate: (@escaping () -> Void) -> Bool
+    ) -> FinalTextInsertionResult {
+        do {
+            guard try validateBeforeMutation() else { return .destinationInvalid }
+            var didInsert = false
+            guard pairGate({ [self] in
+                self.onInsertOnce?()
+                self.insertedTexts.append(text)
+                self.destinationProcessIdentifiers.append(destination.processIdentifier)
+                self.syntheticInputCallCount += 1
+                didInsert = true
+            }), didInsert else {
+                return .deliveryFailed
+            }
+            return try validateAfterPosting() ? .inserted : .deliveryUncertain
+        } catch {
+            return .deliveryUncertain
+        }
+    }
+
     func copyForManualRecovery(_ text: String) {
         copiedTexts.append(text)
     }
@@ -5888,6 +6239,27 @@ private final class CoordinatorFinalTextOutput: FinalTextOutput {
             syntheticInputCallCount += 1
         }
         return currentFocusInsertionResult
+    }
+
+    func insertReviewAtCurrentFocusOnce(
+        _ text: String,
+        processIdentifier: pid_t,
+        validateBeforeMutation: @escaping () -> ReviewCurrentFocusValidation,
+        validateAfterPosting: () -> ReviewCurrentFocusValidation,
+        postPairIfPreflightRemainsValid pairGate: (@escaping () -> Void) -> Bool
+    ) -> FinalTextInsertionResult {
+        guard validateBeforeMutation() == .valid else { return .destinationInvalid }
+        var didInsert = false
+        guard pairGate({ [self] in
+            self.currentFocusAttemptedTexts.append(text)
+            self.currentFocusInsertedTexts.append(text)
+            self.destinationProcessIdentifiers.append(processIdentifier)
+            self.syntheticInputCallCount += 1
+            didInsert = true
+        }), didInsert else {
+            return .deliveryFailed
+        }
+        return validateAfterPosting() == .valid ? .inserted : .deliveryUncertain
     }
 }
 

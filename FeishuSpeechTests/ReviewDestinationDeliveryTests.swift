@@ -128,9 +128,13 @@ final class ReviewDestinationDeliveryTests: XCTestCase {
         let trace = Issue38ReviewTrace()
         let pasteboard = Issue38ReviewPasteboardWriter(trace: trace)
         let keyPoster = Issue38ReviewKeyEventPoster(trace: trace)
+        let unicodePoster = Issue38ReviewUnicodePoster()
         let output = SystemFinalTextOutput(
             pasteboardWriter: pasteboard,
-            keyEventPoster: keyPoster
+            keyEventPoster: keyPoster,
+            currentFocusEventPoster: unicodePoster,
+            secureInputStateProvider: Issue38ReviewSecureInputProvider(),
+            frontmostProcessProvider: Issue38ReviewFrontmostProvider()
         )
         var beforeCalls = 0
         var afterCalls = 0
@@ -147,36 +151,51 @@ final class ReviewDestinationDeliveryTests: XCTestCase {
                 afterCalls += 1
                 trace.events.append("postflight")
                 return true
+            },
+            postPairIfPreflightRemainsValid: { postPair in
+                postPair()
+                return true
             }
         )
 
-        XCTAssertEqual(result, .inserted)
+        XCTAssertEqual(result, .submittedUnverified)
         XCTAssertEqual(beforeCalls, 1)
         XCTAssertEqual(afterCalls, 1)
-        XCTAssertEqual(trace.events, ["preflight", "pasteboard", "post-command-v", "postflight"])
-        XCTAssertEqual(pasteboard.writtenTexts, ["PRIVATE_FROZEN_DRAFT"])
-        XCTAssertEqual(keyPoster.processIdentifiers, [42])
+        XCTAssertEqual(trace.events, ["preflight", "postflight"])
+        XCTAssertEqual(pasteboard.writtenTexts, [])
+        XCTAssertEqual(keyPoster.processIdentifiers, [])
+        XCTAssertEqual(unicodePoster.requestedTexts, ["PRIVATE_FROZEN_DRAFT"])
+        XCTAssertEqual(unicodePoster.processIdentifiers, [42])
     }
 
     func test_twoPhasePaste_preflightFailureLeavesPasteboardAndSyntheticEventsUntouched() {
         let trace = Issue38ReviewTrace()
         let pasteboard = Issue38ReviewPasteboardWriter(trace: trace)
         let keyPoster = Issue38ReviewKeyEventPoster(trace: trace)
+        let unicodePoster = Issue38ReviewUnicodePoster()
         let output = SystemFinalTextOutput(
             pasteboardWriter: pasteboard,
-            keyEventPoster: keyPoster
+            keyEventPoster: keyPoster,
+            currentFocusEventPoster: unicodePoster,
+            secureInputStateProvider: Issue38ReviewSecureInputProvider(),
+            frontmostProcessProvider: Issue38ReviewFrontmostProvider()
         )
 
         let result = output.insertOnce(
             "PRIVATE_FROZEN_DRAFT",
             destination: Issue38ReviewFixtures.cursorToken(),
             validateBeforeMutation: { false },
-            validateAfterPosting: { XCTFail("postflight must not run after preflight rejection"); return false }
+            validateAfterPosting: { XCTFail("postflight must not run after preflight rejection"); return false },
+            postPairIfPreflightRemainsValid: { postPair in
+                postPair()
+                return true
+            }
         )
 
         XCTAssertEqual(result, .destinationInvalid)
         XCTAssertEqual(pasteboard.writtenTexts, [])
         XCTAssertEqual(keyPoster.processIdentifiers, [])
+        XCTAssertEqual(unicodePoster.requestedTexts, [])
         XCTAssertEqual(trace.events, [])
     }
 
@@ -184,30 +203,44 @@ final class ReviewDestinationDeliveryTests: XCTestCase {
         let trace = Issue38ReviewTrace()
         let pasteboard = Issue38ReviewPasteboardWriter(trace: trace)
         let keyPoster = Issue38ReviewKeyEventPoster(trace: trace)
+        let unicodePoster = Issue38ReviewUnicodePoster()
         let output = SystemFinalTextOutput(
             pasteboardWriter: pasteboard,
-            keyEventPoster: keyPoster
+            keyEventPoster: keyPoster,
+            currentFocusEventPoster: unicodePoster,
+            secureInputStateProvider: Issue38ReviewSecureInputProvider(),
+            frontmostProcessProvider: Issue38ReviewFrontmostProvider()
         )
 
         let result = output.insertOnce(
             "PRIVATE_FROZEN_DRAFT",
             destination: Issue38ReviewFixtures.cursorToken(),
             validateBeforeMutation: { true },
-            validateAfterPosting: { false }
+            validateAfterPosting: { false },
+            postPairIfPreflightRemainsValid: { postPair in
+                postPair()
+                return true
+            }
         )
 
         XCTAssertEqual(result, .deliveryUncertain)
-        XCTAssertEqual(pasteboard.writtenTexts, ["PRIVATE_FROZEN_DRAFT"])
-        XCTAssertEqual(keyPoster.processIdentifiers, [42])
+        XCTAssertEqual(pasteboard.writtenTexts, [])
+        XCTAssertEqual(keyPoster.processIdentifiers, [])
+        XCTAssertEqual(unicodePoster.requestedTexts, ["PRIVATE_FROZEN_DRAFT"])
+        XCTAssertEqual(unicodePoster.processIdentifiers, [42])
     }
 
     func test_twoPhasePaste_rejectsUnsafeTextBeforeAnyMutation() {
         let trace = Issue38ReviewTrace()
         let pasteboard = Issue38ReviewPasteboardWriter(trace: trace)
         let keyPoster = Issue38ReviewKeyEventPoster(trace: trace)
+        let unicodePoster = Issue38ReviewUnicodePoster()
         let output = SystemFinalTextOutput(
             pasteboardWriter: pasteboard,
-            keyEventPoster: keyPoster
+            keyEventPoster: keyPoster,
+            currentFocusEventPoster: unicodePoster,
+            secureInputStateProvider: Issue38ReviewSecureInputProvider(),
+            frontmostProcessProvider: Issue38ReviewFrontmostProvider()
         )
 
         let result = output.insertOnce(
@@ -220,6 +253,7 @@ final class ReviewDestinationDeliveryTests: XCTestCase {
         XCTAssertEqual(result, .deliveryFailed)
         XCTAssertEqual(pasteboard.writtenTexts, [])
         XCTAssertEqual(keyPoster.processIdentifiers, [])
+        XCTAssertEqual(unicodePoster.requestedTexts, [])
     }
 
     func test_twoPhasePaste_acceptsExactMultilineReviewDraft_withoutNormalization() {
@@ -227,21 +261,31 @@ final class ReviewDestinationDeliveryTests: XCTestCase {
         let trace = Issue38ReviewTrace()
         let pasteboard = Issue38ReviewPasteboardWriter(trace: trace)
         let keyPoster = Issue38ReviewKeyEventPoster(trace: trace)
+        let unicodePoster = Issue38ReviewUnicodePoster()
         let output = SystemFinalTextOutput(
             pasteboardWriter: pasteboard,
-            keyEventPoster: keyPoster
+            keyEventPoster: keyPoster,
+            currentFocusEventPoster: unicodePoster,
+            secureInputStateProvider: Issue38ReviewSecureInputProvider(),
+            frontmostProcessProvider: Issue38ReviewFrontmostProvider()
         )
 
         let result = output.insertOnce(
             draft,
             destination: Issue38ReviewFixtures.cursorToken(),
             validateBeforeMutation: { true },
-            validateAfterPosting: { true }
+            validateAfterPosting: { true },
+            postPairIfPreflightRemainsValid: { postPair in
+                postPair()
+                return true
+            }
         )
 
-        XCTAssertEqual(result, .inserted)
-        XCTAssertEqual(pasteboard.writtenTexts, [draft])
-        XCTAssertEqual(keyPoster.processIdentifiers, [42])
+        XCTAssertEqual(result, .submittedUnverified)
+        XCTAssertEqual(pasteboard.writtenTexts, [])
+        XCTAssertEqual(keyPoster.processIdentifiers, [])
+        XCTAssertEqual(unicodePoster.requestedTexts, [draft])
+        XCTAssertEqual(unicodePoster.processIdentifiers, [42])
     }
 
     func test_twoPhasePaste_rejectsTabAndCarriageReturn_withoutNormalization() {
@@ -249,21 +293,30 @@ final class ReviewDestinationDeliveryTests: XCTestCase {
             let trace = Issue38ReviewTrace()
             let pasteboard = Issue38ReviewPasteboardWriter(trace: trace)
             let keyPoster = Issue38ReviewKeyEventPoster(trace: trace)
+            let unicodePoster = Issue38ReviewUnicodePoster()
             let output = SystemFinalTextOutput(
                 pasteboardWriter: pasteboard,
-                keyEventPoster: keyPoster
+                keyEventPoster: keyPoster,
+                currentFocusEventPoster: unicodePoster,
+                secureInputStateProvider: Issue38ReviewSecureInputProvider(),
+                frontmostProcessProvider: Issue38ReviewFrontmostProvider()
             )
 
             let result = output.insertOnce(
                 draft,
                 destination: Issue38ReviewFixtures.cursorToken(),
                 validateBeforeMutation: { XCTFail("control text must be rejected before preflight"); return true },
-                validateAfterPosting: { XCTFail("control text must not reach postflight"); return true }
+                validateAfterPosting: { XCTFail("control text must not reach postflight"); return true },
+                postPairIfPreflightRemainsValid: { postPair in
+                    postPair()
+                    return true
+                }
             )
 
             XCTAssertEqual(result, .deliveryFailed, "draft: \(draft.debugDescription)")
             XCTAssertEqual(pasteboard.writtenTexts, [], "draft: \(draft.debugDescription)")
             XCTAssertEqual(keyPoster.processIdentifiers, [], "draft: \(draft.debugDescription)")
+            XCTAssertEqual(unicodePoster.requestedTexts, [], "draft: \(draft.debugDescription)")
         }
     }
 
@@ -314,7 +367,11 @@ final class ReviewDestinationDeliveryTests: XCTestCase {
             applicationRuntime: runtime,
             applicationActivator: activator,
             accessibility: accessibility,
-            finalTextOutput: output
+            finalTextOutput: output,
+            inputMonitor: Issue38ReviewInputMonitor(),
+            activationMonitor: Issue38ReviewActivationMonitor(),
+            modifierSampler: { [] },
+            modifierSleeper: { _ in true }
         )
         let capture = delivery.capture(generation: 42)
         guard case .captured(let destination) = capture else {
@@ -341,7 +398,11 @@ final class ReviewDestinationDeliveryTests: XCTestCase {
             applicationRuntime: runtime,
             applicationActivator: activator,
             accessibility: accessibility,
-            finalTextOutput: output
+            finalTextOutput: output,
+            inputMonitor: Issue38ReviewInputMonitor(),
+            activationMonitor: Issue38ReviewActivationMonitor(),
+            modifierSampler: { [] },
+            modifierSleeper: { _ in true }
         )
         let capture = delivery.capture(generation: 43)
         guard case .captured(let destination) = capture else {
@@ -576,6 +637,108 @@ private final class Issue38ReviewOutput: FinalTextOutput {
         }
     }
 
+    func insertOnce(
+        _ text: String,
+        destination: CursorDestinationToken,
+        validateBeforeMutation: @escaping () throws -> Bool,
+        validateAfterPosting: () throws -> Bool,
+        postPairIfPreflightRemainsValid pairGate: (@escaping () -> Void) -> Bool
+    ) -> FinalTextInsertionResult {
+        do {
+            trace.append("preflight")
+            guard try validateBeforeMutation() else { return .destinationInvalid }
+            var didInsert = false
+            guard pairGate({ [self] in
+                self.mutationCount += 1
+                self.insertedTexts.append(text)
+                self.trace.append("mutation")
+                didInsert = true
+            }), didInsert else {
+                return .deliveryFailed
+            }
+            let postflightPassed = try validateAfterPosting()
+            trace.append("postflight")
+            return postflightPassed ? .inserted : .deliveryUncertain
+        } catch {
+            return .deliveryUncertain
+        }
+    }
+
     func insertAtCurrentFocusOnce(_ text: String) -> FinalTextInsertionResult { .inserted }
     func copyForManualRecovery(_ text: String) {}
+}
+
+@MainActor
+private final class Issue38ReviewInputMonitor: CurrentFocusInputMonitoring {
+    let supportsReviewDeliveryEpoch = true
+    var interferenceEpoch: UInt64 = 0
+
+    func startMonitoring(_ handler: @escaping @MainActor () -> Void) {}
+
+    func armMonitoringFailClosed(_ handler: @escaping @MainActor () -> Void) -> Bool {
+        true
+    }
+
+    func armMonitoringFailClosedWithEpoch(
+        _ handler: @escaping @MainActor () -> Void
+    ) -> UInt64? {
+        0
+    }
+
+    func postCompleteSyntheticPairIfInterferenceEpochIsUnchanged(
+        expectedEpoch: UInt64,
+        _ postPair: () -> Void
+    ) -> Bool {
+        guard expectedEpoch == interferenceEpoch else { return false }
+        postPair()
+        return true
+    }
+
+    func stopMonitoring() {}
+}
+
+@MainActor
+private final class Issue38ReviewActivationMonitor: CurrentFocusActivationMonitoring {
+    let supportsReviewDeliveryEpoch = true
+    var activationEpoch: UInt64 = 0
+
+    func startMonitoring(_ handler: @escaping @MainActor (pid_t) -> Void) {}
+
+    func armMonitoringFailClosedWithEpoch(
+        _ handler: @escaping @MainActor (pid_t) -> Void
+    ) -> UInt64? {
+        0
+    }
+
+    func stopMonitoring() {}
+}
+
+@MainActor
+private final class Issue38ReviewUnicodePoster: FinalTextCurrentFocusEventPosting {
+    let result: FinalTextCurrentFocusPostResult
+    private(set) var requestedTexts: [String] = []
+    private(set) var processIdentifiers: [pid_t] = []
+
+    init(result: FinalTextCurrentFocusPostResult = .posted) {
+        self.result = result
+    }
+
+    func postUnicodeText(
+        _ text: String,
+        to processIdentifier: pid_t
+    ) -> FinalTextCurrentFocusPostResult {
+        requestedTexts.append(text)
+        processIdentifiers.append(processIdentifier)
+        return result
+    }
+}
+
+@MainActor
+private final class Issue38ReviewSecureInputProvider: SecureInputStateProviding {
+    func isSecureInputEnabled() -> Bool { false }
+}
+
+@MainActor
+private final class Issue38ReviewFrontmostProvider: FrontmostProcessProviding {
+    func frontmostProcessIdentifier() -> pid_t? { 42 }
 }

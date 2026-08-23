@@ -59,6 +59,8 @@ extension HotKeyService: HotKeyWakeRecovering {}
 
 @MainActor
 class MainViewModel: ObservableObject {
+    private static let reviewMaximumUTF16CodeUnits = 16_384
+
     private struct ResponseOutputLedger {
         enum ReservationResult {
             case owned
@@ -220,7 +222,6 @@ class MainViewModel: ObservableObject {
         let destination: ReviewDestinationToken
         var draft: ReviewDraft?
         var revision: UInt64
-        var readinessAttempt: UInt64
         var confirmationAttempt: UInt64
     }
 
@@ -247,18 +248,12 @@ class MainViewModel: ObservableObject {
             updatedAuthority.revision &+= 1
             self.reviewSurfaceAuthority = updatedAuthority
             reviewSurfaceRevision &+= 1
+            cancelReviewPresentationFocus()
             switch transcriptionReviewState {
             case .editable(_, let isPossiblyIncomplete, _):
                 transcriptionReviewState = .editable(
                     draft: reviewDraftText,
                     isPossiblyIncomplete: isPossiblyIncomplete,
-                    feedback: nil
-                )
-            case .editablePending(_, let isPossiblyIncomplete, let readiness, _):
-                transcriptionReviewState = .editablePending(
-                    draft: reviewDraftText,
-                    isPossiblyIncomplete: isPossiblyIncomplete,
-                    readiness: readiness,
                     feedback: nil
                 )
             default:
@@ -320,6 +315,9 @@ class MainViewModel: ObservableObject {
     private var reviewTransitionTask: Task<Void, Never>?
     private var reviewTransitionID: UUID?
     private var reviewReadOnlyPresentationTask: Task<Void, Never>?
+    private var reviewPresentationFocusTask: Task<Void, Never>?
+    private var reviewPresentationFocusRequest: ReviewPresentationFocusRequest?
+    private var nextPresentationFocusAttemptID: UInt64 = 0
     private var reviewDeliveryTask: Task<Void, Never>?
 
     var statusText: String {
@@ -450,30 +448,6 @@ class MainViewModel: ObservableObject {
                 isPossiblyIncomplete: isPossiblyIncomplete,
                 feedback: .securityRejected
             )
-        case .editablePending(
-            let draft,
-            let isPossiblyIncomplete,
-            let readiness,
-            _
-        ):
-            let preservedReadiness: ReviewEditableReadinessState
-            if case .preparing(let attempt) = readiness {
-                reviewTransitionTask?.cancel()
-                reviewTransitionTask = nil
-                reviewTransitionID = nil
-                preservedReadiness = .blocked(
-                    attempt: attempt,
-                    failure: .surfaceInvalidated
-                )
-            } else {
-                preservedReadiness = readiness
-            }
-            transcriptionReviewState = .editablePending(
-                draft: draft,
-                isPossiblyIncomplete: isPossiblyIncomplete,
-                readiness: preservedReadiness,
-                feedback: .securityRejected
-            )
         default:
             return
         }
@@ -488,42 +462,16 @@ class MainViewModel: ObservableObject {
             return
         }
         switch transcriptionReviewState {
-        case .editable, .editablePending:
+        case .editable:
             break
         case .idle, .streaming, .sealing, .confirming:
             return
         }
-
-        let reviewID = authority.identifier
-        var callbackRevision = reviewSurfaceRevision
-        reviewSurfacePresenter.renderDraft(
-            state: transcriptionReviewState,
-            onDraftChange: { [weak self] changedDraft in
-                guard let self,
-                      self.reviewSurfaceRevision == callbackRevision else {
-                    return
-                }
-                self.updateReviewDraft(changedDraft, reviewID: reviewID)
-                callbackRevision = self.reviewSurfaceRevision
-            },
-            onConfirm: { [weak self] in
-                self?.confirmReviewDraft(
-                    reviewID: reviewID,
-                    callbackRevision: callbackRevision
-                )
-            },
-            onRetryReadiness: { [weak self] in
-                self?.retryReviewReadiness(
-                    reviewID: reviewID,
-                    callbackRevision: callbackRevision
-                )
-            },
-            onDiscard: { [weak self] in
-                self?.discardReviewDraft(
-                    reviewID: reviewID,
-                    callbackRevision: callbackRevision
-                )
-            }
+        cancelReviewPresentationFocus()
+        installEditableReviewSurface(reviewID: authority.identifier)
+        startReviewPresentationFocus(
+            reviewID: authority.identifier,
+            generation: authority.generation
         )
     }
 
@@ -685,6 +633,7 @@ class MainViewModel: ObservableObject {
         reviewTransitionTask = nil
         reviewTransitionID = nil
         cancelReviewReadOnlyPresentation()
+        cancelReviewPresentationFocus()
         reviewDeliveryTask?.cancel()
         reviewDeliveryTask = nil
 
@@ -757,7 +706,6 @@ class MainViewModel: ObservableObject {
                 destination: destination,
                 draft: nil,
                 revision: 0,
-                readinessAttempt: 0,
                 confirmationAttempt: 0
             )
             reviewSurfaceAuthority = authority
@@ -1848,144 +1796,94 @@ class MainViewModel: ObservableObject {
         reviewTerminalPending = false
         reviewSurfaceRevision &+= 1
         let reviewID = authority.identifier
-        var draftCallbackRevision = reviewSurfaceRevision
-        if var updatedAuthority = reviewSurfaceAuthority {
-            updatedAuthority.readinessAttempt &+= 1
-            updatedAuthority.revision &+= 1
-            reviewSurfaceAuthority = updatedAuthority
-        }
-        let readinessAttempt = reviewSurfaceAuthority?.readinessAttempt ?? 0
-        transcriptionReviewState = .editablePending(
+        transcriptionReviewState = .editable(
             draft: draft,
-            isPossiblyIncomplete: isPossiblyIncomplete,
-            readiness: .preparing(attempt: readinessAttempt)
+            isPossiblyIncomplete: isPossiblyIncomplete
         )
-        if let currentAuthority = reviewSurfaceAuthority {
-            logReviewReadiness(
-                event: "review_readiness_started",
-                authority: currentAuthority,
-                result: "started",
-                predicate: nil
-            )
-        }
-        let result = await renderEditableReviewSurface(
-            onDraftChange: { [weak self] changedDraft in
-                guard let self,
-                      self.reviewSurfaceRevision == draftCallbackRevision else {
-                    return
-                }
-                self.updateReviewDraft(changedDraft, reviewID: reviewID)
-                draftCallbackRevision = self.reviewSurfaceRevision
-            },
-            onConfirm: { [weak self] in
-                self?.confirmReviewDraft(
-                    reviewID: reviewID,
-                    callbackRevision: draftCallbackRevision
-                )
-            },
-            onRetryReadiness: { [weak self] in
-                self?.retryReviewReadiness(
-                    reviewID: reviewID,
-                    callbackRevision: draftCallbackRevision
-                )
-            },
-            onDiscard: { [weak self] in
-                self?.discardReviewDraft(
-                    reviewID: reviewID,
-                    callbackRevision: draftCallbackRevision
-                )
-            }
-        )
-        guard !Task.isCancelled,
-              reviewSurfaceAuthority?.identifier == reviewID,
-              reviewTransitionID == transitionID,
-              let currentAuthority = reviewSurfaceAuthority,
-              let currentDraft = currentAuthority.draft else {
-            return
-        }
-        if let currentAuthority = reviewSurfaceAuthority {
-            logReviewReadiness(
-                result: result,
-                authority: currentAuthority
-            )
-        }
-        transcriptionReviewState = editableReviewState(
-            for: result,
-            draft: currentDraft,
-            readinessAttempt: reviewSurfaceAuthority?.readinessAttempt ?? 0
-        )
-        reviewSurfacePresenter.renderDraft(
-            state: transcriptionReviewState,
-            onDraftChange: { [weak self] changedDraft in
-                guard let self,
-                      self.reviewSurfaceRevision == draftCallbackRevision else {
-                    return
-                }
-                self.updateReviewDraft(changedDraft, reviewID: reviewID)
-                draftCallbackRevision = self.reviewSurfaceRevision
-            },
-            onConfirm: { [weak self] in
-                self?.confirmReviewDraft(
-                    reviewID: reviewID,
-                    callbackRevision: draftCallbackRevision
-                )
-            },
-            onRetryReadiness: { [weak self] in
-                self?.retryReviewReadiness(
-                    reviewID: reviewID,
-                    callbackRevision: draftCallbackRevision
-                )
-            },
-            onDiscard: { [weak self] in
-                self?.discardReviewDraft(
-                    reviewID: reviewID,
-                    callbackRevision: draftCallbackRevision
-                )
-            }
-        )
+        installEditableReviewSurface(reviewID: reviewID)
         reviewTransitionTask = nil
         reviewTransitionID = nil
+        startReviewPresentationFocus(reviewID: reviewID, generation: identity.generation)
     }
 
-    private func editableReviewState(
-        for result: ReviewEditableTransitionResult,
-        draft: ReviewDraft,
-        readinessAttempt: UInt64
-    ) -> TranscriptionReviewState {
-        switch result {
-        case .ready:
-            return .editable(
-                draft: draft.text,
-                isPossiblyIncomplete: draft.isPossiblyIncomplete,
-                feedback: draft.feedback
+    private func installEditableReviewSurface(reviewID: UUID) {
+        guard case .editable = transcriptionReviewState else { return }
+
+        var callbackRevision = reviewSurfaceRevision
+        let confirmHandler: @MainActor (ReviewConfirmationIntent) -> Void = { [weak self] intent in
+            self?.handleReviewConfirmation(
+                intent,
+                reviewID: reviewID,
+                callbackRevision: callbackRevision
             )
-        case .pending(let failure):
-            return .editablePending(
-                draft: draft.text,
-                isPossiblyIncomplete: draft.isPossiblyIncomplete,
-                readiness: .blocked(
-                    attempt: readinessAttempt,
-                    failure: failure
-                ),
-                feedback: draft.feedback
-            )
+        }
+        reviewSurfacePresenter.renderDraft(
+            state: transcriptionReviewState,
+            onDraftChange: { [weak self] changedDraft in
+                guard let self,
+                      self.reviewSurfaceRevision == callbackRevision else {
+                    return
+                }
+                self.updateReviewDraft(changedDraft, reviewID: reviewID)
+                callbackRevision = self.reviewSurfaceRevision
+            },
+            onConfirm: confirmHandler,
+            onDiscard: { [weak self] in
+                self?.discardReviewDraft(
+                    reviewID: reviewID,
+                    callbackRevision: callbackRevision
+                )
+            }
+        )
+    }
+
+    private func startReviewPresentationFocus(reviewID: UUID, generation: UInt64) {
+        reviewPresentationFocusTask?.cancel()
+        nextPresentationFocusAttemptID &+= 1
+        let request = ReviewPresentationFocusRequest(
+            reviewID: reviewID,
+            generation: generation,
+            focusAttemptID: nextPresentationFocusAttemptID
+        )
+        reviewPresentationFocusRequest = request
+        reviewPresentationFocusTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let outcome = await self.reviewSurfacePresenter.requestPresentationFocus(request)
+            guard !Task.isCancelled,
+                  self.reviewPresentationFocusRequest == request,
+                  let authority = self.reviewSurfaceAuthority,
+                  authority.identifier == request.reviewID,
+                  authority.generation == request.generation,
+                  case .editable = self.transcriptionReviewState else {
+                return
+            }
+            self.logReviewPresentationFocus(outcome, authority: authority)
         }
     }
 
-    private func renderEditableReviewSurface(
-        onDraftChange: @escaping @MainActor (String) -> Void,
-        onConfirm: @escaping @MainActor () -> Void,
-        onRetryReadiness: @escaping @MainActor () -> Void,
-        onDiscard: @escaping @MainActor () -> Void
-    ) async -> ReviewEditableTransitionResult {
-        reviewSurfacePresenter.renderDraft(
-            state: transcriptionReviewState,
-            onDraftChange: onDraftChange,
-            onConfirm: onConfirm,
-            onRetryReadiness: onRetryReadiness,
-            onDiscard: onDiscard
+    private func cancelReviewPresentationFocus() {
+        reviewPresentationFocusTask?.cancel()
+        reviewPresentationFocusTask = nil
+        reviewPresentationFocusRequest = nil
+    }
+
+    private func logReviewPresentationFocus(
+        _ outcome: ReviewPresentationFocusOutcome,
+        authority: ReviewSurfaceAuthority
+    ) {
+        let result: String
+        let predicate: String
+        switch outcome.result {
+        case .focused:
+            result = "focused"
+            predicate = "none"
+        case .notFocused(let failure):
+            result = failure.isCancellation ? "cancelled" : failure.telemetryResult
+            predicate = failure.telemetryPredicate ?? "none"
+        }
+        logger.info(
+            "review_presentation_focus_result generation=\(authority.generation, privacy: .public) focusAttemptID=\(outcome.request.focusAttemptID, privacy: .public) result=\(result, privacy: .public) predicate=\(predicate, privacy: .public)"
         )
-        return await reviewSurfacePresenter.requestEditableReadiness()
     }
 
     private func updateReviewDraft(_ draft: String, reviewID: UUID) {
@@ -2003,6 +1901,7 @@ class MainViewModel: ObservableObject {
         authority.revision &+= 1
         reviewSurfaceAuthority = authority
         reviewSurfaceRevision &+= 1
+        cancelReviewPresentationFocus()
         setReviewDraftProjection(draft)
         switch transcriptionReviewState {
         case .editable(_, let isPossiblyIncomplete, _):
@@ -2011,16 +1910,35 @@ class MainViewModel: ObservableObject {
                 isPossiblyIncomplete: isPossiblyIncomplete,
                 feedback: nil
             )
-        case .editablePending(_, let isPossiblyIncomplete, let readiness, _):
-            transcriptionReviewState = .editablePending(
-                draft: draft,
-                isPossiblyIncomplete: isPossiblyIncomplete,
-                readiness: readiness,
-                feedback: nil
-            )
         default:
             break
         }
+    }
+
+    private func setReviewFailureFeedback(
+        _ feedback: ReviewDraftFeedback,
+        reviewID: UUID
+    ) {
+        guard var authority = reviewSurfaceAuthority,
+              authority.identifier == reviewID,
+              let existingDraft = authority.draft else {
+            return
+        }
+        authority.draft = ReviewDraft(
+            text: existingDraft.text,
+            isPossiblyIncomplete: existingDraft.isPossiblyIncomplete,
+            feedback: feedback
+        )
+        authority.revision &+= 1
+        reviewSurfaceAuthority = authority
+        reviewSurfaceRevision &+= 1
+        setReviewDraftProjection(existingDraft.text)
+        transcriptionReviewState = .editable(
+            draft: existingDraft.text,
+            isPossiblyIncomplete: existingDraft.isPossiblyIncomplete,
+            feedback: feedback
+        )
+        renderCurrentReviewDraftSurface()
     }
 
     private func setReviewDraftProjection(_ draft: String) {
@@ -2029,184 +1947,30 @@ class MainViewModel: ObservableObject {
         projectingReviewDraft = false
     }
 
-    private func retryReviewReadiness(
+    private func handleReviewConfirmation(
+        _ intent: ReviewConfirmationIntent,
         reviewID: UUID,
-        callbackRevision: UInt64? = nil
+        callbackRevision: UInt64
     ) {
         guard var authority = reviewSurfaceAuthority,
               authority.identifier == reviewID,
-              callbackRevision.map({ $0 == reviewSurfaceRevision }) ?? true,
-              let draft = authority.draft,
-              case .editablePending = transcriptionReviewState,
-              !reviewConfirmationInFlight else {
-            return
-        }
-
-        authority.readinessAttempt &+= 1
-        authority.revision &+= 1
-        reviewSurfaceAuthority = authority
-        reviewSurfaceRevision &+= 1
-        transcriptionReviewState = .editablePending(
-            draft: draft.text,
-            isPossiblyIncomplete: draft.isPossiblyIncomplete,
-            readiness: .preparing(attempt: authority.readinessAttempt),
-            feedback: draft.feedback
-        )
-        logReviewReadiness(
-            event: "review_readiness_started",
-            authority: authority,
-            result: "started",
-            predicate: nil
-        )
-        var presentationRevision = reviewSurfaceRevision
-
-        let transitionID = UUID()
-        reviewTransitionID = transitionID
-        reviewTransitionTask?.cancel()
-        reviewTransitionTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            let result = await self.renderEditableReviewSurface(
-                onDraftChange: { [weak self] changedDraft in
-                    guard let self,
-                          self.reviewSurfaceRevision == presentationRevision else {
-                        return
-                    }
-                    self.updateReviewDraft(changedDraft, reviewID: reviewID)
-                    presentationRevision = self.reviewSurfaceRevision
-                },
-                onConfirm: { [weak self] in
-                    self?.confirmReviewDraft(
-                        reviewID: reviewID,
-                        callbackRevision: presentationRevision
-                    )
-                },
-                onRetryReadiness: { [weak self] in
-                    self?.retryReviewReadiness(
-                        reviewID: reviewID,
-                        callbackRevision: presentationRevision
-                    )
-                },
-                onDiscard: { [weak self] in
-                    self?.discardReviewDraft(
-                        reviewID: reviewID,
-                        callbackRevision: presentationRevision
-                    )
-                }
-            )
-            guard !Task.isCancelled,
-                  self.reviewSurfaceAuthority?.identifier == reviewID,
-                  self.reviewTransitionID == transitionID,
-                  let currentDraft = self.reviewSurfaceAuthority?.draft else {
-                return
-            }
-
-            if let currentAuthority = self.reviewSurfaceAuthority {
-                self.logReviewReadiness(
-                    result: result,
-                    authority: currentAuthority
-                )
-            }
-
-            switch result {
-            case .ready:
-                self.transcriptionReviewState = .editable(
-                    draft: currentDraft.text,
-                    isPossiblyIncomplete: currentDraft.isPossiblyIncomplete,
-                    feedback: currentDraft.feedback
-                )
-                self.reviewSurfacePresenter.renderDraft(
-                    state: self.transcriptionReviewState,
-                    onDraftChange: { [weak self] changedDraft in
-                        guard let self,
-                              self.reviewSurfaceRevision == presentationRevision else {
-                            return
-                        }
-                        self.updateReviewDraft(changedDraft, reviewID: reviewID)
-                        presentationRevision = self.reviewSurfaceRevision
-                    },
-                    onConfirm: { [weak self] in
-                        self?.confirmReviewDraft(
-                            reviewID: reviewID,
-                            callbackRevision: presentationRevision
-                        )
-                    },
-                    onRetryReadiness: { [weak self] in
-                        self?.retryReviewReadiness(
-                            reviewID: reviewID,
-                            callbackRevision: presentationRevision
-                        )
-                    },
-                    onDiscard: { [weak self] in
-                        self?.discardReviewDraft(
-                            reviewID: reviewID,
-                            callbackRevision: presentationRevision
-                        )
-                    }
-                )
-            case .pending(let failure):
-                self.transcriptionReviewState = .editablePending(
-                    draft: currentDraft.text,
-                    isPossiblyIncomplete: currentDraft.isPossiblyIncomplete,
-                    readiness: .blocked(
-                        attempt: self.reviewSurfaceAuthority?.readinessAttempt ?? 0,
-                        failure: failure
-                    ),
-                    feedback: currentDraft.feedback
-                )
-                self.reviewSurfacePresenter.renderDraft(
-                    state: self.transcriptionReviewState,
-                    onDraftChange: { [weak self] changedDraft in
-                        guard let self,
-                              self.reviewSurfaceRevision == presentationRevision else {
-                            return
-                        }
-                        self.updateReviewDraft(changedDraft, reviewID: reviewID)
-                        presentationRevision = self.reviewSurfaceRevision
-                    },
-                    onConfirm: { [weak self] in
-                        self?.confirmReviewDraft(
-                            reviewID: reviewID,
-                            callbackRevision: presentationRevision
-                        )
-                    },
-                    onRetryReadiness: { [weak self] in
-                        self?.retryReviewReadiness(
-                            reviewID: reviewID,
-                            callbackRevision: presentationRevision
-                        )
-                    },
-                    onDiscard: { [weak self] in
-                        self?.discardReviewDraft(
-                            reviewID: reviewID,
-                            callbackRevision: presentationRevision
-                        )
-                    }
-                )
-            }
-            self.reviewTransitionTask = nil
-            self.reviewTransitionID = nil
-        }
-    }
-
-    func confirmReviewDraft() {
-        guard let reviewID = reviewSurfaceAuthority?.identifier else { return }
-        confirmReviewDraft(reviewID: reviewID)
-    }
-
-    private func confirmReviewDraft(
-        reviewID: UUID,
-        callbackRevision: UInt64? = nil
-    ) {
-        guard var authority = reviewSurfaceAuthority,
-              authority.identifier == reviewID,
-              callbackRevision.map({ $0 == reviewSurfaceRevision }) ?? true,
+              callbackRevision == reviewSurfaceRevision,
               case .editable(_, let isPossiblyIncomplete, _) = transcriptionReviewState,
               let draft = authority.draft,
               !reviewConfirmationInFlight else {
             return
         }
-        let frozenText = reviewDraftText
+        _ = intent
+        let frozenText = draft.text
         guard !isContentless(frozenText) else { return }
+        guard TextInputSimulator.isSafeForReviewConfirmation(frozenText) else {
+            setReviewFailureFeedback(.unsafeText, reviewID: reviewID)
+            return
+        }
+        guard frozenText.utf16.count <= Self.reviewMaximumUTF16CodeUnits else {
+            setReviewFailureFeedback(.draftTooLong, reviewID: reviewID)
+            return
+        }
 
         authority.draft = ReviewDraft(
             text: frozenText,
@@ -2218,6 +1982,7 @@ class MainViewModel: ObservableObject {
         reviewSurfaceAuthority = authority
         let confirmationAttempt = authority.confirmationAttempt
         reviewConfirmationInFlight = true
+        cancelReviewPresentationFocus()
         transcriptionReviewState = .confirming(
             draft: frozenText,
             isPossiblyIncomplete: draft.isPossiblyIncomplete
@@ -2230,17 +1995,23 @@ class MainViewModel: ObservableObject {
         reviewSurfacePresenter.renderDraft(
             state: transcriptionReviewState,
             onDraftChange: { _ in },
-            onConfirm: {},
-            onRetryReadiness: {},
+            onConfirm: { _ in },
             onDiscard: { [weak self] in
-                self?.discardReviewDraft(reviewID: reviewID)
+                self?.discardReviewDraft(
+                    reviewID: reviewID,
+                    callbackRevision: self?.reviewSurfaceRevision ?? 0
+                )
             }
         )
 
-        let delivery = reviewDestinationDelivery
+        let destination = authority.destination
         reviewDeliveryTask = Task { @MainActor [weak self] in
-            let result = await delivery.deliver(frozenText, to: authority.destination)
-            self?.completeReviewDelivery(
+            guard let self else { return }
+            let result = await self.reviewDestinationDelivery.deliver(
+                frozenText,
+                to: destination
+            )
+            self.completeReviewDelivery(
                 reviewID: reviewID,
                 confirmationAttempt: confirmationAttempt,
                 frozenText: frozenText,
@@ -2251,15 +2022,18 @@ class MainViewModel: ObservableObject {
 
     func discardReviewDraft() {
         guard let reviewID = reviewSurfaceAuthority?.identifier else { return }
-        discardReviewDraft(reviewID: reviewID)
+        discardReviewDraft(
+            reviewID: reviewID,
+            callbackRevision: reviewSurfaceRevision
+        )
     }
 
     private func discardReviewDraft(
         reviewID: UUID,
-        callbackRevision: UInt64? = nil
+        callbackRevision: UInt64
     ) {
         guard reviewSurfaceAuthority?.identifier == reviewID,
-              callbackRevision.map({ $0 == reviewSurfaceRevision }) ?? true,
+              callbackRevision == reviewSurfaceRevision,
               isReviewDraftState else {
             return
         }
@@ -2281,10 +2055,9 @@ class MainViewModel: ObservableObject {
 
         reviewDeliveryTask = nil
         switch result {
-        case .inserted:
-            revokeReviewAuthority()
-        case .activationFailed, .identityChanged, .destinationInvalid,
-             .securityRejected, .unsafeText, .deliveryFailed, .deliveryUncertain, .cancelled:
+        case .submittedUnverified, .activationFailed, .identityChanged,
+             .destinationInvalid, .securityRejected, .unsafeText, .deliveryFailed,
+             .deliveryUncertain, .cancelled:
             guard var authority = reviewSurfaceAuthority,
                   authority.identifier == reviewID,
                   let draft = authority.draft else {
@@ -2302,13 +2075,16 @@ class MainViewModel: ObservableObject {
             setReviewDraftProjection(frozenText)
             reviewSurfaceRevision &+= 1
             hotKeyService.resetToIdle()
-            transcriptionReviewState = .editablePending(
+            transcriptionReviewState = .editable(
                 draft: frozenText,
                 isPossiblyIncomplete: draft.isPossiblyIncomplete,
-                readiness: .preparing(attempt: authority.readinessAttempt),
                 feedback: feedback
             )
-            retryReviewReadiness(reviewID: reviewID)
+            installEditableReviewSurface(reviewID: reviewID)
+            startReviewPresentationFocus(
+                reviewID: reviewID,
+                generation: authority.generation
+            )
             return
         }
         hotKeyService.resetToIdle()
@@ -2316,7 +2092,7 @@ class MainViewModel: ObservableObject {
 
     private var isReviewDraftState: Bool {
         switch transcriptionReviewState {
-        case .editable, .editablePending:
+        case .editable:
             return true
         case .idle, .streaming, .sealing, .confirming:
             return false
@@ -2339,49 +2115,14 @@ class MainViewModel: ObservableObject {
             return .deliveryCancelled
         case .deliveryFailed:
             return .deliveryFailed
-        case .inserted:
-            return .deliveryFailed
+        case .submittedUnverified:
+            return .deliveryUncertain
         }
-    }
-
-    private func logReviewReadiness(
-        result: ReviewEditableTransitionResult,
-        authority: ReviewSurfaceAuthority
-    ) {
-        switch result {
-        case .ready:
-            logReviewReadiness(
-                event: "review_readiness_ready",
-                authority: authority,
-                result: "ready",
-                predicate: nil
-            )
-        case .pending(let failure):
-            logReviewReadiness(
-                event: failure.isCancellation
-                    ? "review_readiness_cancelled"
-                    : "review_readiness_pending",
-                authority: authority,
-                result: failure.telemetryResult,
-                predicate: failure.telemetryPredicate
-            )
-        }
-    }
-
-    private func logReviewReadiness(
-        event: String,
-        authority: ReviewSurfaceAuthority,
-        result: String,
-        predicate: String?
-    ) {
-        let predicateName = predicate ?? "none"
-        logger.info(
-            "\(event, privacy: .public) generation=\(authority.generation, privacy: .public) attempt=\(authority.readinessAttempt, privacy: .public) result=\(result, privacy: .public) predicate=\(predicateName, privacy: .public)"
-        )
     }
 
     private func finishSpeechSessionForReview() {
         cancelReviewReadOnlyPresentation()
+        cancelReviewPresentationFocus()
         postReleaseDrainTask?.cancel()
         postReleaseDrainTask = nil
         postReleaseDrainDeadline = nil
@@ -2415,6 +2156,7 @@ class MainViewModel: ObservableObject {
         let hadAuthority = reviewSurfaceAuthority != nil ||
             transcriptionReviewState != .idle
         cancelReviewReadOnlyPresentation()
+        cancelReviewPresentationFocus()
         reviewSurfaceRevision &+= 1
         reviewTransitionID = nil
         reviewTransitionTask?.cancel()
@@ -2530,6 +2272,7 @@ class MainViewModel: ObservableObject {
     private func expirePostReleaseDrain(identity: StreamingSessionIdentity) async {
         guard isActive(identity), captureClosed else { return }
         let preservationState = outputPreservationState
+        let retainedPreview = responseOutputLedger.latestSnapshot
         let session = activeStreamingSession
         let consumer = consumerTask
         let captureDrain = captureDrainTask
@@ -2539,13 +2282,15 @@ class MainViewModel: ObservableObject {
         postReleaseDrainTask = nil
         postReleaseDrainDeadline = nil
         invalidateActiveIdentityAndCursor()
-        revokeReviewAuthority()
         activeIngress?.fail(.cancelled)
         holdPacketJournal.cancelWaiters()
         captureDrainTask = nil
         consumerTask = nil
         sealingTask = nil
         pendingRecorderBarrier = nil
+        reviewTransitionTask?.cancel()
+        reviewTransitionTask = nil
+        reviewTransitionID = nil
         clearInteractionReferences()
         stopMaxDurationTimer()
         captureDrain?.cancel()
@@ -2558,16 +2303,26 @@ class MainViewModel: ObservableObject {
                 await session.cancel()
             }
         }
-        switch preservationState {
-        case .committedSafe:
-            publishCompletionFeedback(.emptyFinalPreservedPartial)
-        case .deliveryUncertain:
-            publishCompletionFeedback(.provisionalOutputPreserved)
-        case .none:
-            publishAbnormalTerminalState(
-                message: streamingFailureErrorMessage,
-                reportsError: true
-            )
+
+        if presentRecoveryReviewSurface(
+            retainedPreview,
+            identity: identity
+        ) {
+            status = .idle
+            hotKeyService.resetToIdle()
+        } else {
+            revokeReviewAuthority()
+            switch preservationState {
+            case .committedSafe:
+                publishCompletionFeedback(.emptyFinalPreservedPartial)
+            case .deliveryUncertain:
+                publishCompletionFeedback(.provisionalOutputPreserved)
+            case .none:
+                publishAbnormalTerminalState(
+                    message: streamingFailureErrorMessage,
+                    reportsError: true
+                )
+            }
         }
         logger.warning(
             """
@@ -2575,6 +2330,38 @@ class MainViewModel: ObservableObject {
             preservation=\(String(describing: preservationState), privacy: .public)
             """
         )
+    }
+
+    private func presentRecoveryReviewSurface(
+        _ draft: String,
+        identity: StreamingSessionIdentity
+    ) -> Bool {
+        guard !reviewTerminalPending,
+              let authority = reviewSurfaceAuthority,
+              authority.generation == identity.generation,
+              !isContentless(draft),
+              TextInputSimulator.isSafeForReviewConfirmation(draft),
+              draft.utf16.count <= Self.reviewMaximumUTF16CodeUnits else {
+            return false
+        }
+
+        cancelReviewReadOnlyPresentation()
+        cancelReviewPresentationFocus()
+        reviewSurfaceRevision &+= 1
+        reviewTransitionTask?.cancel()
+        reviewTransitionTask = nil
+        reviewTransitionID = nil
+        reviewSurfaceAuthority = nil
+        reviewDraftIsPossiblyIncomplete = true
+        reviewConfirmationInFlight = false
+        reviewTerminalPending = false
+        setReviewDraftProjection(draft)
+        transcriptionReviewState = .sealing(preview: draft)
+        reviewSurfacePresenter.renderReadOnly(
+            phase: .recovery,
+            preview: draft
+        )
+        return true
     }
 
     @discardableResult

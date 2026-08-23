@@ -72,20 +72,20 @@ final class ReviewWindowController: NSObject, NSWindowDelegate, ReviewSurfacePre
     private let initialWindowSize = NSSize(width: 520, height: 320)
     private let minimumWindowSize = NSSize(width: 420, height: 240)
     private let maximumWindowSize = NSSize(width: 760, height: 600)
-    private static let editableReadinessTimeoutNanoseconds: UInt64 = 2_000_000_000
-    private static let editableReadinessPollNanoseconds: UInt64 = 20_000_000
+    private static let presentationFocusTimeoutNanoseconds: UInt64 = 2_000_000_000
+    private static let presentationFocusPollNanoseconds: UInt64 = 20_000_000
     private let readinessEnvironment: ReadinessEnvironment
 
     private var panel: ReviewPanel?
     private var hostingView: NSHostingView<TranscriptionReviewView>?
     private var onDraftChange: (@MainActor (String) -> Void)?
-    private var onConfirm: (@MainActor () -> Void)?
-    private var onRetryReadiness: (@MainActor () -> Void)?
+    private var onConfirm: (@MainActor (ReviewConfirmationIntent) -> Void)?
     private var onDiscard: (@MainActor () -> Void)?
     private var isDraftSurfaceActive = false
     private var isConfirming = false
-    private var editableReadinessID: UUID?
-    private var readinessAttemptOrdinal: UInt64 = 0
+    private var presentationFocusID: UUID?
+    private var presentationFocusAttemptOrdinal: UInt64 = 0
+    private var currentPresentationFocusRequest: ReviewPresentationFocusRequest?
 
     init(readinessEnvironment: ReadinessEnvironment? = nil) {
         self.readinessEnvironment = readinessEnvironment ?? .appKit
@@ -97,19 +97,27 @@ final class ReviewWindowController: NSObject, NSWindowDelegate, ReviewSurfacePre
 
         onDraftChange = nil
         onConfirm = nil
-        onRetryReadiness = nil
         onDiscard = nil
 
-        let state: TranscriptionReviewState
+        let panel = ensurePanel()
+        let rootView: TranscriptionReviewView
         switch phase {
         case .streaming:
-            state = .streaming(preview: preview)
+            rootView = TranscriptionReviewView(
+                state: .streaming(preview: preview)
+            )
         case .sealing:
-            state = .sealing(preview: preview)
+            rootView = TranscriptionReviewView(
+                state: .sealing(preview: preview)
+            )
+        case .recovery:
+            rootView = TranscriptionReviewView(
+                state: .sealing(preview: preview),
+                readOnlyRecovery: true
+            )
         }
 
-        let panel = ensurePanel()
-        install(TranscriptionReviewView(state: state))
+        install(rootView, on: panel)
 
         panel.allowsKeyInteraction = false
         panel.ignoresMouseEvents = true
@@ -199,19 +207,18 @@ final class ReviewWindowController: NSObject, NSWindowDelegate, ReviewSurfacePre
     func renderDraft(
         state: TranscriptionReviewState,
         onDraftChange: @escaping @MainActor (String) -> Void,
-        onConfirm: @escaping @MainActor () -> Void,
-        onRetryReadiness: @escaping @MainActor () -> Void,
+        onConfirm: @escaping @MainActor (ReviewConfirmationIntent) -> Void,
         onDiscard: @escaping @MainActor () -> Void
     ) {
         switch state {
-        case .editablePending, .editable, .confirming:
+        case .editable, .confirming:
             break
         case .idle, .streaming, .sealing:
             logger.error("invalid review draft state supplied to presenter")
             return
         }
 
-        cancelEditableReadiness()
+        cancelPresentationFocus()
         if case .confirming = state {
             isConfirming = true
         } else {
@@ -220,14 +227,12 @@ final class ReviewWindowController: NSObject, NSWindowDelegate, ReviewSurfacePre
         let panel = ensurePanel()
         self.onDraftChange = onDraftChange
         self.onConfirm = onConfirm
-        self.onRetryReadiness = onRetryReadiness
         self.onDiscard = onDiscard
         install(
             TranscriptionReviewView(
                 state: state,
                 onDraftChange: onDraftChange,
                 onConfirm: onConfirm,
-                onRetryReadiness: onRetryReadiness,
                 onDiscard: onDiscard
             ),
             on: panel
@@ -240,24 +245,33 @@ final class ReviewWindowController: NSObject, NSWindowDelegate, ReviewSurfacePre
         panel.orderFrontRegardless()
     }
 
-    func requestEditableReadiness() async -> ReviewEditableTransitionResult {
+    func requestPresentationFocus(
+        _ request: ReviewPresentationFocusRequest
+    ) async -> ReviewPresentationFocusOutcome {
         guard !Task.isCancelled else {
-            return .pending(.cancelled(lastUnmet: nil))
+            return ReviewPresentationFocusOutcome(
+                request: request,
+                result: .notFocused(.cancelled(lastUnmet: nil))
+            )
         }
         guard isDraftSurfaceActive,
               let panel,
               panel.contentView != nil else {
-            return .pending(.surfaceInvalidated)
+            return ReviewPresentationFocusOutcome(
+                request: request,
+                result: .notFocused(.surfaceInvalidated)
+            )
         }
 
-        cancelEditableReadiness()
-        let readinessID = UUID()
-        editableReadinessID = readinessID
-        readinessAttemptOrdinal &+= 1
-        let attempt = readinessAttemptOrdinal
+        cancelPresentationFocus()
+        let focusID = UUID()
+        presentationFocusID = focusID
+        currentPresentationFocusRequest = request
+        presentationFocusAttemptOrdinal &+= 1
+        let attempt = presentationFocusAttemptOrdinal
         let attemptStart = readinessEnvironment.nowNanoseconds()
-        logReadiness(
-            event: "review_readiness_started",
+        logPresentationFocus(
+            event: "review_presentation_focus_started",
             attempt: attempt,
             result: "started",
             predicate: nil,
@@ -265,8 +279,8 @@ final class ReviewWindowController: NSObject, NSWindowDelegate, ReviewSurfacePre
         )
 
         if !readinessEnvironment.requestActivation() {
-            logReadiness(
-                event: "review_readiness_pending",
+            logPresentationFocus(
+                event: "review_presentation_focus_activation_advisory_rejected",
                 attempt: attempt,
                 result: "activationAdvisoryRejected",
                 predicate: .activationRequest,
@@ -275,17 +289,22 @@ final class ReviewWindowController: NSObject, NSWindowDelegate, ReviewSurfacePre
         }
 
         materializeEditableSurface(on: panel)
-        let result = await waitForEditableReadiness(
+        let result = await waitForPresentationFocus(
             on: panel,
-            readinessID: readinessID,
+            focusID: focusID,
+            request: request,
             attempt: attempt,
             startNanoseconds: attemptStart
         )
-        guard editableReadinessID == readinessID else {
-            return .pending(.surfaceInvalidated)
+        guard presentationFocusID == focusID,
+              isCurrentPresentationFocusRequest(request) else {
+            return ReviewPresentationFocusOutcome(
+                request: request,
+                result: .notFocused(.surfaceInvalidated)
+            )
         }
-        clearEditableReadiness()
-        return result
+        clearPresentationFocus()
+        return ReviewPresentationFocusOutcome(request: request, result: result)
     }
 
     private func materializeEditableSurface(on panel: ReviewPanel) {
@@ -295,86 +314,88 @@ final class ReviewWindowController: NSObject, NSWindowDelegate, ReviewSurfacePre
         hostingView?.layoutSubtreeIfNeeded()
     }
 
-    private func waitForEditableReadiness(
+    private func waitForPresentationFocus(
         on panel: ReviewPanel,
-        readinessID: UUID,
+        focusID: UUID,
+        request: ReviewPresentationFocusRequest,
         attempt: UInt64,
         startNanoseconds: UInt64
-    ) async -> ReviewEditableTransitionResult {
-        var lastUnmet: ReviewEditableReadinessPredicate?
+    ) async -> ReviewPresentationFocusResult {
+        var lastUnmet: ReviewPresentationFocusPredicate?
         while true {
-            guard editableReadinessID == readinessID,
+            guard presentationFocusID == focusID,
+                  isCurrentPresentationFocusRequest(request),
                   isDraftSurfaceActive,
                   let currentPanel = self.panel,
                   currentPanel === panel else {
-                return .pending(.surfaceInvalidated)
+                return .notFocused(.surfaceInvalidated)
             }
 
             if Task.isCancelled {
-                logReadiness(
-                    event: "review_readiness_cancelled",
+                logPresentationFocus(
+                    event: "review_presentation_focus_cancelled",
                     attempt: attempt,
                     result: "cancelled",
                     predicate: lastUnmet,
                     startNanoseconds: startNanoseconds
                 )
-                return .pending(.cancelled(lastUnmet: lastUnmet))
+                return .notFocused(.cancelled(lastUnmet: lastUnmet))
             }
 
             materializeEditableSurface(on: panel)
             if let unmet = firstUnmetReadinessPredicate(on: panel) {
                 lastUnmet = unmet
             } else {
-                logReadiness(
-                    event: "review_readiness_ready",
+                logPresentationFocus(
+                    event: "review_presentation_focus_focused",
                     attempt: attempt,
                     result: "ready",
                     predicate: nil,
                     startNanoseconds: startNanoseconds
                 )
-                return .ready
+                return .focused
             }
 
             let now = readinessEnvironment.nowNanoseconds()
             let elapsedNanoseconds = now >= startNanoseconds
                 ? now - startNanoseconds
-                : Self.editableReadinessTimeoutNanoseconds
-            guard elapsedNanoseconds < Self.editableReadinessTimeoutNanoseconds else {
-                logReadiness(
-                    event: "review_readiness_pending",
+                : Self.presentationFocusTimeoutNanoseconds
+            guard elapsedNanoseconds < Self.presentationFocusTimeoutNanoseconds else {
+                logPresentationFocus(
+                    event: "review_presentation_focus_not_focused",
                     attempt: attempt,
                     result: "timedOut",
                     predicate: lastUnmet,
                     startNanoseconds: startNanoseconds
                 )
-                return .pending(
+                return .notFocused(
                     .timedOut(lastUnmet: lastUnmet ?? .activationRequest)
                 )
             }
-            let remainingNanoseconds = Self.editableReadinessTimeoutNanoseconds - elapsedNanoseconds
+            let remainingNanoseconds = Self.presentationFocusTimeoutNanoseconds - elapsedNanoseconds
             do {
                 try await readinessEnvironment.sleep(
                     min(
-                        Self.editableReadinessPollNanoseconds,
+                        Self.presentationFocusPollNanoseconds,
                         remainingNanoseconds
                     )
                 )
             } catch {
-                logReadiness(
-                    event: "review_readiness_cancelled",
+                logPresentationFocus(
+                    event: "review_presentation_focus_cancelled",
                     attempt: attempt,
                     result: "cancelled",
                     predicate: lastUnmet,
                     startNanoseconds: startNanoseconds
                 )
-                return .pending(.cancelled(lastUnmet: lastUnmet))
+                return .notFocused(.cancelled(lastUnmet: lastUnmet))
             }
         }
     }
 
     private func firstUnmetReadinessPredicate(
         on panel: ReviewPanel
-    ) -> ReviewEditableReadinessPredicate? {
+    ) -> ReviewPresentationFocusPredicate? {
         guard readinessEnvironment.applicationIsActive() else {
             return .applicationActive
         }
@@ -394,11 +415,11 @@ final class ReviewWindowController: NSObject, NSWindowDelegate, ReviewSurfacePre
         return nil
     }
 
-    private func logReadiness(
+    private func logPresentationFocus(
         event: String,
         attempt: UInt64,
         result: String,
-        predicate: ReviewEditableReadinessPredicate?,
+        predicate: ReviewPresentationFocusPredicate?,
         startNanoseconds: UInt64
     ) {
         let now = readinessEnvironment.nowNanoseconds()
@@ -411,21 +432,30 @@ final class ReviewWindowController: NSObject, NSWindowDelegate, ReviewSurfacePre
         )
     }
 
-    private func cancelEditableReadiness() {
-        clearEditableReadiness()
+    private func cancelPresentationFocus() {
+        clearPresentationFocus()
     }
 
-    private func clearEditableReadiness() {
-        editableReadinessID = nil
+    private func clearPresentationFocus() {
+        presentationFocusID = nil
+        currentPresentationFocusRequest = nil
+    }
+
+    private func isCurrentPresentationFocusRequest(
+        _ request: ReviewPresentationFocusRequest
+    ) -> Bool {
+        guard let current = currentPresentationFocusRequest else { return false }
+        return current.reviewID == request.reviewID
+            && current.generation == request.generation
+            && current.focusAttemptID == request.focusAttemptID
     }
 
     func dismiss() {
-        cancelEditableReadiness()
+        cancelPresentationFocus()
         isDraftSurfaceActive = false
         isConfirming = false
         onDraftChange = nil
         onConfirm = nil
-        onRetryReadiness = nil
         onDiscard = nil
 
         guard let panel else {
@@ -477,12 +507,13 @@ protocol ReviewSurfacePresenting: AnyObject {
     func renderDraft(
         state: TranscriptionReviewState,
         onDraftChange: @escaping @MainActor (String) -> Void,
-        onConfirm: @escaping @MainActor () -> Void,
-        onRetryReadiness: @escaping @MainActor () -> Void,
+        onConfirm: @escaping @MainActor (ReviewConfirmationIntent) -> Void,
         onDiscard: @escaping @MainActor () -> Void
     )
 
-    func requestEditableReadiness() async -> ReviewEditableTransitionResult
+    func requestPresentationFocus(
+        _ request: ReviewPresentationFocusRequest
+    ) async -> ReviewPresentationFocusOutcome
 
     func dismiss()
 }

@@ -123,19 +123,26 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
         XCTAssertEqual(context.output.copiedTexts, [])
         XCTAssertEqual(context.delivery.deliveredTexts, [])
 
-        context.viewModel.reviewDraftText = "PRIVATE_EDITED_DRAFT"
+        context.presenter.invokeDraftChange("PRIVATE_EDITED_DRAFT")
         XCTAssertEqual(
             context.viewModel.transcriptionReviewState,
             .editable(draft: "PRIVATE_EDITED_DRAFT", isPossiblyIncomplete: false)
         )
 
-        context.viewModel.confirmReviewDraft()
-        context.viewModel.confirmReviewDraft()
+        context.presenter.invokeConfirm()
+        context.presenter.invokeConfirm()
         await waitUntil { context.delivery.deliveredTexts.count == 1 }
 
         XCTAssertEqual(context.delivery.deliveredTexts, ["PRIVATE_EDITED_DRAFT"])
         XCTAssertEqual(context.delivery.copyCalls, 0)
-        XCTAssertEqual(context.viewModel.transcriptionReviewState, .idle)
+        XCTAssertEqual(
+            context.viewModel.transcriptionReviewState,
+            .editable(
+                draft: "PRIVATE_EDITED_DRAFT",
+                isPossiblyIncomplete: false,
+                feedback: .deliveryUncertain
+            )
+        )
     }
 
     func test_reviewFirst_confirmationFreezesExactCurrentNonWhitespaceDraftAndDeliversOnce() async {
@@ -144,9 +151,9 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
         let draft = "  PRIVATE_EDITED_DRAFT\n"
 
         await startAndSeal(context, identity: identity)
-        context.viewModel.reviewDraftText = draft
-        context.viewModel.confirmReviewDraft()
-        context.viewModel.confirmReviewDraft()
+        context.presenter.invokeDraftChange(draft)
+        context.presenter.invokeConfirm()
+        context.presenter.invokeConfirm()
         await waitUntil { context.delivery.deliveredTexts.count == 1 }
 
         XCTAssertEqual(
@@ -155,7 +162,14 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
             "confirmation must deliver the current non-whitespace draft without trimming or normalizing"
         )
         XCTAssertEqual(context.delivery.copyCalls, 0)
-        XCTAssertEqual(context.viewModel.transcriptionReviewState, .idle)
+        XCTAssertEqual(
+            context.viewModel.transcriptionReviewState,
+            .editable(
+                draft: draft,
+                isPossiblyIncomplete: false,
+                feedback: .deliveryUncertain
+            )
+        )
     }
 
     func test_reviewFirst_realProductionSurfaceMakesFrozenDraftConfirmableWithoutRetryEditing() async throws {
@@ -277,7 +291,14 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
         await waitUntil { context.delivery.deliveredTexts.count == 1 }
         XCTAssertEqual(context.delivery.deliveredTexts, [editedDraft])
         XCTAssertEqual(context.delivery.copyCalls, 0)
-        XCTAssertEqual(context.viewModel.transcriptionReviewState, .idle)
+        XCTAssertEqual(
+            context.viewModel.transcriptionReviewState,
+            .editable(
+                draft: editedDraft,
+                isPossiblyIncomplete: false,
+                feedback: .deliveryUncertain
+            )
+        )
     }
 
     func test_reviewFirst_nonterminalFinalIsStillReadOnlyUntilAuthoritativeActionTwo() async {
@@ -408,8 +429,8 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
         let identity = StreamingSessionIdentity(generation: 3_805)
 
         await startAndSeal(context, identity: identity)
-        context.viewModel.reviewDraftText = " \n\t"
-        context.viewModel.confirmReviewDraft()
+        context.presenter.invokeDraftChange(" \n\t")
+        context.presenter.invokeConfirm()
         await settle()
 
         XCTAssertEqual(
@@ -425,7 +446,7 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
         let identity = StreamingSessionIdentity(generation: 3_806)
 
         await startAndSeal(context, identity: identity)
-        context.viewModel.reviewDraftText = "PRIVATE_EDITED"
+        context.presenter.invokeDraftChange("PRIVATE_EDITED")
         context.viewModel.discardReviewDraft()
 
         XCTAssertEqual(context.viewModel.transcriptionReviewState, .idle)
@@ -458,7 +479,7 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
                 context,
                 identity: StreamingSessionIdentity(generation: UInt64(3_820 + offset))
             )
-            context.viewModel.reviewDraftText = "PRIVATE_EDITED_\(offset)"
+            context.presenter.invokeDraftChange("PRIVATE_EDITED_\(offset)")
 
             await action.1(context)
             XCTAssertEqual(
@@ -497,9 +518,9 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
                 context,
                 identity: StreamingSessionIdentity(generation: UInt64(3_830 + offset))
             )
-            context.viewModel.reviewDraftText = "PRIVATE_FROZEN_DRAFT_\(offset)"
-            context.viewModel.confirmReviewDraft()
-            context.viewModel.confirmReviewDraft()
+            context.presenter.invokeDraftChange("PRIVATE_FROZEN_DRAFT_\(offset)")
+            context.presenter.invokeConfirm()
+            context.presenter.invokeConfirm()
             await waitUntil { context.delivery.deliveredTexts.count == 1 }
             await settle()
 
@@ -559,8 +580,8 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
         let context = makeContext(finishEvent: .final("PRIVATE_FINAL"))
         context.delivery.result = .cancelled
         await startAndSeal(context, identity: StreamingSessionIdentity(generation: 3_837))
-        context.viewModel.reviewDraftText = "PRIVATE_CANCELLED_DRAFT"
-        context.viewModel.confirmReviewDraft()
+        context.presenter.invokeDraftChange("PRIVATE_CANCELLED_DRAFT")
+        context.presenter.invokeConfirm()
         await waitUntil { context.delivery.deliveredTexts.count == 1 }
         await settle()
 
@@ -595,7 +616,7 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
                 identity: StreamingSessionIdentity(generation: UInt64(3_838 + offset))
             )
             let frozenDraft = "PRIVATE_POST_FREEZE_DRAFT_\(offset)"
-            context.viewModel.reviewDraftText = frozenDraft
+            context.presenter.invokeDraftChange(frozenDraft)
 
             switch trigger {
             case .secureInput:
@@ -696,18 +717,17 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
         let identity = StreamingSessionIdentity(generation: 3_807)
 
         await startAndSeal(context, identity: identity)
-        context.viewModel.reviewDraftText = "PRIVATE_HUMAN_EDIT"
+        context.presenter.invokeDraftChange("PRIVATE_HUMAN_EDIT")
 
         context.viewModel.handleStreamingEventForTesting(
             .partial("PRIVATE_LATE_PARTIAL"),
-            identity: identity
+            identity: StreamingSessionIdentity(generation: identity.generation + 1)
         )
         context.viewModel.handleStreamingEventForTesting(
             .final("PRIVATE_LATE_FINAL"),
-            identity: identity
+            identity: StreamingSessionIdentity(generation: identity.generation + 1)
         )
         let readOnlyRenderCount = context.presenter.renderReadOnlyCallCount
-        context.presenter.invokeDraftChange("PRIVATE_LATE_CALLBACK")
         await settle()
 
         XCTAssertEqual(
@@ -748,7 +768,7 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
         XCTAssertEqual(context.viewModel.transcriptionReviewState, .idle)
         XCTAssertEqual(context.presenter.renderReadOnlyCallCount, renderCountBeforeDiscard)
         XCTAssertEqual(context.presenter.dismissCallCount, dismissCount)
-        XCTAssertEqual(context.presenter.renderDraftCallCount, 2)
+        XCTAssertEqual(context.presenter.renderDraftCallCount, 1)
         XCTAssertEqual(context.delivery.deliveredTexts, [])
     }
 
@@ -867,7 +887,7 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
         XCTAssertFalse(context.presenter.readOnlyRenderGateOpen)
         XCTAssertGreaterThan(context.presenter.renderReadOnlyCallCount, 0)
         XCTAssertGreaterThan(context.presenter.gatedReadOnlyCommandCount, 0)
-        XCTAssertEqual(context.presenter.renderDraftCallCount, 2)
+        XCTAssertEqual(context.presenter.renderDraftCallCount, 1)
         XCTAssertGreaterThan(context.viewModel.journalCountForTesting, 0)
         XCTAssertEqual(context.presenter.lastEditableDraft, "PRIVATE_GATED_FINAL")
         XCTAssertEqual(context.viewModel.transcriptionReviewState,
@@ -901,21 +921,20 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
         XCTAssertEqual(context.delivery.deliveredTexts, [])
     }
 
-    func test_reviewFirst_editableReadinessFailureRetainsDraftAndAuthorityWithoutOutput() async {
-        let failures: [ReviewEditableReadinessFailure] = [
-            .activationRejected,
+    func test_reviewFirst_presentationFocusOutcomeCannotGateEditableOrConfirmation() async {
+        let failures: [ReviewPresentationFocusFailure] = [
             .timedOut(lastUnmet: .panelKey),
             .timedOut(lastUnmet: .editorMaterialized),
             .timedOut(lastUnmet: .editorFirstResponder),
             .cancelled(lastUnmet: .editorMaterialized),
-            .timedOut(lastUnmet: .editorFirstResponder)
+            .surfaceInvalidated
         ]
 
         for (offset, failure) in failures.enumerated() {
             let context = makeContext(
-                finishEvent: .final("PRIVATE_FROZEN_ACTION_TWO_\(offset)"),
-                editableReadinessResult: .pending(failure)
+                finishEvent: .final("PRIVATE_FROZEN_ACTION_TWO_\(offset)")
             )
+            context.presenter.presentationFocusResult = .notFocused(failure)
             let identity = StreamingSessionIdentity(generation: UInt64(3_826 + offset))
             let frozenDraft = "PRIVATE_FROZEN_ACTION_TWO_\(offset)"
 
@@ -923,16 +942,14 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
 
             XCTAssertEqual(
                 context.viewModel.transcriptionReviewState,
-                .editablePending(
+                .editable(
                     draft: frozenDraft,
                     isPossiblyIncomplete: false,
-                    readiness: .blocked(attempt: 1, failure: failure),
                     feedback: nil
                 ),
-                "\(failure) must leave the durable draft and authority pending without output"
+                "\(failure) is presentation telemetry only; the frozen draft must be immediately editable"
             )
             XCTAssertEqual(context.presenter.lastEditableDraft, frozenDraft)
-            XCTAssertEqual(context.presenter.readinessFailures, [failure])
             XCTAssertEqual(
                 Set(context.presenter.surfaceIDs),
                 Set([context.presenter.surfaceIdentity]),
@@ -947,7 +964,10 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
             XCTAssertEqual(context.delivery.deliveredTexts, [])
             XCTAssertEqual(context.output.insertedTexts, [])
             XCTAssertEqual(context.output.currentFocusInsertedTexts, [])
+            XCTAssertEqual(context.output.copiedTexts, [])
             XCTAssertEqual(context.accessibility.setSelectedTextCalls, [])
+            XCTAssertEqual(context.delivery.eventTrace.filter { $0 == "deliver" || $0 == "copy" || $0 == "retry" }, [])
+            XCTAssertEqual(context.presenter.eventTrace.filter { $0 == "retry" }, [])
 
             context.presenter.invokeDraftChange("PRIVATE_EDITED_AFTER_\(failure)")
             XCTAssertEqual(
@@ -957,26 +977,135 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
             )
             XCTAssertEqual(
                 context.viewModel.transcriptionReviewState,
-                .editablePending(
+                .editable(
                     draft: "PRIVATE_EDITED_AFTER_\(failure)",
                     isPossiblyIncomplete: false,
-                    readiness: .blocked(attempt: 1, failure: failure),
                     feedback: nil
                 )
             )
-            XCTAssertEqual(context.delivery.deliveredTexts, [])
+            context.presenter.invokeConfirm()
+            await waitUntil { context.delivery.deliveredTexts.count == 1 }
+            XCTAssertEqual(
+                context.delivery.deliveredTexts,
+                ["PRIVATE_EDITED_AFTER_\(failure)"],
+                "explicit Send must remain available regardless of focus telemetry"
+            )
+            XCTAssertEqual(context.delivery.copyCalls, 0)
         }
+
+        let suspended = makeContext(
+            finishEvent: .final("PRIVATE_SUSPENDED_FOCUS"),
+            holdPresentationFocusRequest: true
+        )
+        await startAndSealUntilPresentationFocusRequest(
+            suspended,
+            identity: StreamingSessionIdentity(generation: 3_831)
+        )
+        XCTAssertEqual(
+            suspended.viewModel.transcriptionReviewState,
+            .editable(
+                draft: "PRIVATE_SUSPENDED_FOCUS",
+                isPossiblyIncomplete: false,
+                feedback: nil
+            ),
+            "a focus request that never completes must not keep the draft pending"
+        )
+        suspended.presenter.invokeDraftChange("PRIVATE_TYPED_WHILE_FOCUS_SUSPENDED")
+        suspended.presenter.invokeDraftChange("PRIVATE_TYPED_WHILE_FOCUS_SUSPENDED_2")
+        XCTAssertEqual(
+            suspended.viewModel.reviewDraftText,
+            "PRIVATE_TYPED_WHILE_FOCUS_SUSPENDED_2"
+        )
+        XCTAssertEqual(suspended.delivery.deliveredTexts, [])
+        XCTAssertEqual(suspended.delivery.copyCalls, 0)
+        XCTAssertEqual(suspended.output.insertedTexts, [])
+        XCTAssertEqual(suspended.output.currentFocusInsertedTexts, [])
+        XCTAssertEqual(suspended.output.copiedTexts, [])
+        XCTAssertEqual(suspended.accessibility.setSelectedTextCalls, [])
+        XCTAssertEqual(suspended.delivery.eventTrace.filter { $0 == "deliver" || $0 == "copy" || $0 == "retry" }, [])
+        XCTAssertEqual(suspended.presenter.eventTrace.filter { $0 == "retry" }, [])
+        suspended.presenter.invokeConfirm()
+        await waitUntil { suspended.delivery.deliveredTexts.count == 1 }
+        XCTAssertEqual(
+            suspended.delivery.deliveredTexts,
+            ["PRIVATE_TYPED_WHILE_FOCUS_SUSPENDED_2"]
+        )
+        suspended.presenter.releasePresentationFocus(
+            .notFocused(.cancelled(lastUnmet: .editorFirstResponder))
+        )
+        await settle()
+        XCTAssertEqual(suspended.delivery.copyCalls, 0)
     }
 
-    func test_reviewFirst_deliveryFailureReturnsExactDraftToEditableWithoutCopyOrAutomaticRetry() async {
+    func test_reviewFirst_zeroSideEffectLedgerStaysEmptyFromCaptureThroughDraftEdits() async {
+        let context = makeContext(
+            packetEvents: [.partial("PRIVATE_STREAMING_PARTIAL")],
+            finishEvent: .final("PRIVATE_FROZEN_LEDGER"),
+            holdPresentationFocusRequest: true
+        )
+        let identity = StreamingSessionIdentity(generation: 3_832)
+
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { context.recorder.startStreamingCallCount == 1 }
+        XCTAssertEqual(context.delivery.deliveredTexts, [])
+        XCTAssertEqual(context.delivery.copyCalls, 0)
+        XCTAssertEqual(context.output.insertedTexts, [])
+        XCTAssertEqual(context.output.currentFocusInsertedTexts, [])
+        XCTAssertEqual(context.output.copiedTexts, [])
+        XCTAssertEqual(context.accessibility.setSelectedTextCalls, [])
+
+        context.recorder.emit(Data(repeating: 0x53, count: 6_400))
+        await waitUntilAsync { await context.session.sendCallCount == 1 }
+        XCTAssertEqual(context.delivery.deliveredTexts, [])
+        XCTAssertEqual(context.delivery.copyCalls, 0)
+        XCTAssertEqual(context.output.insertedTexts, [])
+        XCTAssertEqual(context.output.currentFocusInsertedTexts, [])
+        XCTAssertEqual(context.output.copiedTexts, [])
+        XCTAssertEqual(context.accessibility.setSelectedTextCalls, [])
+
+        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        await waitUntil { context.presenter.presentationFocusRequestCount == 1 }
+        await waitUntilAsync { await context.session.finishCallCount == 1 }
+        XCTAssertEqual(
+            context.viewModel.transcriptionReviewState,
+            .editable(
+                draft: "PRIVATE_FROZEN_LEDGER",
+                isPossiblyIncomplete: false,
+                feedback: nil
+            ),
+            "focus telemetry must not gate the editable authority after the recorder barrier"
+        )
+
+        for edit in ["P", "PR", "PRIVATE_FROZEN_LEDGER_EDITED"] {
+            context.presenter.invokeDraftChange(edit)
+            XCTAssertEqual(context.viewModel.reviewDraftText, edit)
+            XCTAssertEqual(context.delivery.deliveredTexts, [])
+            XCTAssertEqual(context.delivery.copyCalls, 0)
+            XCTAssertEqual(context.output.insertedTexts, [])
+            XCTAssertEqual(context.output.currentFocusInsertedTexts, [])
+            XCTAssertEqual(context.output.copiedTexts, [])
+            XCTAssertEqual(context.accessibility.setSelectedTextCalls, [])
+            XCTAssertEqual(
+                context.delivery.eventTrace.filter { $0 == "deliver" || $0 == "copy" || $0 == "retry" },
+                []
+            )
+            XCTAssertEqual(context.presenter.eventTrace.filter { $0 == "retry" }, [])
+        }
+        context.presenter.releasePresentationFocus(
+            .notFocused(.timedOut(lastUnmet: .editorFirstResponder))
+        )
+        await settle()
+    }
+
+    func test_reviewFirst_deliveryFailureReturnsExactDraftToEditableWithoutFocusRetry() async {
         let context = makeContext(finishEvent: .final("PRIVATE_FINAL"))
         context.delivery.result = .deliveryFailed
         let identity = StreamingSessionIdentity(generation: 3_827)
         let draft = "  PRIVATE_DELIVERY_FAILURE_DRAFT\n"
 
         await startAndSeal(context, identity: identity)
-        context.viewModel.reviewDraftText = draft
-        context.viewModel.confirmReviewDraft()
+        context.presenter.invokeDraftChange(draft)
+        context.presenter.invokeConfirm()
         await waitUntil { context.delivery.deliveredTexts.count == 1 }
         await settle()
 
@@ -997,9 +1126,8 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
         XCTAssertEqual(context.accessibility.setSelectedTextCalls, [])
 
         XCTAssertEqual(context.delivery.deliveredTexts.count, 1, "failure must not retry automatically")
-
-        context.delivery.result = .inserted
-        context.viewModel.confirmReviewDraft()
+        context.delivery.result = .submittedUnverified
+        context.presenter.invokeConfirm()
         await waitUntil { context.delivery.deliveredTexts.count == 2 }
 
         XCTAssertEqual(context.delivery.deliveredTexts, [draft, draft])
@@ -1013,8 +1141,8 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
         let draft = "PRIVATE_DISCARD_AFTER_DELIVERY_FAILURE"
 
         await startAndSeal(context, identity: identity)
-        context.viewModel.reviewDraftText = draft
-        context.viewModel.confirmReviewDraft()
+        context.presenter.invokeDraftChange(draft)
+        context.presenter.invokeConfirm()
         await waitUntil { context.delivery.deliveredTexts.count == 1 }
         await settle()
 
@@ -1115,8 +1243,8 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
             return .deliveryUncertain
         case .cancelled:
             return .deliveryCancelled
-        case .inserted:
-            return .deliveryFailed
+        case .submittedUnverified:
+            return .deliveryUncertain
         }
     }
 
@@ -1128,7 +1256,7 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
         holdStopBarrier: Bool = false,
         holdProviderFactory: Bool = false,
         holdReadOnlyPresentation: Bool = false,
-        editableReadinessResult: ReviewEditableTransitionResult = .ready,
+        holdPresentationFocusRequest: Bool = false,
         reviewSurfacePresenter: (any ReviewSurfacePresenting)? = nil
     ) -> Issue38ReviewContext {
         let recorder = Issue38ReviewAudioRecorder(holdStopBarrier: holdStopBarrier)
@@ -1145,7 +1273,7 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
         let delivery = Issue38ReviewDestinationDelivery()
         let presenter = Issue38ReviewSurfacePresenter()
         presenter.readOnlyRenderGateOpen = !holdReadOnlyPresentation
-        presenter.editableReadinessResult = editableReadinessResult
+        presenter.holdPresentationFocusRequest = holdPresentationFocusRequest
         recorder.onStart = { delivery.record(event: "audio-start") }
         let viewModel = MainViewModel(
             audioRecorder: recorder,
@@ -1237,6 +1365,18 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
         await waitUntilAsync { await context.session.finishCallCount == 1 }
     }
 
+    private func startAndSealUntilPresentationFocusRequest(
+        _ context: Issue38ReviewContext,
+        identity: StreamingSessionIdentity
+    ) async {
+        context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { context.recorder.startStreamingCallCount == 1 }
+        await waitUntilAsync { await context.provider.makeSessionCallCount == 1 }
+        context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        await waitUntil { context.presenter.presentationFocusRequestCount == 1 }
+        await waitUntilAsync { await context.session.finishCallCount == 1 }
+    }
+
     private func startAndSealProduction(
         _ context: Issue40ProductionReviewContext,
         identity: StreamingSessionIdentity
@@ -1272,8 +1412,6 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
         case .idle:
             return true
         case .editable:
-            return true
-        case .editablePending(_, _, .blocked, _):
             return true
         default:
             return false
@@ -1338,7 +1476,6 @@ private final class Issue40ProductionReviewSurfacePresenter: ReviewSurfacePresen
     let controller: ReviewWindowController
     private(set) var retainedPanel: ReviewPanel?
     private(set) var renderedStates: [TranscriptionReviewState] = []
-    private var onConfirm: (@MainActor () -> Void)?
 
     init(controller: ReviewWindowController) {
         self.controller = controller
@@ -1352,38 +1489,70 @@ private final class Issue40ProductionReviewSurfacePresenter: ReviewSurfacePresen
     func renderDraft(
         state: TranscriptionReviewState,
         onDraftChange: @escaping @MainActor (String) -> Void,
-        onConfirm: @escaping @MainActor () -> Void,
-        onRetryReadiness: @escaping @MainActor () -> Void,
+        onConfirm: @escaping @MainActor (ReviewConfirmationIntent) -> Void,
         onDiscard: @escaping @MainActor () -> Void
     ) {
         renderedStates.append(state)
-        self.onConfirm = onConfirm
         controller.renderDraft(
             state: state,
             onDraftChange: onDraftChange,
             onConfirm: onConfirm,
-            onRetryReadiness: onRetryReadiness,
             onDiscard: onDiscard
         )
         retainedPanel = currentPanel()
     }
 
-    func requestEditableReadiness() async -> ReviewEditableTransitionResult {
-        await controller.requestEditableReadiness()
+    func requestPresentationFocus(
+        _ request: ReviewPresentationFocusRequest
+    ) async -> ReviewPresentationFocusOutcome {
+        await controller.requestPresentationFocus(request)
     }
 
     func dismiss() {
         controller.dismiss()
         retainedPanel = nil
-        onConfirm = nil
     }
 
     func invokeConfirm() {
-        onConfirm?()
+        guard let panel = retainedPanel,
+              let editor = editableTextView(in: panel.contentView) else {
+            XCTFail("the production presenter must expose the real native editor")
+            return
+        }
+        guard panel.makeFirstResponder(editor),
+              let event = NSEvent.keyEvent(
+                  with: .keyDown,
+                  location: .zero,
+                  modifierFlags: [],
+                  timestamp: 0,
+                  windowNumber: panel.windowNumber,
+                  context: nil,
+                  characters: "\r",
+                  charactersIgnoringModifiers: "\r",
+                  isARepeat: false,
+                  keyCode: 36
+              ) else {
+            XCTFail("the production editor must accept a qualified native Return event")
+            return
+        }
+        editor.keyDown(with: event)
     }
 
     private func currentPanel() -> ReviewPanel? {
         NSApp.windows.compactMap { $0 as? ReviewPanel }.last
+    }
+
+    private func editableTextView(in view: NSView?) -> NSTextView? {
+        guard let view else { return nil }
+        if let textView = view as? NSTextView, textView.isEditable {
+            return textView
+        }
+        for subview in view.subviews.reversed() {
+            if let textView = editableTextView(in: subview) {
+                return textView
+            }
+        }
+        return nil
     }
 }
 
@@ -1605,6 +1774,28 @@ private final class Issue38ReviewFinalTextOutput: FinalTextOutput {
         }
     }
 
+    func insertOnce(
+        _ text: String,
+        destination: CursorDestinationToken,
+        validateBeforeMutation: @escaping () throws -> Bool,
+        validateAfterPosting: () throws -> Bool,
+        postPairIfPreflightRemainsValid pairGate: (@escaping () -> Void) -> Bool
+    ) -> FinalTextInsertionResult {
+        do {
+            guard try validateBeforeMutation() else { return .destinationInvalid }
+            var didInsert = false
+            guard pairGate({ [self] in
+                self.insertedTexts.append(text)
+                didInsert = true
+            }), didInsert else {
+                return .deliveryFailed
+            }
+            return try validateAfterPosting() ? .inserted : .deliveryUncertain
+        } catch {
+            return .deliveryUncertain
+        }
+    }
+
     func insertAtCurrentFocusOnce(_ text: String) -> FinalTextInsertionResult {
         currentFocusInsertedTexts.append(text)
         return .inserted
@@ -1624,7 +1815,7 @@ private final class Issue38ReviewDestinationDelivery: ReviewDestinationDeliverin
     private(set) var copyCalls = 0
     private(set) var copiedTexts: [String] = []
     private(set) var eventTrace: [String] = []
-    var result: ReviewDeliveryResult = .inserted
+    var result: ReviewDeliveryResult = .submittedUnverified
     var captureResult: ReviewDestinationCaptureResult
 
     init() {
@@ -1685,11 +1876,13 @@ private final class Issue38ReviewDestinationDelivery: ReviewDestinationDeliverin
         _ frozenText: String,
         to destination: ReviewDestinationToken
     ) async -> ReviewDeliveryResult {
+        eventTrace.append("deliver")
         deliveredTexts.append(frozenText)
         return result
     }
 
     func copyForManualRecovery(_ frozenText: String) {
+        eventTrace.append("copy")
         copyCalls += 1
         copiedTexts.append(frozenText)
     }
@@ -1704,8 +1897,6 @@ private final class Issue38ReviewSurfacePresenter: ReviewSurfacePresenting {
     private(set) var surfaceIDs: [UUID] = []
     private(set) var renderDraftCallCount = 0
     private(set) var editablePresentationCount = 0
-    private(set) var readinessRequestCount = 0
-    private(set) var readinessFailures: [ReviewEditableReadinessFailure] = []
     private(set) var dismissCallCount = 0
     private(set) var lastReadOnlyPreview = ""
     private(set) var lastReadOnlyPhase: ReviewReadOnlyPhase?
@@ -1714,12 +1905,16 @@ private final class Issue38ReviewSurfacePresenter: ReviewSurfacePresenting {
     private(set) var draftStates: [TranscriptionReviewState] = []
     private(set) var eventTrace: [String] = []
     var readOnlyRenderGateOpen = true
-    var editableReadinessResult: ReviewEditableTransitionResult = .ready
+    private(set) var presentationFocusRequestCount = 0
+    var holdPresentationFocusRequest = false
+    var presentationFocusResult: ReviewPresentationFocusResult = .focused
+    private var presentationFocusContinuation: CheckedContinuation<ReviewPresentationFocusOutcome, Never>?
+    private var currentPresentationFocusRequest: ReviewPresentationFocusRequest?
     private var draftChange: (@MainActor (String) -> Void)?
-    private var confirm: (@MainActor () -> Void)?
-    private var retryReadiness: (@MainActor () -> Void)?
+    private var confirm: (@MainActor (ReviewConfirmationIntent) -> Void)?
     private var discard: (@MainActor () -> Void)?
     private var gatedReadOnlyCommands: [(ReviewReadOnlyPhase, String)] = []
+    private var lastDraftState: TranscriptionReviewState?
 
     func renderReadOnly(phase: ReviewReadOnlyPhase, preview: String) {
         renderReadOnlyCallCount += 1
@@ -1738,15 +1933,14 @@ private final class Issue38ReviewSurfacePresenter: ReviewSurfacePresenting {
     func renderDraft(
         state: TranscriptionReviewState,
         onDraftChange: @escaping @MainActor (String) -> Void,
-        onConfirm: @escaping @MainActor () -> Void,
-        onRetryReadiness: @escaping @MainActor () -> Void,
+        onConfirm: @escaping @MainActor (ReviewConfirmationIntent) -> Void,
         onDiscard: @escaping @MainActor () -> Void
     ) {
         renderDraftCallCount += 1
         draftStates.append(state)
+        lastDraftState = state
         switch state {
         case .editable(let draft, let isPossiblyIncomplete, _),
-             .editablePending(let draft, let isPossiblyIncomplete, _, _),
              .confirming(let draft, let isPossiblyIncomplete):
             lastEditableDraft = draft
             lastEditablePossiblyIncomplete = isPossiblyIncomplete
@@ -1760,16 +1954,31 @@ private final class Issue38ReviewSurfacePresenter: ReviewSurfacePresenting {
         eventTrace.append("draft")
         draftChange = onDraftChange
         confirm = onConfirm
-        retryReadiness = onRetryReadiness
         discard = onDiscard
     }
 
-    func requestEditableReadiness() async -> ReviewEditableTransitionResult {
-        readinessRequestCount += 1
-        if case .pending(let failure) = editableReadinessResult {
-            readinessFailures.append(failure)
+    func requestPresentationFocus(
+        _ request: ReviewPresentationFocusRequest
+    ) async -> ReviewPresentationFocusOutcome {
+        presentationFocusRequestCount += 1
+        currentPresentationFocusRequest = request
+        if holdPresentationFocusRequest {
+            return await withCheckedContinuation { continuation in
+                presentationFocusContinuation = continuation
+            }
         }
-        return editableReadinessResult
+        return ReviewPresentationFocusOutcome(
+            request: request,
+            result: presentationFocusResult
+        )
+    }
+
+    func releasePresentationFocus(_ result: ReviewPresentationFocusResult) {
+        guard let request = currentPresentationFocusRequest else { return }
+        presentationFocusContinuation?.resume(
+            returning: ReviewPresentationFocusOutcome(request: request, result: result)
+        )
+        presentationFocusContinuation = nil
     }
 
     func dismiss() {
@@ -1781,18 +1990,77 @@ private final class Issue38ReviewSurfacePresenter: ReviewSurfacePresenting {
 
     func invokeDraftChange(_ draft: String) {
         draftChange?(draft)
+        if case .editable(_, let isPossiblyIncomplete, _) = lastDraftState {
+            lastDraftState = .editable(
+                draft: draft,
+                isPossiblyIncomplete: isPossiblyIncomplete,
+                feedback: nil
+            )
+        }
     }
 
     func invokeConfirm() {
-        confirm?()
-    }
+        guard let state = lastDraftState,
+              case .editable = state,
+              let confirm else { return }
 
-    func invokeRetryReadiness() {
-        retryReadiness?()
+        let hostingView = NSHostingView(
+            rootView: TranscriptionReviewView(
+                state: state,
+                onConfirm: confirm
+            )
+        )
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 320),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hostingView
+        window.isReleasedWhenClosed = false
+        window.makeKeyAndOrderFront(nil)
+        hostingView.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        hostingView.layoutSubtreeIfNeeded()
+        guard let editor = editableTextView(in: hostingView),
+              window.makeFirstResponder(editor),
+              let event = NSEvent.keyEvent(
+                  with: .keyDown,
+                  location: .zero,
+                  modifierFlags: [],
+                  timestamp: 0,
+                  windowNumber: window.windowNumber,
+                  context: nil,
+                  characters: "\r",
+                  charactersIgnoringModifiers: "\r",
+                  isARepeat: false,
+                  keyCode: 36
+              ) else {
+            XCTFail("the opaque confirmation test path must materialize the real native editor")
+            window.orderOut(nil)
+            window.close()
+            return
+        }
+        editor.keyDown(with: event)
+        window.orderOut(nil)
+        window.close()
     }
 
     func invokeDiscard() {
         discard?()
+    }
+
+    private func editableTextView(in view: NSView?) -> NSTextView? {
+        guard let view else { return nil }
+        if let textView = view as? NSTextView, textView.isEditable {
+            return textView
+        }
+        for subview in view.subviews.reversed() {
+            if let textView = editableTextView(in: subview) {
+                return textView
+            }
+        }
+        return nil
     }
 }
 
@@ -1801,22 +2069,19 @@ private final class Issue39NativeReviewSurfacePresenter: ReviewSurfacePresenting
     private(set) var window: NSWindow?
     private(set) var editor: NSTextView?
     private var hostingView: NSHostingView<TranscriptionReviewView>?
-    private var onRetryReadiness: (@MainActor () -> Void)?
 
     func renderReadOnly(phase: ReviewReadOnlyPhase, preview: String) {}
 
     func renderDraft(
         state: TranscriptionReviewState,
         onDraftChange: @escaping @MainActor (String) -> Void,
-        onConfirm: @escaping @MainActor () -> Void,
-        onRetryReadiness: @escaping @MainActor () -> Void,
+        onConfirm: @escaping @MainActor (ReviewConfirmationIntent) -> Void,
         onDiscard: @escaping @MainActor () -> Void
     ) {
         let rootView = TranscriptionReviewView(
             state: state,
             onDraftChange: onDraftChange,
             onConfirm: onConfirm,
-            onRetryReadiness: onRetryReadiness,
             onDiscard: onDiscard
         )
         let hostingView = NSHostingView(rootView: rootView)
@@ -1842,11 +2107,12 @@ private final class Issue39NativeReviewSurfacePresenter: ReviewSurfacePresenting
         self.hostingView = hostingView
         self.window = window
         self.editor = editor
-        self.onRetryReadiness = onRetryReadiness
     }
 
-    func requestEditableReadiness() async -> ReviewEditableTransitionResult {
-        .ready
+    func requestPresentationFocus(
+        _ request: ReviewPresentationFocusRequest
+    ) async -> ReviewPresentationFocusOutcome {
+        ReviewPresentationFocusOutcome(request: request, result: .focused)
     }
 
     func dismiss() {
@@ -1854,7 +2120,6 @@ private final class Issue39NativeReviewSurfacePresenter: ReviewSurfacePresenting
         window?.close()
         editor = nil
         hostingView = nil
-        onRetryReadiness = nil
         window = nil
     }
 

@@ -15,9 +15,13 @@ final class FinalTextOutputSecurityTests: XCTestCase {
     func test_safePlainTextTargetsCapturedPIDAndChecksSameDestinationBeforeAndAfterPosting() throws {
         let pasteboard = FakeFinalTextPasteboardWriter()
         let eventPoster = FakeFinalTextKeyEventPoster()
+        let currentFocusEventPoster = FakeCurrentFocusUnicodeEventPoster()
         let output = SystemFinalTextOutput(
             pasteboardWriter: pasteboard,
-            keyEventPoster: eventPoster
+            keyEventPoster: eventPoster,
+            currentFocusEventPoster: currentFocusEventPoster,
+            secureInputStateProvider: FakeSecureInputStateProvider(states: [false]),
+            frontmostProcessProvider: FakeFrontmostProcessProvider(processIdentifiers: [42])
         )
         let destination = makeDestination(processIdentifier: 42)
         var validationResults = [true, false]
@@ -26,20 +30,26 @@ final class FinalTextOutputSecurityTests: XCTestCase {
         let result = output.insertOnce(
             "safe plain text",
             destination: destination,
-            validateDestination: {
+            validateBeforeMutation: {
                 validationCallCount += 1
                 return validationResults.removeFirst()
+            },
+            validateAfterPosting: {
+                validationCallCount += 1
+                return validationResults.removeFirst()
+            },
+            postPairIfPreflightRemainsValid: { postPair in
+                postPair()
+                return true
             }
         )
 
-        XCTAssertEqual(result, .destinationInvalid)
+        XCTAssertEqual(result, .deliveryUncertain)
         XCTAssertEqual(validationCallCount, 2)
-        XCTAssertEqual(pasteboard.writtenTexts, ["safe plain text"])
-        XCTAssertEqual(
-            eventPoster.destinationProcessIdentifiers,
-            [42],
-            "Cmd+V must be posted to the PID captured before recognition, never to a global event tap"
-        )
+        XCTAssertEqual(pasteboard.writtenTexts, [])
+        XCTAssertEqual(eventPoster.destinationProcessIdentifiers, [])
+        XCTAssertEqual(currentFocusEventPoster.requestedTexts, ["safe plain text"])
+        XCTAssertEqual(currentFocusEventPoster.destinationProcessIdentifiers, [42])
     }
 
     func test_failedPreflightValidationDoesNotTouchPasteboardOrPostSyntheticInput() throws {
@@ -64,44 +74,69 @@ final class FinalTextOutputSecurityTests: XCTestCase {
     func test_safePlainTextRetainsAutomaticFallbackWhenDeliveryIsStable() throws {
         let pasteboard = FakeFinalTextPasteboardWriter()
         let eventPoster = FakeFinalTextKeyEventPoster()
+        let currentFocusEventPoster = FakeCurrentFocusUnicodeEventPoster()
         let output = SystemFinalTextOutput(
             pasteboardWriter: pasteboard,
-            keyEventPoster: eventPoster
+            keyEventPoster: eventPoster,
+            currentFocusEventPoster: currentFocusEventPoster,
+            secureInputStateProvider: FakeSecureInputStateProvider(states: [false]),
+            frontmostProcessProvider: FakeFrontmostProcessProvider(processIdentifiers: [88])
         )
         var validationCallCount = 0
 
         let result = output.insertOnce(
             "safe plain text",
             destination: makeDestination(processIdentifier: 88),
-            validateDestination: {
+            validateBeforeMutation: {
                 validationCallCount += 1
+                return true
+            },
+            validateAfterPosting: {
+                validationCallCount += 1
+                return true
+            },
+            postPairIfPreflightRemainsValid: { postPair in
+                postPair()
                 return true
             }
         )
 
-        XCTAssertEqual(result, .inserted)
+        XCTAssertEqual(result, .submittedUnverified)
         XCTAssertEqual(validationCallCount, 2)
-        XCTAssertEqual(pasteboard.writtenTexts, ["safe plain text"])
-        XCTAssertEqual(eventPoster.destinationProcessIdentifiers, [88])
+        XCTAssertEqual(pasteboard.writtenTexts, [])
+        XCTAssertEqual(eventPoster.destinationProcessIdentifiers, [])
+        XCTAssertEqual(currentFocusEventPoster.requestedTexts, ["safe plain text"])
+        XCTAssertEqual(currentFocusEventPoster.destinationProcessIdentifiers, [88])
     }
 
     func test_keyEventPostingFailureIsReportedForManualRecovery() throws {
         let pasteboard = FakeFinalTextPasteboardWriter()
         let eventPoster = FakeFinalTextKeyEventPoster()
-        eventPoster.shouldSucceed = false
+        let currentFocusEventPoster = FakeCurrentFocusUnicodeEventPoster(result: .deliveryFailed)
         let output = SystemFinalTextOutput(
             pasteboardWriter: pasteboard,
-            keyEventPoster: eventPoster
+            keyEventPoster: eventPoster,
+            currentFocusEventPoster: currentFocusEventPoster,
+            secureInputStateProvider: FakeSecureInputStateProvider(states: [false]),
+            frontmostProcessProvider: FakeFrontmostProcessProvider(processIdentifiers: [99])
         )
 
         let result = output.insertOnce(
             "safe plain text",
             destination: makeDestination(processIdentifier: 99),
-            validateDestination: { true }
+            validateBeforeMutation: { true },
+            validateAfterPosting: { true },
+            postPairIfPreflightRemainsValid: { postPair in
+                postPair()
+                return true
+            }
         )
 
         XCTAssertEqual(result, .deliveryFailed)
-        XCTAssertEqual(eventPoster.destinationProcessIdentifiers, [99])
+        XCTAssertEqual(pasteboard.writtenTexts, [])
+        XCTAssertEqual(eventPoster.destinationProcessIdentifiers, [])
+        XCTAssertEqual(currentFocusEventPoster.requestedTexts, ["safe plain text"])
+        XCTAssertEqual(currentFocusEventPoster.destinationProcessIdentifiers, [99])
     }
 
     func test_currentFocusStableSafePIDPostsUnicodeOnceWithoutTouchingPasteboard() {
@@ -129,12 +164,23 @@ final class FinalTextOutputSecurityTests: XCTestCase {
         XCTAssertEqual(frontmostProcess.queryCount, 2)
     }
 
-    func test_reviewCurrentFocusSafeMultilineDraftUsesCapturedPIDAndOneCmdV() {
+    func test_reviewApplicationBoundDraftUsesOneModifierFreeUnicodePairWithoutPasteboardOrCmdV() {
         let pasteboard = FakeFinalTextPasteboardWriter()
-        let eventPoster = FakeFinalTextKeyEventPoster()
+        let legacyEventPoster = FakeFinalTextKeyEventPoster()
+        let backend = FakeSystemUnicodeEventBackend(
+            failure: nil,
+            trace: FakePosterOperationTrace()
+        )
+        let unicodeEventPoster = SystemFinalTextCurrentFocusEventPoster(
+            backend: backend,
+            secureInputStateProvider: FakeSecureInputStateProvider(states: [false])
+        )
         let output = SystemFinalTextOutput(
             pasteboardWriter: pasteboard,
-            keyEventPoster: eventPoster
+            keyEventPoster: legacyEventPoster,
+            currentFocusEventPoster: unicodeEventPoster,
+            secureInputStateProvider: FakeSecureInputStateProvider(states: [false, false]),
+            frontmostProcessProvider: FakeFrontmostProcessProvider(processIdentifiers: [42, 42])
         )
         var beforeCalls = 0
         var afterCalls = 0
@@ -153,11 +199,173 @@ final class FinalTextOutputSecurityTests: XCTestCase {
             }
         )
 
-        XCTAssertEqual(result, .inserted)
+        XCTAssertEqual(result, .submittedUnverified)
         XCTAssertEqual(beforeCalls, 1)
         XCTAssertEqual(afterCalls, 1)
-        XCTAssertEqual(pasteboard.writtenTexts, [draft])
-        XCTAssertEqual(eventPoster.destinationProcessIdentifiers, [42])
+        XCTAssertEqual(pasteboard.writtenTexts, [])
+        XCTAssertEqual(legacyEventPoster.destinationProcessIdentifiers, [])
+        XCTAssertEqual(backend.constructedEvents.map(\.phase), [.keyDown, .keyUp])
+        XCTAssertEqual(backend.constructedEvents.map(\.virtualKey), [nil, nil])
+        XCTAssertEqual(backend.constructedEvents.map(\.utf16), [Array(draft.utf16), Array(draft.utf16)])
+        XCTAssertEqual(backend.constructedEvents.map(\.flags), [[], []])
+        XCTAssertEqual(backend.postedEvents.map(\.processIdentifier), [42, 42])
+        XCTAssertEqual(backend.taggedUserData, [FeishuSpeechSyntheticEventTag.value, FeishuSpeechSyntheticEventTag.value])
+    }
+
+    func test_reviewExactBindingUsesOneModifierFreeUnicodePairWithoutPasteboardOrCmdV() {
+        let pasteboard = FakeFinalTextPasteboardWriter()
+        let legacyEventPoster = FakeFinalTextKeyEventPoster()
+        let backend = FakeSystemUnicodeEventBackend(
+            failure: nil,
+            trace: FakePosterOperationTrace()
+        )
+        let unicodeEventPoster = SystemFinalTextCurrentFocusEventPoster(
+            backend: backend,
+            secureInputStateProvider: FakeSecureInputStateProvider(states: [false])
+        )
+        let output = SystemFinalTextOutput(
+            pasteboardWriter: pasteboard,
+            keyEventPoster: legacyEventPoster,
+            currentFocusEventPoster: unicodeEventPoster,
+            secureInputStateProvider: FakeSecureInputStateProvider(states: [false, false]),
+            frontmostProcessProvider: FakeFrontmostProcessProvider(processIdentifiers: [42, 42])
+        )
+        let draft = "first line\nsecond line"
+
+        let result = output.insertOnce(
+            draft,
+            destination: makeDestination(processIdentifier: 42),
+            validateBeforeMutation: { true },
+            validateAfterPosting: { true }
+        )
+
+        XCTAssertEqual(result, .submittedUnverified)
+        XCTAssertEqual(pasteboard.writtenTexts, [])
+        XCTAssertEqual(legacyEventPoster.destinationProcessIdentifiers, [])
+        XCTAssertEqual(backend.constructedEvents.map(\.phase), [.keyDown, .keyUp])
+        XCTAssertEqual(backend.constructedEvents.map(\.virtualKey), [nil, nil])
+        XCTAssertEqual(backend.constructedEvents.map(\.utf16), [Array(draft.utf16), Array(draft.utf16)])
+        XCTAssertEqual(backend.constructedEvents.map(\.flags), [[], []])
+        XCTAssertEqual(backend.postedEvents.map(\.processIdentifier), [42, 42])
+        XCTAssertEqual(backend.taggedUserData, [FeishuSpeechSyntheticEventTag.value, FeishuSpeechSyntheticEventTag.value])
+    }
+
+    func test_reviewExactBindingPostflightUncertaintyPostsOneUnicodePairWithoutRetryOrPasteboard() {
+        let pasteboard = FakeFinalTextPasteboardWriter()
+        let legacyEventPoster = FakeFinalTextKeyEventPoster()
+        let backend = FakeSystemUnicodeEventBackend(
+            failure: nil,
+            trace: FakePosterOperationTrace()
+        )
+        let unicodeEventPoster = SystemFinalTextCurrentFocusEventPoster(
+            backend: backend,
+            secureInputStateProvider: FakeSecureInputStateProvider(states: [false])
+        )
+        let output = SystemFinalTextOutput(
+            pasteboardWriter: pasteboard,
+            keyEventPoster: legacyEventPoster,
+            currentFocusEventPoster: unicodeEventPoster,
+            secureInputStateProvider: FakeSecureInputStateProvider(states: [false, false]),
+            frontmostProcessProvider: FakeFrontmostProcessProvider(processIdentifiers: [42, 42])
+        )
+        let draft = "first line\nsecond line"
+
+        let result = output.insertOnce(
+            draft,
+            destination: makeDestination(processIdentifier: 42),
+            validateBeforeMutation: { true },
+            validateAfterPosting: { false }
+        )
+
+        XCTAssertEqual(result, .deliveryUncertain)
+        XCTAssertEqual(pasteboard.writtenTexts, [])
+        XCTAssertEqual(legacyEventPoster.destinationProcessIdentifiers, [])
+        XCTAssertEqual(backend.constructedEvents.map(\.phase), [.keyDown, .keyUp])
+        XCTAssertEqual(backend.constructedEvents.map(\.virtualKey), [nil, nil])
+        XCTAssertEqual(backend.constructedEvents.map(\.utf16), [Array(draft.utf16), Array(draft.utf16)])
+        XCTAssertEqual(backend.constructedEvents.map(\.flags), [[], []])
+        XCTAssertEqual(backend.postedEvents.map(\.processIdentifier), [42, 42])
+        XCTAssertEqual(backend.taggedUserData, [FeishuSpeechSyntheticEventTag.value, FeishuSpeechSyntheticEventTag.value])
+    }
+
+    func test_reviewApplicationBoundPostflightUncertaintyPostsOneUnicodePairWithoutRetryOrPasteboard() {
+        let pasteboard = FakeFinalTextPasteboardWriter()
+        let legacyEventPoster = FakeFinalTextKeyEventPoster()
+        let backend = FakeSystemUnicodeEventBackend(
+            failure: nil,
+            trace: FakePosterOperationTrace()
+        )
+        let unicodeEventPoster = SystemFinalTextCurrentFocusEventPoster(
+            backend: backend,
+            secureInputStateProvider: FakeSecureInputStateProvider(states: [false])
+        )
+        let output = SystemFinalTextOutput(
+            pasteboardWriter: pasteboard,
+            keyEventPoster: legacyEventPoster,
+            currentFocusEventPoster: unicodeEventPoster,
+            secureInputStateProvider: FakeSecureInputStateProvider(states: [false, false]),
+            frontmostProcessProvider: FakeFrontmostProcessProvider(processIdentifiers: [42, 42])
+        )
+        let draft = "first line\nsecond line"
+
+        let result = output.insertReviewAtCurrentFocusOnce(
+            draft,
+            processIdentifier: 42,
+            validateBeforeMutation: { .valid },
+            validateAfterPosting: { .identityChanged }
+        )
+
+        XCTAssertEqual(result, .deliveryUncertain)
+        XCTAssertEqual(pasteboard.writtenTexts, [])
+        XCTAssertEqual(legacyEventPoster.destinationProcessIdentifiers, [])
+        XCTAssertEqual(backend.constructedEvents.map(\.phase), [.keyDown, .keyUp])
+        XCTAssertEqual(backend.constructedEvents.map(\.virtualKey), [nil, nil])
+        XCTAssertEqual(backend.constructedEvents.map(\.utf16), [Array(draft.utf16), Array(draft.utf16)])
+        XCTAssertEqual(backend.constructedEvents.map(\.flags), [[], []])
+        XCTAssertEqual(backend.postedEvents.map(\.processIdentifier), [42, 42])
+        XCTAssertEqual(backend.taggedUserData, [FeishuSpeechSyntheticEventTag.value, FeishuSpeechSyntheticEventTag.value])
+    }
+
+    func test_reviewExactAndApplicationBoundPreflightFailurePostsNoUnicodePair() {
+        let draft = "first line\nsecond line"
+        for route in ["exact", "application"] {
+            let pasteboard = FakeFinalTextPasteboardWriter()
+            let legacyEventPoster = FakeFinalTextKeyEventPoster()
+            let unicodeEventPoster = FakeCurrentFocusUnicodeEventPoster()
+            let output = SystemFinalTextOutput(
+                pasteboardWriter: pasteboard,
+                keyEventPoster: legacyEventPoster,
+                currentFocusEventPoster: unicodeEventPoster,
+                secureInputStateProvider: FakeSecureInputStateProvider(states: [false, false]),
+                frontmostProcessProvider: FakeFrontmostProcessProvider(processIdentifiers: [42, 42])
+            )
+            let result: FinalTextInsertionResult
+            if route == "exact" {
+                result = output.insertOnce(
+                    draft,
+                    destination: makeDestination(processIdentifier: 42),
+                    validateBeforeMutation: { false },
+                    validateAfterPosting: {
+                        XCTFail("preflight rejection must not run postflight")
+                        return false
+                    }
+                )
+            } else {
+                result = output.insertReviewAtCurrentFocusOnce(
+                    draft,
+                    processIdentifier: 42,
+                    validateBeforeMutation: { .destinationInvalid },
+                    validateAfterPosting: {
+                        XCTFail("preflight rejection must not run postflight")
+                        return .destinationInvalid
+                    }
+                )
+            }
+            XCTAssertEqual(result, .destinationInvalid, "route: \(route)")
+            XCTAssertEqual(pasteboard.writtenTexts, [], "route: \(route)")
+            XCTAssertEqual(legacyEventPoster.destinationProcessIdentifiers, [], "route: \(route)")
+            XCTAssertEqual(unicodeEventPoster.requestedTexts, [], "route: \(route)")
+        }
     }
 
     func test_reviewCurrentFocusUnsafeMultilineControlsRejectBeforeValidationOrMutation() {
@@ -229,21 +437,31 @@ final class FinalTextOutputSecurityTests: XCTestCase {
     func test_reviewCurrentFocusPostflightIdentityChangeIsUncertainAndDoesNotRetry() {
         let pasteboard = FakeFinalTextPasteboardWriter()
         let eventPoster = FakeFinalTextKeyEventPoster()
+        let currentFocusEventPoster = FakeCurrentFocusUnicodeEventPoster()
         let output = SystemFinalTextOutput(
             pasteboardWriter: pasteboard,
-            keyEventPoster: eventPoster
+            keyEventPoster: eventPoster,
+            currentFocusEventPoster: currentFocusEventPoster,
+            secureInputStateProvider: FakeSecureInputStateProvider(states: [false]),
+            frontmostProcessProvider: FakeFrontmostProcessProvider(processIdentifiers: [42])
         )
 
         let result = output.insertReviewAtCurrentFocusOnce(
             "PRIVATE_POSTFLIGHT_IDENTITY_CHANGE",
             processIdentifier: 42,
             validateBeforeMutation: { .valid },
-            validateAfterPosting: { .identityChanged }
+            validateAfterPosting: { .identityChanged },
+            postPairIfPreflightRemainsValid: { postPair in
+                postPair()
+                return true
+            }
         )
 
         XCTAssertEqual(result, .deliveryUncertain)
-        XCTAssertEqual(pasteboard.writtenTexts, ["PRIVATE_POSTFLIGHT_IDENTITY_CHANGE"])
-        XCTAssertEqual(eventPoster.destinationProcessIdentifiers, [42])
+        XCTAssertEqual(pasteboard.writtenTexts, [])
+        XCTAssertEqual(eventPoster.destinationProcessIdentifiers, [])
+        XCTAssertEqual(currentFocusEventPoster.requestedTexts, ["PRIVATE_POSTFLIGHT_IDENTITY_CHANGE"])
+        XCTAssertEqual(currentFocusEventPoster.destinationProcessIdentifiers, [42])
     }
 
     func test_systemUnicodePosterConstructsCompletePrivatePairBeforePostingDownThenUpOnce() {
@@ -254,7 +472,7 @@ final class FinalTextOutputSecurityTests: XCTestCase {
             backend: backend,
             secureInputStateProvider: secureInput
         )
-        let text = "Fn held 中文"
+        let text = "first line\nFn held 中文"
 
         let result = poster.postUnicodeText(text, to: 4242)
 
@@ -266,7 +484,11 @@ final class FinalTextOutputSecurityTests: XCTestCase {
                 "construct-down",
                 "construct-up",
                 "tag-down",
+                "target-down",
                 "tag-up",
+                "target-up",
+                "readback-down",
+                "readback-up",
                 "secure",
                 "post-down-4242",
                 "post-up-4242"
@@ -287,6 +509,322 @@ final class FinalTextOutputSecurityTests: XCTestCase {
             Array(repeating: FeishuSpeechSyntheticEventTag.value, count: 2)
         )
         XCTAssertEqual(secureInput.queryCount, 1)
+    }
+
+    func test_v4ReviewUnicodePairAcceptsExactUTF16CapAndRejectsSurrogateOverflowBeforeConstruction() {
+        let acceptedText = String(repeating: "a", count: 16_382) + "😀"
+        XCTAssertEqual(
+            acceptedText.utf16.count,
+            16_384,
+            "the boundary fixture must count the non-BMP character as its intact surrogate pair"
+        )
+        let acceptedBackend = FakeSystemUnicodeEventBackend(
+            failure: nil,
+            trace: FakePosterOperationTrace()
+        )
+        let acceptedPoster = SystemFinalTextCurrentFocusEventPoster(
+            backend: acceptedBackend,
+            secureInputStateProvider: FakeSecureInputStateProvider(states: [false])
+        )
+
+        XCTAssertEqual(acceptedPoster.postUnicodeText(acceptedText, to: 42), .posted)
+        XCTAssertEqual(
+            acceptedBackend.constructedEvents.map(\.utf16),
+            [Array(acceptedText.utf16), Array(acceptedText.utf16)]
+        )
+        XCTAssertEqual(
+            acceptedBackend.postedEvents.map(\.phase),
+            [.keyDown, .keyUp],
+            "exactly one complete pair is allowed at the 16,384 UTF-16-unit boundary"
+        )
+        XCTAssertEqual(
+            acceptedBackend.constructedEvents.map(\.sourceProcessIdentifier),
+            [getpid(), getpid()],
+            "both prepared events must carry the producing process provenance"
+        )
+        XCTAssertEqual(
+            acceptedBackend.constructedEvents.map(\.sourceIdentity),
+            [acceptedBackend.sourceIdentity, acceptedBackend.sourceIdentity]
+        )
+        XCTAssertEqual(acceptedBackend.constructedEvents.map(\.flags), [[], []])
+        XCTAssertEqual(
+            acceptedBackend.constructedEvents.map(\.userData),
+            [FeishuSpeechSyntheticEventTag.value, FeishuSpeechSyntheticEventTag.value]
+        )
+        XCTAssertEqual(acceptedBackend.postedEvents.map(\.processIdentifier), [42, 42])
+
+        let rejectedText = String(repeating: "a", count: 16_383) + "😀"
+        XCTAssertEqual(rejectedText.utf16.count, 16_385)
+        let rejectedBackend = FakeSystemUnicodeEventBackend(
+            failure: nil,
+            trace: FakePosterOperationTrace()
+        )
+        let rejectedPoster = SystemFinalTextCurrentFocusEventPoster(
+            backend: rejectedBackend,
+            secureInputStateProvider: FakeSecureInputStateProvider(states: [false])
+        )
+
+        XCTAssertEqual(
+            rejectedPoster.postUnicodeText(rejectedText, to: 42),
+            .deliveryFailed,
+            "one unit over the product cap must fail before event construction"
+        )
+        XCTAssertEqual(rejectedBackend.constructedEvents.count, 0)
+        XCTAssertEqual(rejectedBackend.postedEvents, [])
+    }
+
+    func test_v4PreparedPairReadbackFaultsFailBeforeAnyPost() {
+        for fault in FakeSystemUnicodeEventBackend.ReadbackFault.allCases {
+            let backend = FakeSystemUnicodeEventBackend(
+                failure: nil,
+                trace: FakePosterOperationTrace()
+            )
+            backend.readbackFault = fault
+            let poster = SystemFinalTextCurrentFocusEventPoster(
+                backend: backend,
+                secureInputStateProvider: FakeSecureInputStateProvider(states: [false])
+            )
+
+            XCTAssertEqual(
+                poster.postUnicodeText("PRIVATE_READBACK_FAULT", to: 4242),
+                .deliveryFailed,
+                "readback fault \(fault) must remain in the notStarted phase"
+            )
+            XCTAssertEqual(
+                backend.postedEvents,
+                [],
+                "readback fault \(fault) must not submit even a down event"
+            )
+        }
+    }
+
+    func test_v4ReviewUnicodePairHooksAreExecutablePhaseAndPIDOracles() {
+        let scenarios: [(
+            name: String,
+            hooks: ReviewUnicodePosterHooks,
+            expected: ReviewUnicodeOutputResult,
+            expectedPhases: [FinalTextUnicodeEventPhase]
+        )] = [
+            (
+                "beforeDown",
+                ReviewUnicodePosterHooks(beforeDown: { false }),
+                .failedBeforeSubmission(.preflightRejected),
+                []
+            ),
+            (
+                "afterDown",
+                ReviewUnicodePosterHooks(afterDown: { false }),
+                .submittedUnverified(.uncertain),
+                [.keyDown, .keyUp]
+            ),
+            (
+                "beforeUp",
+                ReviewUnicodePosterHooks(beforeUp: { false }),
+                .submittedUnverified(.uncertain),
+                [.keyDown, .keyUp]
+            ),
+            (
+                "afterUp",
+                ReviewUnicodePosterHooks(afterUp: { false }),
+                .submittedUnverified(.uncertain),
+                [.keyDown, .keyUp]
+            ),
+            (
+                "postflight",
+                ReviewUnicodePosterHooks(postflight: { false }),
+                .submittedUnverified(.uncertain),
+                [.keyDown, .keyUp]
+            )
+        ]
+
+        for scenario in scenarios {
+            let backend = FakeSystemUnicodeEventBackend(
+                failure: nil,
+                trace: FakePosterOperationTrace()
+            )
+            let poster = SystemFinalTextCurrentFocusEventPoster(
+                backend: backend,
+                secureInputStateProvider: FakeSecureInputStateProvider(states: [false]),
+                hooks: scenario.hooks
+            )
+            var pairGateCalls = 0
+
+            let result = poster.postReviewUnicodePair(
+                "PRIVATE_\(scenario.name)",
+                to: 4242,
+                postPairIfPreflightRemainsValid: { postPair in
+                    pairGateCalls += 1
+                    postPair()
+                    return true
+                },
+                validateAfterPosting: { .valid }
+            )
+
+            XCTAssertEqual(result, scenario.expected, scenario.name)
+            XCTAssertEqual(pairGateCalls, 1, scenario.name)
+            XCTAssertEqual(
+                backend.postedEvents.map(\.phase),
+                scenario.expectedPhases,
+                "phase sequence for \(scenario.name)"
+            )
+            XCTAssertEqual(
+                backend.postedEvents.map(\.processIdentifier),
+                Array(repeating: 4242, count: scenario.expectedPhases.count),
+                "captured PID for \(scenario.name)"
+            )
+        }
+    }
+
+    func test_v4ReviewUnicodePairCancellationBeforeAndAfterBoundaryIsPhaseAware() {
+        let beforeBackend = FakeSystemUnicodeEventBackend(
+            failure: nil,
+            trace: FakePosterOperationTrace()
+        )
+        let beforePoster = SystemFinalTextCurrentFocusEventPoster(
+            backend: beforeBackend,
+            secureInputStateProvider: FakeSecureInputStateProvider(states: [false]),
+            hooks: ReviewUnicodePosterHooks(cancellation: { true })
+        )
+        XCTAssertEqual(
+            beforePoster.postReviewUnicodePair(
+                "PRIVATE_CANCEL_BEFORE_DOWN",
+                to: 4242,
+                postPairIfPreflightRemainsValid: { postPair in
+                    postPair()
+                    return true
+                },
+                validateAfterPosting: { .valid }
+            ),
+            .cancelledBeforeSubmission
+        )
+        XCTAssertEqual(beforeBackend.postedEvents, [])
+
+        var cancellationCalls = 0
+        let afterBackend = FakeSystemUnicodeEventBackend(
+            failure: nil,
+            trace: FakePosterOperationTrace()
+        )
+        let afterPoster = SystemFinalTextCurrentFocusEventPoster(
+            backend: afterBackend,
+            secureInputStateProvider: FakeSecureInputStateProvider(states: [false]),
+            hooks: ReviewUnicodePosterHooks(cancellation: {
+                cancellationCalls += 1
+                return cancellationCalls >= 3
+            })
+        )
+        XCTAssertEqual(
+            afterPoster.postReviewUnicodePair(
+                "PRIVATE_CANCEL_AFTER_DOWN",
+                to: 4242,
+                postPairIfPreflightRemainsValid: { postPair in
+                    postPair()
+                    return true
+                },
+                validateAfterPosting: { .valid }
+            ),
+            .submittedUnverified(.uncertain)
+        )
+        XCTAssertEqual(
+            afterBackend.postedEvents.map(\.phase),
+            [.keyDown, .keyUp],
+            "cancellation after the boundary must still attempt the complete pair"
+        )
+        XCTAssertEqual(afterBackend.postedEvents.map(\.processIdentifier), [4242, 4242])
+    }
+
+    func test_v4BindingSpecificFinalValidationModifierTransitionIsPreBoundaryForExactAndApplicationRoutes() async {
+        for modifier in [
+            CGEventFlags.maskCommand,
+            .maskShift,
+            .maskControl,
+            .maskAlternate,
+            .maskSecondaryFn
+        ] {
+            for route in ["exact", "application"] {
+                let runtime = R1ReviewApplicationRuntime()
+                let activation = R1ReviewApplicationActivator()
+                let flags = R1MutableReviewModifierFlags()
+                let access = R1ReviewDestinationAccess(
+                    captureResult: route == "exact"
+                        ? .exact(R1ReviewFixtures.cursorToken())
+                        : .nonSecureCursorUnavailable
+                )
+                let secureInput = R1MutableReviewSecureInputProvider()
+                let backend = FakeSystemUnicodeEventBackend(
+                    failure: nil,
+                    trace: FakePosterOperationTrace()
+                )
+                let poster = SystemFinalTextCurrentFocusEventPoster(
+                    backend: backend,
+                    secureInputStateProvider: secureInput
+                )
+                let output = SystemFinalTextOutput(
+                    pasteboardWriter: FakeFinalTextPasteboardWriter(),
+                    keyEventPoster: FakeFinalTextKeyEventPoster(),
+                    currentFocusEventPoster: poster,
+                    secureInputStateProvider: secureInput,
+                    frontmostProcessProvider: R1ReviewFrontmostProcessProvider(
+                        runtime: runtime
+                    )
+                )
+
+                if route == "exact" {
+                    access.onRestore = { flags.value = modifier }
+                } else {
+                    // The fourth secure-input read is the second composite
+                    // sample inside application-bound final validation. It
+                    // occurs after the monitor's empty modifier check and
+                    // before the pair can be submitted.
+                    secureInput.onQuery = { queryCount in
+                        if queryCount == 4 {
+                            flags.value = modifier
+                        }
+                    }
+                }
+
+                let delivery = SystemReviewDestinationDelivery(
+                    applicationRuntime: runtime,
+                    applicationActivator: activation,
+                    accessibility: access,
+                    finalTextOutput: output,
+                    accessibilityTrustProvider: R1ReviewTrustProvider(),
+                    secureInputStateProvider: secureInput,
+                    frontmostProcessProvider: R1ReviewFrontmostProcessProvider(
+                        runtime: runtime
+                    ),
+                    inputMonitor: R1ReviewInputMonitor(),
+                    activationMonitor: R1ReviewActivationMonitor(),
+                    modifierSampler: { flags.value },
+                    modifierSleeper: { _ in true }
+                )
+                let destination = R1ReviewFixtures.destination(
+                    binding: route == "exact"
+                        ? .exactCursor(R1ReviewFixtures.cursorToken())
+                        : .applicationCurrentFocus
+                )
+
+                let result = await delivery.deliver(
+                    "PRIVATE_MODIFIER_\(route)_\(modifier.rawValue)",
+                    to: destination
+                )
+
+                XCTAssertEqual(
+                    result,
+                    .deliveryFailed,
+                    "\(route) route must fail before the Unicode submission boundary for \(modifier)"
+                )
+                XCTAssertEqual(
+                    backend.postedEvents,
+                    [],
+                    "\(route) route must not post after \(modifier) changes in final validation"
+                )
+                XCTAssertEqual(
+                    backend.constructedEvents.count,
+                    2,
+                    "\(route) route may prepare/read back, but must not post, for \(modifier)"
+                )
+            }
+        }
     }
 
     func test_systemReplacementPosterConstructsAndTagsEveryEventBeforeOrderedPosting() {
@@ -627,7 +1165,18 @@ final class FinalTextOutputSecurityTests: XCTestCase {
         XCTAssertEqual(secureInput.queryCount, 1)
         XCTAssertEqual(
             backend.operations,
-            ["source", "construct-down", "construct-up", "tag-down", "tag-up", "secure"]
+            [
+                "source",
+                "construct-down",
+                "construct-up",
+                "tag-down",
+                "target-down",
+                "tag-up",
+                "target-up",
+                "readback-down",
+                "readback-up",
+                "secure"
+            ]
         )
         XCTAssertEqual(backend.constructedEvents.map(\.phase), [.keyDown, .keyUp])
         XCTAssertEqual(backend.postedEvents, [])
@@ -735,6 +1284,14 @@ final class FinalTextOutputSecurityTests: XCTestCase {
         XCTAssertEqual(boundEventPoster.destinationProcessIdentifiers, [])
     }
 
+    private func productionSource(relativePath: String) throws -> String {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent(relativePath)
+        return try String(contentsOf: url, encoding: .utf8)
+    }
+
     private func makeDestination(processIdentifier: pid_t) -> CursorDestinationToken {
         CursorDestinationToken(
             generation: 7,
@@ -760,6 +1317,164 @@ final class FinalTextOutputSecurityTests: XCTestCase {
             mouseButton: .left
         )!
     }
+}
+
+@MainActor
+private enum R1ReviewFixtures {
+    static let identity = ReviewApplicationIdentity(
+        processIdentifier: 42,
+        bundleIdentifier: "com.example.issue40.r1",
+        executableURL: URL(fileURLWithPath: "/Applications/Issue40R1.app/Contents/MacOS/R1"),
+        launchDate: Date(timeIntervalSince1970: 40)
+    )
+
+    static func cursorToken() -> CursorDestinationToken {
+        CursorDestinationToken(
+            generation: 40,
+            processIdentifier: identity.processIdentifier,
+            element: AXUIElementCreateApplication(identity.processIdentifier),
+            originalSelection: CursorTextRange(location: 0, length: 0)
+        )
+    }
+
+    static func destination(binding: ReviewDestinationBinding) -> ReviewDestinationToken {
+        ReviewDestinationToken(
+            generation: 40,
+            application: identity,
+            binding: binding,
+            capturedSecurityState: .safe
+        )
+    }
+}
+
+@MainActor
+private final class R1ReviewApplicationRuntime: ReviewApplicationRuntime {
+    func identity(for processIdentifier: pid_t) -> ReviewApplicationIdentity? {
+        processIdentifier == R1ReviewFixtures.identity.processIdentifier
+            ? R1ReviewFixtures.identity
+            : nil
+    }
+
+    func frontmostIdentity() -> ReviewApplicationIdentity? {
+        R1ReviewFixtures.identity
+    }
+
+    func frontmostProcessIdentifier() -> pid_t? {
+        R1ReviewFixtures.identity.processIdentifier
+    }
+}
+
+@MainActor
+private final class R1ReviewApplicationActivator: ReviewApplicationActivating {
+    func activateAndWait(
+        for _: ReviewApplicationIdentity,
+        timeoutNanoseconds _: UInt64
+    ) async -> ReviewActivationResult {
+        .activated
+    }
+}
+
+@MainActor
+private final class R1ReviewDestinationAccess: ReviewDestinationAccessing {
+    let captureResult: ReviewCursorCaptureResult
+    var onRestore: (() -> Void)?
+
+    init(captureResult: ReviewCursorCaptureResult) {
+        self.captureResult = captureResult
+    }
+
+    func captureReviewCursorDestination(generation: UInt64) -> ReviewCursorCaptureResult {
+        captureResult
+    }
+
+    func restoreAndValidateBeforeDelivery(_: CursorDestinationToken) throws -> Bool {
+        onRestore?()
+        return true
+    }
+
+    func validateAfterDelivery(_: CursorDestinationToken) throws -> Bool {
+        true
+    }
+}
+
+@MainActor
+private final class R1ReviewTrustProvider: AccessibilityTrustProviding {
+    var isAccessibilityTrusted = true
+}
+
+@MainActor
+private final class R1MutableReviewModifierFlags {
+    var value: CGEventFlags = []
+}
+
+@MainActor
+private final class R1MutableReviewSecureInputProvider: SecureInputStateProviding {
+    var onQuery: ((Int) -> Void)?
+    private(set) var queryCount = 0
+
+    func isSecureInputEnabled() -> Bool {
+        queryCount += 1
+        onQuery?(queryCount)
+        return false
+    }
+}
+
+@MainActor
+private final class R1ReviewFrontmostProcessProvider: FrontmostProcessProviding {
+    private let runtime: R1ReviewApplicationRuntime
+
+    init(runtime: R1ReviewApplicationRuntime) {
+        self.runtime = runtime
+    }
+
+    func frontmostProcessIdentifier() -> pid_t? {
+        runtime.frontmostProcessIdentifier()
+    }
+}
+
+@MainActor
+private final class R1ReviewInputMonitor: CurrentFocusInputMonitoring {
+    let supportsReviewDeliveryEpoch = true
+    var interferenceEpoch: UInt64 = 0
+
+    func startMonitoring(_: @escaping @MainActor () -> Void) {}
+
+    func armMonitoringFailClosed(_: @escaping @MainActor () -> Void) -> Bool {
+        true
+    }
+
+    func armMonitoringFailClosedWithEpoch(
+        _: @escaping @MainActor () -> Void
+    ) -> UInt64? {
+        interferenceEpoch
+    }
+
+    func postCompleteSyntheticPairIfInterferenceEpochIsUnchanged(
+        expectedEpoch: UInt64,
+        _ postPair: () -> Void
+    ) -> Bool {
+        guard expectedEpoch == interferenceEpoch else { return false }
+        postPair()
+        return true
+    }
+
+    func stopMonitoring() {}
+}
+
+@MainActor
+private final class R1ReviewActivationMonitor: CurrentFocusActivationMonitoring {
+    let supportsReviewDeliveryEpoch = true
+    var activationEpoch: UInt64 = 0
+
+    func startMonitoring(_: @escaping @MainActor (pid_t) -> Void) {}
+
+    func armMonitoringFailClosedWithEpoch(
+        _: @escaping @MainActor (pid_t) -> Void
+    ) -> UInt64? {
+        activationEpoch
+    }
+
+    func stopMonitoring() {}
 }
 
 @MainActor
@@ -811,6 +1526,16 @@ private final class FakeSystemUnicodeEventBackend: FinalTextUnicodeEventBackend 
         case keyUp
     }
 
+    enum ReadbackFault: String, CaseIterable {
+        case tag
+        case sourcePID
+        case sourceIdentity
+        case flags
+        case phase
+        case payload
+        case targetPID
+    }
+
     private let failure: Failure?
     private let keyboardFailurePhase: FinalTextUnicodeEventPhase?
     private let source = FakeUnicodeEventSourceHandle()
@@ -819,6 +1544,7 @@ private final class FakeSystemUnicodeEventBackend: FinalTextUnicodeEventBackend 
     private(set) var constructedEvents: [FakeUnicodeEventHandle] = []
     private(set) var postedEvents: [FakePostedUnicodeEvent] = []
     private(set) var taggedUserData: [Int64] = []
+    var readbackFault: ReadbackFault?
     var onConstructedEvent: ((FinalTextUnicodeEventPhase) -> Void)?
     var onPostedEvent: ((FakePostedUnicodeEvent) -> Void)?
 
@@ -853,10 +1579,15 @@ private final class FakeSystemUnicodeEventBackend: FinalTextUnicodeEventBackend 
         if failure == .keyDown, phase == .keyDown { return nil }
         if failure == .keyUp, phase == .keyUp { return nil }
         let event = FakeUnicodeEventHandle(
-            phase: phase,
-            sourceIdentity: ObjectIdentifier(source),
-            utf16: utf16,
-            flags: flags,
+            phase: readbackFault == .phase
+                ? (phase == .keyDown ? .keyUp : .keyDown)
+                : phase,
+            sourceIdentity: readbackFault == .sourceIdentity
+                ? ObjectIdentifier(FakeUnicodeEventSourceHandle())
+                : ObjectIdentifier(source),
+            sourceProcessIdentifier: readbackFault == .sourcePID ? nil : getpid(),
+            utf16: readbackFault == .payload ? Array(utf16.dropLast()) : utf16,
+            flags: readbackFault == .flags ? .maskCommand : flags,
             virtualKey: nil
         )
         constructedEvents.append(event)
@@ -875,6 +1606,7 @@ private final class FakeSystemUnicodeEventBackend: FinalTextUnicodeEventBackend 
         let event = FakeUnicodeEventHandle(
             phase: phase,
             sourceIdentity: ObjectIdentifier(source),
+            sourceProcessIdentifier: getpid(),
             utf16: [],
             flags: flags,
             virtualKey: virtualKey
@@ -892,7 +1624,38 @@ private final class FakeSystemUnicodeEventBackend: FinalTextUnicodeEventBackend 
             return
         }
         trace.record(event.phase == .keyDown ? "tag-down" : "tag-up")
-        taggedUserData.append(userData)
+        let actualUserData = readbackFault == .tag ? 0 : userData
+        event.userData = actualUserData
+        taggedUserData.append(actualUserData)
+    }
+
+    func setTargetProcessIdentifier(
+        _ processIdentifier: pid_t,
+        for event: any FinalTextUnicodeEventHandle
+    ) {
+        guard let event = event as? FakeUnicodeEventHandle else {
+            XCTFail("poster targeted an event outside the injected backend")
+            return
+        }
+        trace.record(event.phase == .keyDown ? "target-down" : "target-up")
+        event.targetProcessIdentifier = readbackFault == .targetPID
+            ? processIdentifier + 1
+            : processIdentifier
+    }
+
+    func readbackEvent(_ expectation: FinalTextUnicodeReadback) -> Bool {
+        guard let event = expectation.event as? FakeUnicodeEventHandle,
+              let source = expectation.source as? FakeUnicodeEventSourceHandle else {
+            return false
+        }
+        trace.record(event.phase == .keyDown ? "readback-down" : "readback-up")
+        return event.phase == expectation.expectedPhase
+            && event.sourceIdentity == ObjectIdentifier(source)
+            && event.sourceProcessIdentifier == expectation.expectedSourceProcessIdentifier
+            && event.targetProcessIdentifier == expectation.expectedTargetProcessIdentifier
+            && event.utf16 == expectation.expectedUTF16
+            && event.flags == expectation.expectedFlags
+            && event.userData == expectation.expectedUserData
     }
 
     func postUnicodeEvent(
@@ -908,7 +1671,7 @@ private final class FakeSystemUnicodeEventBackend: FinalTextUnicodeEventBackend 
         trace.record("post-\(eventName)-\(processIdentifier)")
         let postedEvent = FakePostedUnicodeEvent(
             phase: event.phase,
-            processIdentifier: processIdentifier,
+            processIdentifier: readbackFault == .targetPID ? processIdentifier + 1 : processIdentifier,
             virtualKey: event.virtualKey,
             utf16: event.utf16
         )
@@ -924,19 +1687,24 @@ private final class FakeUnicodeEventSourceHandle: FinalTextUnicodeEventSourceHan
 private final class FakeUnicodeEventHandle: FinalTextUnicodeEventHandle {
     let phase: FinalTextUnicodeEventPhase
     let sourceIdentity: ObjectIdentifier
+    let sourceProcessIdentifier: pid_t?
     let utf16: [UInt16]
     let flags: CGEventFlags
     let virtualKey: CGKeyCode?
+    var userData: Int64 = 0
+    var targetProcessIdentifier: pid_t?
 
     init(
         phase: FinalTextUnicodeEventPhase,
         sourceIdentity: ObjectIdentifier,
+        sourceProcessIdentifier: pid_t?,
         utf16: [UInt16],
         flags: CGEventFlags,
         virtualKey: CGKeyCode?
     ) {
         self.phase = phase
         self.sourceIdentity = sourceIdentity
+        self.sourceProcessIdentifier = sourceProcessIdentifier
         self.utf16 = utf16
         self.flags = flags
         self.virtualKey = virtualKey

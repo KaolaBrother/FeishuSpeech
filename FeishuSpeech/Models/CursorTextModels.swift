@@ -135,6 +135,10 @@ nonisolated enum FinalOnlyFallbackDecision: Equatable, Sendable {
 
 nonisolated enum FinalTextInsertionResult: Equatable, Sendable {
     case inserted
+    /// CoreGraphics accepts the local event submission, but the target gives
+    /// no consumption/display receipt. Review output must expose that fact
+    /// instead of claiming the text was consumed.
+    case submittedUnverified
     case securityRejected
     case identityChanged
     case destinationInvalid

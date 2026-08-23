@@ -10,47 +10,16 @@ private let logger = Logger(
     category: "ReviewPasteboardLifecycleTests"
 )
 
-/// RED contract for the review-only paste transaction.
+/// RED contract for the v4 review-only output transaction.
 ///
-/// The production output must expose an injectable snapshot/change-count/
-/// restoration scheduler seam. These tests deliberately do not use the real
-/// pasteboard or wall-clock polling: the fake models all original items,
-/// third-party change-count races, and a deterministic bounded opportunity.
+/// Review confirmation must never use the general pasteboard or Cmd+V. These
+/// tests deliberately do not use the real pasteboard or wall-clock polling:
+/// the fake records every prohibited snapshot/read/write/restore/scheduler
+/// collaborator and every legacy targeted Cmd+V attempt.
 @MainActor
 final class ReviewPasteboardLifecycleTests: XCTestCase {
-    func test_successfulReviewPasteRestoresAllPriorItemsAfterBoundedOpportunity() {
-        logger.debug("checking review pasteboard restoration")
-        let pasteboard = Issue38ReviewPasteboardLifecycleWriter()
-        let scheduler = Issue38ReviewPasteboardRestoreScheduler()
-        let keyPoster = Issue38ReviewPasteboardKeyPoster()
-        let output = makeOutput(
-            pasteboard: pasteboard,
-            scheduler: scheduler,
-            keyPoster: keyPoster
-        )
-        let priorItems = pasteboard.items
-
-        let result = output.insertOnce(
-            "PRIVATE_SUCCESS_DRAFT",
-            destination: Issue38ReviewPasteboardFixtures.destination,
-            validateBeforeMutation: { true },
-            validateAfterPosting: { true }
-        )
-
-        XCTAssertEqual(result, .inserted)
-        XCTAssertEqual(pasteboard.items, [Issue38ReviewPasteboardItem.draft("PRIVATE_SUCCESS_DRAFT")])
-        XCTAssertEqual(pasteboard.writeCount, 1)
-        XCTAssertEqual(keyPoster.processIdentifiers, [42])
-        XCTAssertEqual(scheduler.pendingCount, 1)
-
-        scheduler.runNext()
-
-        XCTAssertEqual(pasteboard.items, priorItems)
-        XCTAssertEqual(pasteboard.restoreCount, 1)
-        XCTAssertEqual(pasteboard.writtenTexts, ["PRIVATE_SUCCESS_DRAFT"])
-    }
-
-    func test_successfulReviewPasteNeverOverwritesThirdPartyClipboardChange() {
+    func test_successfulReviewConfirmationNeverTouchesPasteboardOrCmdV() {
+        logger.debug("checking review text-only output")
         let pasteboard = Issue38ReviewPasteboardLifecycleWriter()
         let scheduler = Issue38ReviewPasteboardRestoreScheduler()
         let keyPoster = Issue38ReviewPasteboardKeyPoster()
@@ -66,21 +35,17 @@ final class ReviewPasteboardLifecycleTests: XCTestCase {
             validateBeforeMutation: { true },
             validateAfterPosting: { true }
         )
-        XCTAssertEqual(result, .inserted)
 
-        pasteboard.externalWrite(
-            [Issue38ReviewPasteboardItem(type: "public.text", data: Data("THIRD_PARTY".utf8))]
-        )
-        scheduler.runNext()
-
-        XCTAssertEqual(
-            pasteboard.items,
-            [Issue38ReviewPasteboardItem(type: "public.text", data: Data("THIRD_PARTY".utf8))]
-        )
+        XCTAssertEqual(result, .submittedUnverified)
+        XCTAssertEqual(pasteboard.snapshotCount, 0)
+        XCTAssertEqual(pasteboard.changeCountReadCount, 0)
+        XCTAssertEqual(pasteboard.writeCount, 0)
         XCTAssertEqual(pasteboard.restoreCount, 0)
+        XCTAssertEqual(scheduler.pendingCount, 0)
+        XCTAssertEqual(keyPoster.processIdentifiers, [])
     }
 
-    func test_successfulApplicationBoundReviewPasteUsesSameSnapshotAndRestoresMultilineDraft() {
+    func test_successfulReviewConfirmationLeavesImageOnlyClipboardUntouched() {
         let pasteboard = Issue38ReviewPasteboardLifecycleWriter()
         let scheduler = Issue38ReviewPasteboardRestoreScheduler()
         let keyPoster = Issue38ReviewPasteboardKeyPoster()
@@ -90,6 +55,36 @@ final class ReviewPasteboardLifecycleTests: XCTestCase {
             keyPoster: keyPoster
         )
         let priorItems = pasteboard.items
+        let priorChangeCount = pasteboard.changeCount
+
+        let result = output.insertOnce(
+            "PRIVATE_SUCCESS_DRAFT",
+            destination: Issue38ReviewPasteboardFixtures.destination,
+            validateBeforeMutation: { true },
+            validateAfterPosting: { true }
+        )
+        XCTAssertEqual(result, .submittedUnverified)
+        XCTAssertEqual(pasteboard.items, priorItems)
+        XCTAssertEqual(pasteboard.changeCount, priorChangeCount)
+        XCTAssertEqual(pasteboard.snapshotCount, 0)
+        XCTAssertEqual(pasteboard.changeCountReadCount, 0)
+        XCTAssertEqual(pasteboard.writeCount, 0)
+        XCTAssertEqual(pasteboard.restoreCount, 0)
+        XCTAssertEqual(scheduler.pendingCount, 0)
+        XCTAssertEqual(keyPoster.processIdentifiers, [])
+    }
+
+    func test_successfulApplicationBoundReviewConfirmationNeverTouchesPasteboardOrCmdV() {
+        let pasteboard = Issue38ReviewPasteboardLifecycleWriter()
+        let scheduler = Issue38ReviewPasteboardRestoreScheduler()
+        let keyPoster = Issue38ReviewPasteboardKeyPoster()
+        let output = makeOutput(
+            pasteboard: pasteboard,
+            scheduler: scheduler,
+            keyPoster: keyPoster
+        )
+        let priorItems = pasteboard.items
+        let priorChangeCount = pasteboard.changeCount
         let draft = "first line\nsecond line"
 
         let result = output.insertReviewAtCurrentFocusOnce(
@@ -99,20 +94,19 @@ final class ReviewPasteboardLifecycleTests: XCTestCase {
             validateAfterPosting: { .valid }
         )
 
-        XCTAssertEqual(result, .inserted)
-        XCTAssertEqual(pasteboard.items, [Issue38ReviewPasteboardItem.draft(draft)])
-        XCTAssertEqual(pasteboard.writtenTexts, [draft])
-        XCTAssertEqual(pasteboard.writeCount, 1)
-        XCTAssertEqual(keyPoster.processIdentifiers, [42])
-        XCTAssertEqual(scheduler.pendingCount, 1)
-
-        scheduler.runNext()
-
+        XCTAssertEqual(result, .submittedUnverified)
         XCTAssertEqual(pasteboard.items, priorItems)
-        XCTAssertEqual(pasteboard.restoreCount, 1)
+        XCTAssertEqual(pasteboard.changeCount, priorChangeCount)
+        XCTAssertEqual(pasteboard.snapshotCount, 0)
+        XCTAssertEqual(pasteboard.changeCountReadCount, 0)
+        XCTAssertEqual(pasteboard.writtenTexts, [])
+        XCTAssertEqual(pasteboard.writeCount, 0)
+        XCTAssertEqual(pasteboard.restoreCount, 0)
+        XCTAssertEqual(keyPoster.processIdentifiers, [])
+        XCTAssertEqual(scheduler.pendingCount, 0)
     }
 
-    func test_applicationBoundReviewPastePostflightUncertaintyDoesNotRestoreOrRetry() {
+    func test_applicationBoundReviewConfirmationPostflightUncertaintyDoesNotTouchPasteboardOrRetry() {
         let pasteboard = Issue38ReviewPasteboardLifecycleWriter()
         let scheduler = Issue38ReviewPasteboardRestoreScheduler()
         let keyPoster = Issue38ReviewPasteboardKeyPoster()
@@ -130,8 +124,10 @@ final class ReviewPasteboardLifecycleTests: XCTestCase {
         )
 
         XCTAssertEqual(result, .deliveryUncertain)
-        XCTAssertEqual(pasteboard.writtenTexts, ["PRIVATE_FALLBACK_UNCERTAIN"])
-        XCTAssertEqual(keyPoster.processIdentifiers, [42])
+        XCTAssertEqual(pasteboard.snapshotCount, 0)
+        XCTAssertEqual(pasteboard.changeCountReadCount, 0)
+        XCTAssertEqual(pasteboard.writtenTexts, [])
+        XCTAssertEqual(keyPoster.processIdentifiers, [])
         XCTAssertEqual(scheduler.pendingCount, 0)
         XCTAssertEqual(pasteboard.restoreCount, 0)
     }
@@ -158,6 +154,8 @@ final class ReviewPasteboardLifecycleTests: XCTestCase {
         XCTAssertEqual(result, .destinationInvalid)
         XCTAssertEqual(pasteboard.items, priorItems)
         XCTAssertEqual(pasteboard.changeCount, priorChangeCount)
+        XCTAssertEqual(pasteboard.snapshotCount, 0)
+        XCTAssertEqual(pasteboard.changeCountReadCount, 0)
         XCTAssertEqual(pasteboard.writeCount, 0)
         XCTAssertEqual(keyPoster.processIdentifiers, [])
         XCTAssertEqual(scheduler.pendingCount, 0)
@@ -168,11 +166,17 @@ final class ReviewPasteboardLifecycleTests: XCTestCase {
         let pasteboard = Issue38ReviewPasteboardLifecycleWriter()
         let scheduler = Issue38ReviewPasteboardRestoreScheduler()
         let keyPoster = Issue38ReviewPasteboardKeyPoster(shouldPost: false)
+        let unicodePoster = Issue40ReviewPasteboardUnicodePoster(
+            result: .submittedUnverified(.uncertain)
+        )
         let output = makeOutput(
             pasteboard: pasteboard,
             scheduler: scheduler,
-            keyPoster: keyPoster
+            keyPoster: keyPoster,
+            unicodePoster: unicodePoster
         )
+        let priorItems = pasteboard.items
+        let priorChangeCount = pasteboard.changeCount
 
         let result = output.insertOnce(
             "PRIVATE_KEY_POST_UNCERTAIN",
@@ -182,14 +186,17 @@ final class ReviewPasteboardLifecycleTests: XCTestCase {
         )
 
         XCTAssertEqual(result, .deliveryUncertain)
-        XCTAssertEqual(pasteboard.writtenTexts, ["PRIVATE_KEY_POST_UNCERTAIN"])
-        XCTAssertEqual(keyPoster.processIdentifiers, [42])
+        XCTAssertEqual(pasteboard.snapshotCount, 0)
+        XCTAssertEqual(pasteboard.changeCountReadCount, 0)
+        XCTAssertEqual(pasteboard.writtenTexts, [])
+        XCTAssertEqual(keyPoster.processIdentifiers, [])
         XCTAssertEqual(scheduler.pendingCount, 0)
         XCTAssertEqual(
             pasteboard.items,
-            [Issue38ReviewPasteboardItem.draft("PRIVATE_KEY_POST_UNCERTAIN")],
-            "uncertain delivery leaves the frozen draft available for the one manual-recovery copy"
+            priorItems,
+            "uncertain delivery must not replace or read the user clipboard"
         )
+        XCTAssertEqual(pasteboard.changeCount, priorChangeCount)
     }
 
     func test_postflightUncertaintyIsTerminalAndNeverRetriesOrRestoresAutomatically() {
@@ -201,6 +208,8 @@ final class ReviewPasteboardLifecycleTests: XCTestCase {
             scheduler: scheduler,
             keyPoster: keyPoster
         )
+        let priorItems = pasteboard.items
+        let priorChangeCount = pasteboard.changeCount
 
         let result = output.insertOnce(
             "PRIVATE_POSTFLIGHT_UNCERTAIN",
@@ -210,32 +219,29 @@ final class ReviewPasteboardLifecycleTests: XCTestCase {
         )
 
         XCTAssertEqual(result, .deliveryUncertain)
-        XCTAssertEqual(pasteboard.writtenTexts, ["PRIVATE_POSTFLIGHT_UNCERTAIN"])
-        XCTAssertEqual(keyPoster.processIdentifiers, [42])
+        XCTAssertEqual(pasteboard.snapshotCount, 0)
+        XCTAssertEqual(pasteboard.changeCountReadCount, 0)
+        XCTAssertEqual(pasteboard.writtenTexts, [])
+        XCTAssertEqual(keyPoster.processIdentifiers, [])
         XCTAssertEqual(scheduler.pendingCount, 0)
         XCTAssertEqual(pasteboard.restoreCount, 0)
-        XCTAssertEqual(
-            pasteboard.items,
-            [Issue38ReviewPasteboardItem.draft("PRIVATE_POSTFLIGHT_UNCERTAIN")]
-        )
+        XCTAssertEqual(pasteboard.items, priorItems)
+        XCTAssertEqual(pasteboard.changeCount, priorChangeCount)
     }
 
     private func makeOutput(
         pasteboard: Issue38ReviewPasteboardLifecycleWriter,
         scheduler: Issue38ReviewPasteboardRestoreScheduler,
-        keyPoster: Issue38ReviewPasteboardKeyPoster
+        keyPoster: Issue38ReviewPasteboardKeyPoster,
+        unicodePoster: Issue40ReviewPasteboardUnicodePoster? = nil
     ) -> SystemFinalTextOutput {
-        SystemFinalTextOutput(
+        let unicodePoster = unicodePoster ?? Issue40ReviewPasteboardUnicodePoster()
+        return SystemFinalTextOutput(
             pasteboardWriter: pasteboard,
             keyEventPoster: keyPoster,
-            reviewPasteboardSnapshot: { pasteboard.snapshot() },
-            reviewPasteboardChangeCount: { pasteboard.changeCount },
-            reviewPasteboardRestore: { snapshot, expectedChangeCount in
-                pasteboard.restore(snapshot, ifChangeCount: expectedChangeCount)
-            },
-            reviewPasteboardRestoreScheduler: { operation in
-                scheduler.schedule(operation)
-            }
+            currentFocusEventPoster: unicodePoster,
+            secureInputStateProvider: Issue40ReviewPasteboardSecureInputProvider(),
+            frontmostProcessProvider: Issue40ReviewPasteboardFrontmostProcessProvider()
         )
     }
 }
@@ -270,6 +276,8 @@ private final class Issue38ReviewPasteboardLifecycleWriter: FinalTextPasteboardW
     private(set) var writtenTexts: [String] = []
     private(set) var writeCount = 0
     private(set) var restoreCount = 0
+    private(set) var snapshotCount = 0
+    private(set) var changeCountReadCount = 0
 
     func replaceContents(with text: String) -> Bool {
         writtenTexts.append(text)
@@ -280,7 +288,13 @@ private final class Issue38ReviewPasteboardLifecycleWriter: FinalTextPasteboardW
     }
 
     func snapshot() -> [[String: Data]] {
-        items.map { [$0.type: $0.data] }
+        snapshotCount += 1
+        return items.map { [$0.type: $0.data] }
+    }
+
+    func readChangeCount() -> Int {
+        changeCountReadCount += 1
+        return changeCount
     }
 
     func restore(_ snapshot: [[String: Data]], ifChangeCount expectedChangeCount: Int) {
@@ -327,4 +341,65 @@ private final class Issue38ReviewPasteboardKeyPoster: FinalTextKeyEventPosting {
         processIdentifiers.append(processIdentifier)
         return shouldPost
     }
+}
+
+@MainActor
+private final class Issue40ReviewPasteboardUnicodePoster: FinalTextCurrentFocusEventPosting {
+    let result: ReviewUnicodeOutputResult
+    private(set) var requestedTexts: [String] = []
+    private(set) var processIdentifiers: [pid_t] = []
+
+    init(result: ReviewUnicodeOutputResult = .submittedUnverified(.valid)) {
+        self.result = result
+    }
+
+    func postUnicodeText(
+        _ text: String,
+        to processIdentifier: pid_t
+    ) -> FinalTextCurrentFocusPostResult {
+        requestedTexts.append(text)
+        processIdentifiers.append(processIdentifier)
+        switch result {
+        case .failedBeforeSubmission(.secureInput):
+            return .securityRejected
+        case .failedBeforeSubmission, .cancelledBeforeSubmission:
+            return .deliveryFailed
+        case .submittedUnverified:
+            return .posted
+        }
+    }
+
+    func postReviewUnicodePair(
+        _ text: String,
+        to processIdentifier: pid_t,
+        postPairIfPreflightRemainsValid pairGate: (
+            (_ postPair: @escaping () -> Void
+            ) -> Bool
+        ),
+        validateAfterPosting: () -> ReviewCurrentFocusValidation
+    ) -> ReviewUnicodeOutputResult {
+        guard pairGate({
+            _ = self.postUnicodeText(text, to: processIdentifier)
+        }) else {
+            return .failedBeforeSubmission(.preflightRejected)
+        }
+        switch result {
+        case .submittedUnverified(.valid):
+            return validateAfterPosting() == .valid
+                ? .submittedUnverified(.valid)
+                : .submittedUnverified(.uncertain)
+        default:
+            return result
+        }
+    }
+}
+
+@MainActor
+private final class Issue40ReviewPasteboardSecureInputProvider: SecureInputStateProviding {
+    func isSecureInputEnabled() -> Bool { false }
+}
+
+@MainActor
+private final class Issue40ReviewPasteboardFrontmostProcessProvider: FrontmostProcessProviding {
+    func frontmostProcessIdentifier() -> pid_t? { 42 }
 }
