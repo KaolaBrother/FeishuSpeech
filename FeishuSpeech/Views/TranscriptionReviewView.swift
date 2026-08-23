@@ -11,17 +11,20 @@ struct TranscriptionReviewView: View {
     let state: TranscriptionReviewState
     let onDraftChange: (@MainActor (String) -> Void)?
     let onConfirm: (@MainActor () -> Void)?
+    let onRetryReadiness: (@MainActor () -> Void)?
     let onDiscard: (@MainActor () -> Void)?
 
     init(
         state: TranscriptionReviewState,
         onDraftChange: (@MainActor (String) -> Void)? = nil,
         onConfirm: (@MainActor () -> Void)? = nil,
+        onRetryReadiness: (@MainActor () -> Void)? = nil,
         onDiscard: (@MainActor () -> Void)? = nil
     ) {
         self.state = state
         self.onDraftChange = onDraftChange
         self.onConfirm = onConfirm
+        self.onRetryReadiness = onRetryReadiness
         self.onDiscard = onDiscard
     }
 
@@ -46,13 +49,40 @@ struct TranscriptionReviewView: View {
                 preview: preview,
                 status: "正在完成识别…"
             )
-        case .editable(let draft, let isPossiblyIncomplete):
+        case .editable(let draft, let isPossiblyIncomplete, let feedback):
             editableContent(
                 draft: draft,
-                isPossiblyIncomplete: isPossiblyIncomplete
+                isPossiblyIncomplete: isPossiblyIncomplete,
+                feedback: feedback,
+                isEditable: true,
+                canConfirm: true
             )
-        case .confirming:
-            EmptyView()
+        case .editablePending(
+            let draft,
+            let isPossiblyIncomplete,
+            let readiness,
+            let feedback
+        ):
+            pendingContent(
+                draft: draft,
+                isPossiblyIncomplete: isPossiblyIncomplete,
+                readiness: readiness,
+                feedback: feedback
+            )
+        case .confirming(let draft, let isPossiblyIncomplete):
+            VStack(alignment: .leading, spacing: 12) {
+                editableContent(
+                    draft: draft,
+                    isPossiblyIncomplete: isPossiblyIncomplete,
+                    feedback: nil,
+                    isEditable: false,
+                    canConfirm: false
+                )
+
+                Text("正在发送…")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -75,20 +105,89 @@ struct TranscriptionReviewView: View {
 
     private func editableContent(
         draft: String,
-        isPossiblyIncomplete: Bool
+        isPossiblyIncomplete: Bool,
+        feedback: ReviewDraftFeedback?,
+        isEditable: Bool,
+        canConfirm: Bool
     ) -> some View {
-        EditableDraftView(
-            initialDraft: draft,
-            isPossiblyIncomplete: isPossiblyIncomplete,
-            onDraftChange: onDraftChange,
-            onConfirm: onConfirm,
-            onDiscard: onDiscard
-        )
+        VStack(alignment: .leading, spacing: 12) {
+            EditableDraftView(
+                initialDraft: draft,
+                isPossiblyIncomplete: isPossiblyIncomplete,
+                isEditable: isEditable,
+                canConfirm: canConfirm,
+                onDraftChange: isEditable ? onDraftChange : nil,
+                onConfirm: canConfirm ? onConfirm : nil,
+                onDiscard: isEditable ? onDiscard : nil
+            )
+
+            if let feedbackText = feedbackText(for: feedback) {
+                Text(feedbackText)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func pendingContent(
+        draft: String,
+        isPossiblyIncomplete: Bool,
+        readiness: ReviewEditableReadinessState,
+        feedback: ReviewDraftFeedback?
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            editableContent(
+                draft: draft,
+                isPossiblyIncomplete: isPossiblyIncomplete,
+                feedback: feedback,
+                isEditable: true,
+                canConfirm: false
+            )
+
+            if case .preparing = readiness {
+                Text("正在准备编辑…")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+
+            Button("重试编辑") {
+                onRetryReadiness?()
+            }
+            .keyboardShortcut(.return, modifiers: [.command, .shift])
+            .disabled({
+                if case .preparing = readiness { return true }
+                return false
+            }())
+        }
+    }
+
+    private func feedbackText(for feedback: ReviewDraftFeedback?) -> String? {
+        switch feedback {
+        case .activationFailed:
+            return "无法激活预览，请重试编辑。"
+        case .destinationChanged:
+            return "目标已变化，请重试编辑。"
+        case .securityRejected:
+            return "目标安全状态不允许输入。"
+        case .unsafeText:
+            return "草稿包含不安全字符，请编辑后重试。"
+        case .deliveryFailed:
+            return "输入失败；草稿已保留，请显式重试或取消。"
+        case .deliveryUncertain:
+            return "输入状态不确定；重试可能造成重复输入。"
+        case .deliveryCancelled:
+            return "输入已取消；草稿已保留。"
+        case nil:
+            return nil
+        }
     }
 }
 
 private struct EditableDraftView: View {
     let isPossiblyIncomplete: Bool
+    let isEditable: Bool
+    let canConfirm: Bool
     let onDraftChange: (@MainActor (String) -> Void)?
     let onConfirm: (@MainActor () -> Void)?
     let onDiscard: (@MainActor () -> Void)?
@@ -98,11 +197,15 @@ private struct EditableDraftView: View {
     init(
         initialDraft: String,
         isPossiblyIncomplete: Bool,
+        isEditable: Bool,
+        canConfirm: Bool,
         onDraftChange: (@MainActor (String) -> Void)?,
         onConfirm: (@MainActor () -> Void)?,
         onDiscard: (@MainActor () -> Void)?
     ) {
         self.isPossiblyIncomplete = isPossiblyIncomplete
+        self.isEditable = isEditable
+        self.canConfirm = canConfirm
         self.onDraftChange = onDraftChange
         self.onConfirm = onConfirm
         self.onDiscard = onDiscard
@@ -113,11 +216,15 @@ private struct EditableDraftView: View {
         VStack(alignment: .leading, spacing: 12) {
             ReviewDraftTextEditor(
                 text: draftText,
+                isEditable: isEditable,
                 onTextChange: { newValue in
+                    guard isEditable else { return }
                     draftText = newValue
                     onDraftChange?(newValue)
                 },
-                onConfirm: confirmDraft
+                onConfirm: {
+                    confirmDraft()
+                }
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -134,17 +241,22 @@ private struct EditableDraftView: View {
                     onDiscard?()
                 }
                 .keyboardShortcut(.cancelAction)
+                .disabled(!isEditable)
 
-                Button("输入") {
+                Button("发送") {
                     confirmDraft()
                 }
                 .keyboardShortcut(.return, modifiers: .command)
-                .disabled(draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(
+                    !canConfirm ||
+                        draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                )
             }
         }
     }
 
     private func confirmDraft() {
+        guard canConfirm else { return }
         guard !draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return
         }
@@ -154,6 +266,7 @@ private struct EditableDraftView: View {
 
 private struct ReviewDraftTextEditor: NSViewRepresentable {
     let text: String
+    let isEditable: Bool
     let onTextChange: @MainActor (String) -> Void
     let onConfirm: @MainActor () -> Void
 
@@ -171,7 +284,7 @@ private struct ReviewDraftTextEditor: NSViewRepresentable {
             coordinator?.confirm()
         }
         textView.string = text
-        textView.isEditable = true
+        textView.isEditable = isEditable
         textView.isSelectable = true
         textView.isRichText = false
         textView.allowsUndo = true
@@ -204,6 +317,7 @@ private struct ReviewDraftTextEditor: NSViewRepresentable {
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         context.coordinator.onTextChange = onTextChange
         context.coordinator.onConfirm = onConfirm
+        (scrollView.documentView as? ReviewDraftTextView)?.isEditable = isEditable
 
         guard let textView = scrollView.documentView as? ReviewDraftTextView,
               !textView.hasMarkedText(),
@@ -248,7 +362,7 @@ private final class ReviewDraftTextView: NSTextView {
     var onConfirm: (@MainActor () -> Void)?
 
     override func keyDown(with event: NSEvent) {
-        guard isReturnEvent(event), !hasMarkedText() else {
+        guard isEditable, isReturnEvent(event), !hasMarkedText() else {
             super.keyDown(with: event)
             return
         }

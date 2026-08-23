@@ -2,12 +2,22 @@
 
 ## [Unreleased]
 
+### Changed — Issue #40 v2
+- 所有 accepted Fn 交互统一进入一条审阅路线：`streaming -> sealing -> editablePending -> editable`。捕获/录音与识别/provider/retry/replay 仍是独立异步根，互不等待面板、编辑器就绪、ack 或交付。
+- `reviewBeforeInsert` 与 `autoInsert` 的两个持久化值均只保留 Codable 解码/迁移兼容性，不能关闭预览、恢复连续/直接输出或绕过显式确认；设置界面不再提供 bypass 控件。
+- Fn release 只关闭 capture；action 2 与 recorder barrier 在同一面板冻结 durable editable draft。只有显式「发送」、裸 Return/Enter 或 Command+Return 可开始一次 delivery；Shift+Return/Enter 只插入一个 LF。
+- readiness、激活、key-window、编辑器 materialization、first-responder、取消/超时，以及 delivery/security failure 都保留同一面板中的精确草稿和固定反馈；无自动复制、直接输出、重试、换目标或 retarget。后续 delivery 只能由用户再次显式确认触发。
+- exact AX 目标仍优先；普通非安全 strict-AX miss 只允许绑定开始交互时捕获的完整应用，并在确认时向固定 PID 当前焦点投递；身份/PID/Secure Input/unsafe text/postflight 不确定均 fail closed。
+
 ### Added
-- 新增默认开启的「输入前预览」：按住 Fn 时在同一非激活面板以只读方式展示完整不透明 snapshot，松开后保持 sealing；权威 `action=2` 与 recorder barrier 都结算后，同一面板才转为多行草稿。用户可编辑并通过「输入」/Command+Return 显式确认，或通过「取消」/Escape/关窗丢弃且零写入（issue #38）
-- 调整输入前预览编辑器的确认键语义：未修饰 Return（含数字键盘 Enter）确认当前草稿，Shift+Return/Shift+Enter 插入换行，Command+Return 保持兼容确认；marked text 中的 Return 交给输入法，取消/Escape/关窗丢弃，纯空白不能确认（issue #39）
+> 以下 issue #26/#27 条目保留此前实现的历史记录。其直接/连续/final-only/手动恢复输出部分已由
+> Issue #40 v2 的单一审阅路线取代；捕获、识别、回放、重试、release drain 与安全边界仍按各条目所述保留。
+
+- 新增「输入前预览」：每次 accepted Fn 交互都在同一非激活面板以只读方式展示完整不透明 snapshot，松开后保持 sealing；权威 `action=2` 与 recorder barrier 都结算后，同一面板才转为多行草稿。用户可编辑并通过「发送」/Return/Command+Return 显式确认，或通过「取消」/Escape/关窗丢弃且零写入（issue #38；路线由 issue #40 v2 统一）
+- 调整输入前预览编辑器的确认键语义：未修饰 Return（含数字键盘 Enter）确认当前草稿，Shift+Return/Shift+Enter 插入换行，Command+Return 保持显式确认快捷键；marked text 中的 Return 交给输入法，取消/Escape/关窗丢弃，纯空白不能确认（issue #39）
 - 为审阅目标增加普通非安全 AX 严格光标缺失时的应用绑定 fallback：exact AX 元素/原选区仍优先；fallback 在面板打开前绑定完整原应用，确认时只重新激活该应用并执行两次连续复合检查（Secure Input 开始 → raw PID → running/frontmost 完整身份 → Secure Input 结束），再向固定 PID 发送一次 multiline-safe Cmd+V；postflight 使用等价复合安全检查。该 fallback 证明原应用而非原控件或 caret；安全输入、身份不完整或漂移仍拒绝（issue #40）
-- 新增审阅第三异步轴与原目标交付权限：设置会在每次 accepted Fn 开始时采样；审阅状态/渲染不给 capture-to-journal 生产线或 recognition consumer/retry/replay 消费线增加依赖、等待或 backpressure。关闭「输入前预览」时保留 issue #27 连续输出及旧 `autoInsert` 语义（issue #38）
-- `reviewBeforeInsert` 偏好默认为 `true`；旧版 UserDefaults JSON 缺少字段时通过 `decodeIfPresent` 安全迁移到审阅路由，显式关闭会持久化且不改写凭据或其他兼容偏好（issue #38）
+- 新增审阅第三异步轴与原目标交付权限：审阅状态/渲染不给 capture-to-journal 生产线或 recognition consumer/retry/replay 消费线增加依赖、等待或 backpressure；旧版 route-setting 仍可解码但不能改变运行时路线（issue #38/#40）
+- `reviewBeforeInsert` 偏好默认为 `true`；旧版 UserDefaults JSON 缺少字段时通过 `decodeIfPresent` 安全迁移，两个历史值均进入审阅路线且不改写凭据或其他偏好（issue #40）
 - 新增完整 snapshot reconciliation：packet replay ownership 与识别状态分离；任意当前焦点目标以 Swift `Character` 最长公共前缀计算恰好所需的 Backspace，再输入 replacement suffix（issue #27）
 - 新增按键内韧性流式会话：可恢复的网络/超时/部分 HTTP 和业务码 `10024` 失败会在 Fn 仍按住时以 250 ms 起步、4 s 封顶的指数退避创建新串行会话；同一录音/入口持续捕获，已录分片通过有序 journal 从头回放，已拥有的历史 index 不重复输出（issue #26）
 - 新增 generation-scoped 响应输出 ledger：每个符合条件的 journal packet index 只拥有一次原始标量，并按响应顺序拼接为增长的 UTF-16 frontier。相同、不相交和修订值都会作为不同 index 的本地输出策略拼接，不代表已证明飞书供应商语义（issue #26）
@@ -21,9 +31,11 @@
 - 新增 `MainViewModelTests` 覆盖 `MonitoringState` 失败映射、恢复清除和 cleanup 订阅释放路径（issues #22/#23/#24）
 
 ### Fixed
-- 审阅确认在开始音频/网络前捕获 PID、bundle ID、executable URL、launch date、精确 AX 元素和原选区；交付前有界激活原应用并恢复/复核该选区，然后只发送一次进程定向 Cmd+V。身份、焦点、选区、Secure Input 或交付不确定均 fail closed，不重定向、不重试；非取消失败将冻结草稿精确复制一次供手动恢复（issue #38）
+> 以下 issue #26/#27 条目保留此前实现的历史记录。直接/连续/final-only/剪贴板恢复输出部分不是当前 Issue #40 v2 路线；当前路线要求同一面板保留精确草稿并等待用户显式重试/丢弃。
+
+- [历史候选行为，已由 Issue #40 v2 取代] 审阅确认在开始音频/网络前捕获 PID、bundle ID、executable URL、launch date、精确 AX 元素和原选区；后续仍保留身份/焦点/选区/Secure Input fail-closed 与一次 Cmd+V，但 readiness/delivery 失败不再复制草稿，改为在同一面板保留草稿供显式重试/丢弃（issue #38/#40）
 - 修复普通非安全 final-only/可编辑 AX 目标因严格光标捕获能力缺失而在审阅启动时错误显示「无法确认输入位置」：先绑定完整原应用，继续使用同一预览/封存/编辑流程；确认时 fallback 只向该原应用的固定 PID 发送一次 Cmd+V，不递归发现当前焦点、不跨应用、不自动重试（issue #40）
-- 审阅粘贴成功路径现保存原剪贴板的每个 item 及其全部 data-bearing type，仅在进程定向 Cmd+V 和 postflight 都成功后安排一次有界恢复；调度时和真正恢复前都以本次写入的 `changeCount` 为门，不覆盖第三方剪贴板变化。按键投递或 postflight 不确定时不自动恢复、不重试，改为保留精确草稿的手动恢复（issue #38）
+- 审阅粘贴成功路径现保存原剪贴板的每个 item 及其全部 data-bearing type，仅在进程定向 Cmd+V 和 postflight 都成功后安排一次有界恢复；调度时和真正恢复前都以本次写入的 `changeCount` 为门，不覆盖第三方剪贴板变化。按键投递或 postflight 不确定时不自动恢复、不重试，并在同一审阅面板保留精确草稿（issue #38/#40）
 - 修复 VPN 开启时流式识别仍走海外 CDN / TUN：keep-alive 在运行时物理网卡上做 bound UDP/53 DNS（DHCP option 6，再回退 recursor 主机名 `dns.alidns.com` / `public1.114dns.com`，跳过 `198.18.0.0/15`），TCP `IP_BOUND_IF` + CFStream TLS（SNI `open.feishu.cn`，证书链校验开启）。无 IP 字面量、不绑定 `en0`、无自定义 TLS verify。factory/packet/finish 在 keep-alive 连接类失败时不再 hop 到 URLSession。整文件识别仍走 URLSession（issue #34）
 - 修复 build 12 每次启动都要重填 App ID/Secret：#35 的 data-protection keychain 在无 `application-identifier` 时返回 -34018，读不到仍在 login keychain 的凭据。恢复 issue #18 的 login-keychain 读写；AppDelegate 仍只用 `launchAtLoginPreference(from:)` 同步开机启动（issue #36）
 - 修复 VPN 开启时流式识别不稳定：keep-alive 直连改为 primary 并禁止 TUN（`.other`），不绑定 `en0`；同一 watched factory/packet/finish 操作仅在无 HTTP 响应时 hop 一次到 URLSession。已完成 HTTP（含 4xx）与 CancellationError 不 hop；keep-alive 成功后粘性直连，URLSession 回退成功后粘性 URLSession；下一 attempt 重新从 keep-alive 开始（issue #33）
@@ -42,12 +54,12 @@
 - 修复较短与中途修订 snapshot 的任意目标输出：AX writer 直接替换其已验证 owned range；键盘 writer 只替换本次 hold 已输出的尾部。固定 PID、外部输入/Secure Input/目标漂移永久 suspension、无 rollback/no resend、无光标确认或运行时权限提示保持不变；原 Fn release 零 mutation 边界已被本次 issue #27 release-drain 修正取代
 - 修复 build 5 的“只输出一个词”下游停滞：实机日志已证明最新一次 hold 在 13.55 秒内完成 66 个 HTTP-200 transaction，因此本地不再用原始响应字符串的相等/前缀关系决定响应身份，而是以 journal index 所有权拼接 held frontier（issue #26）
 - issue #26 的“release 立即关闭响应/重试准入”策略已由 issue #27 取代；保留的是 generation/fixed-target 安全边界以及无一次性/Cmd+V/剪贴板回退，release 后只允许当前 generation 的已录音频 drain 和权威 final reconciliation
-- 识别可用性与输出资格分离：`autoInsert=false`、不安全文本或无 owner 时，可用 held 识别不再被误报为空结果/流式失败，同时仍保持零输出与零复制（issue #26）
+- [历史兼容路径，现由 Issue #40 v2 的单一审阅路线 supersede] 识别可用性与输出资格分离：`autoInsert=false`、不安全文本或无 owner 时，可用 held 识别不再被误报为空结果/流式失败，同时仍保持零输出与零复制（issue #26）
 - 修复 final-only 目标把所有 partial 延迟到 Fn release 的路由：初始与首 partial 重绑定的 final-only 现在会立即建立绑定 PID 的连续 owner，并在每次 mutation 前后复核 live Secure Input、捕获 token 的安全状态、原 PID 与 `CFEqual` 精确 AX 元素。Unicode 输出使用同一 `.privateState` source，先完整构造相同 UTF-16 payload/空 flags 的 key-down 与 key-up，再做最终 Secure Input 采样并相邻 `CGEventPostToPid`；任一构造失败零投递，任一投递尝试或不确定性都永久禁止完整重发、Cmd+V、其他目标或剪贴板回退。完成反馈改为中性、无 transcript 的“不确定/无可用 final”提示（issue #26）
 - 修复“首次识别后持续显示流式失败”的客户端策略：已接受音频的失败会话现在在未成功完成 `action=2` 时尽力发送一次 `action=3`，然后由协调器决定是否使用新会话重试。可恢复失败不再立即发布错误状态或系统通知；issue #26 的“松开即关闭重试/输出准入”细节已被 issue #27 bounded release-drain 取代
 - 实机证据已将后续失败收窄到 HTTP 200 内的飞书业务码 `10024`：它先出现在一个已接受两包的会话，又出现在新会话的首包。当前飞书公开文档和官方 SDK 未定义 `10024`，因此本地将它列为可恢复是产品韧性策略，不是对限流、包频率、并发配额或未结束流的官方解释（issue #26）
 - 修复真实凭据 UAT 中首个 `action=1` 已获 HTTP 200 后仍立即失败的问题：客户端不再要求 code-zero 响应回显匹配的 `stream_id` / `sequence_id`，也不再把缺少 `data` 视为畸形响应；解析现与 KaolaTerminal 已跑通实现一致，优先接受 `recognition_text`、兼容 `text`，无文本时产生空 partial。非零飞书业务码和无法解码的 JSON 仍使当前传输会话失败；协调器随后根据类型决定在同一 Fn 按键内重试或终止。请求侧 stream identity、action/sequence、首次 token 刷新、generation 安全和隐私诊断边界保持不变（issue #26）
-- 根据首轮 UAT 取消过严的 Accessibility 启动门控：无法捕获或确认 AX 光标/焦点不再阻塞录音和流式识别。已捕获但不支持范围替换的目标使用绑定原 PID/精确 AX 元素的连续 owner，无 AX 目标使用同 PID owner；所有 release-time final-only/一次性/Cmd+V/剪贴板回退已移除。安全拒绝仍不输入、不复制，`autoInsert=false` 仍为零输出（issue #26）
+- [历史兼容路径，现由 Issue #40 v2 的单一审阅路线 supersede] 根据首轮 UAT 取消过严的 Accessibility 启动门控：无法捕获或确认 AX 光标/焦点不再阻塞录音和流式识别。已捕获但不支持范围替换的目标使用绑定原 PID/精确 AX 元素的连续 owner，无 AX 目标使用同 PID owner；所有 release-time final-only/一次性/Cmd+V/剪贴板回退已移除。安全拒绝仍不输入、不复制，`autoInsert=false` 仍为零输出（issue #26）
 - 修复第二轮 UAT 中终止性 provider/流式失败反复回灌同一热键错误、导致浮窗隐藏动画永远无法完成的问题：失败会先使 generation 失效并隐藏浮窗，再且仅再清理一次；相同 `HotKeyService` 错误不再重复发布。租户 token 认证失败只显示固定提示“认证失败，请检查应用凭据”，不暴露凭据、识别文本或飞书后端详情（issue #26）
 - 睡眠/唤醒、手动重置、权限变化、录音/网络失败和进程清理现在先使流式 generation 与光标所有权失效，再终止入口、录音、网络任务和计时器；迟到事件不能恢复旧会话或写入新的焦点（issue #26）
 - 音频入口按实际排队和待组包字节精确计数，消费后立即复用容量；停止录音会越过真实音频回调队列屏障后再决定是否保留尾包，溢出显式失败而不丢包或乱序（issue #26）
@@ -93,7 +105,7 @@
 ### Verification
 
 - issue #27 的最终候选 Release 1.0 build 8 已通过 316/316 完整测试、strict SwiftLint、Debug 与 Release 构建。发布 drain、权威 final、重复 `10024` 恢复、watchdog、deadline race、迟到回调和 fixed-target 安全边界均有自动化覆盖；这些本地门槛不证明真实凭据服务或目标控件实际接受 PID-targeted 事件。
-- Issue #40 的聚焦串行套件（destination capture/coordinator/final output/pasteboard/application fallback）通过 79/79；覆盖 identity-first capture、exact 优先、普通非安全 AX miss、固定 PID multiline Cmd+V、两次连续复合安全/PID/完整身份检查、交付不确定和一次手动恢复。该结果不替代安装版 Release UAT。
+- Issue #40 v2 的聚焦串行套件（destination capture/coordinator/final output/pasteboard/application fallback/readiness）通过 79/79；完整串行套件通过 442（1 个预期 live-TCP skip），覆盖 identity-first capture、exact 优先、普通非安全 AX miss、固定 PID multiline Cmd+V、两次连续复合安全/PID/完整身份检查、同面板 readiness retry、交付不确定和零 copy draft retention。该结果不替代安装版 Release UAT。
 
 ### Verification pending
 
@@ -101,7 +113,7 @@
 - `CGEventPostToPid` 没有目标控件接受确认；本地 `.posted` 仅证明完整 PID-bound replacement transaction 已提交，不能证明目标完成了可见替换。当前修正仍须安装版 owner UAT，若无可见输出应报告 PARTIAL，不能通过全局 HID、重复事件、回滚或不确定后的剪贴板回退扩展行为。
 - 真实飞书凭据下的后续 action、终止请求空音频编码、首次 token 刷新同序列重试、PCM/tail 兼容性和慢网行为仍需安装版 Release UAT。issue #26 的本地拼接策略已由 build 6 证据否定；issue #27 将响应按可相同、变长、缩短或修订的完整不透明 snapshot 替换，仍不推断稳定词或做文本归一化。
 - TextEdit/原生控件、浏览器、Electron、终端和富文本编辑器的 Accessibility 范围、焦点干扰、Unicode 与 undo 行为仍需跨应用实机 UAT；当前不声明广泛兼容性。
-- Issue #40 还需安装版 UAT：一个此前因普通非安全 strict-AX miss 显示「无法确认输入位置」的目标、一个 exact-AX 目标、Secure Input/密码框拒绝、确认期间跨应用切换、多行草稿，以及强制 post/postflight 不确定后的单次手动恢复。fallback 只证明原应用，不证明原控件或 caret 已消费 Cmd+V。
+- Issue #40 还需安装版 UAT：一个此前因普通非安全 strict-AX miss 显示「无法确认输入位置」的目标、一个 exact-AX 目标、Secure Input/密码框拒绝、确认期间跨应用切换、多行草稿，以及强制 post/postflight 不确定后的草稿保留、显式重试/丢弃。fallback 只证明原应用，不证明原控件或 caret 已消费 Cmd+V。
 
 ## [0.3.0] - 2025
 

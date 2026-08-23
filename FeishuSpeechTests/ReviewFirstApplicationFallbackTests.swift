@@ -36,7 +36,8 @@ final class ReviewFirstApplicationFallbackTests: XCTestCase {
                 applicationRuntime: runtime,
                 applicationActivator: Issue40ApplicationActivator(),
                 accessibility: accessibility,
-                finalTextOutput: Issue40FinalTextOutput()
+                finalTextOutput: Issue40FinalTextOutput(),
+                accessibilityTrustProvider: Issue40AccessibilityTrustProvider()
             )
 
             let capture = delivery.capture(generation: 40)
@@ -79,7 +80,8 @@ final class ReviewFirstApplicationFallbackTests: XCTestCase {
             applicationRuntime: runtime,
             applicationActivator: Issue40ApplicationActivator(),
             accessibility: accessibility,
-            finalTextOutput: Issue40FinalTextOutput()
+            finalTextOutput: Issue40FinalTextOutput(),
+            accessibilityTrustProvider: Issue40AccessibilityTrustProvider()
         )
 
         let capture = delivery.capture(generation: 40)
@@ -102,7 +104,8 @@ final class ReviewFirstApplicationFallbackTests: XCTestCase {
             applicationRuntime: runtime,
             applicationActivator: Issue40ApplicationActivator(),
             accessibility: accessibility,
-            finalTextOutput: Issue40FinalTextOutput()
+            finalTextOutput: Issue40FinalTextOutput(),
+            accessibilityTrustProvider: Issue40AccessibilityTrustProvider()
         )
 
         let capture = delivery.capture(generation: 40)
@@ -131,7 +134,8 @@ final class ReviewFirstApplicationFallbackTests: XCTestCase {
             applicationRuntime: runtime,
             applicationActivator: Issue40ApplicationActivator(),
             accessibility: accessibility,
-            finalTextOutput: Issue40FinalTextOutput()
+            finalTextOutput: Issue40FinalTextOutput(),
+            accessibilityTrustProvider: Issue40AccessibilityTrustProvider()
         )
 
         let capture = delivery.capture(generation: 40)
@@ -162,7 +166,8 @@ final class ReviewFirstApplicationFallbackTests: XCTestCase {
             applicationRuntime: runtime,
             applicationActivator: Issue40ApplicationActivator(),
             accessibility: accessibility,
-            finalTextOutput: Issue40FinalTextOutput()
+            finalTextOutput: Issue40FinalTextOutput(),
+            accessibilityTrustProvider: Issue40AccessibilityTrustProvider()
         )
 
         let capture = delivery.capture(generation: 40)
@@ -197,7 +202,8 @@ final class ReviewFirstApplicationFallbackTests: XCTestCase {
             applicationRuntime: runtime,
             applicationActivator: activator,
             accessibility: accessibility,
-            finalTextOutput: output
+            finalTextOutput: output,
+            accessibilityTrustProvider: Issue40AccessibilityTrustProvider()
         )
         let destination = Issue40Fixtures.applicationBoundDestination(
             identity: runtime.capturedIdentity,
@@ -215,6 +221,339 @@ final class ReviewFirstApplicationFallbackTests: XCTestCase {
         XCTAssertEqual(frontmostProcess.queryCount, 3)
         XCTAssertEqual(accessibility.restoreCallCount, 0)
         XCTAssertEqual(accessibility.validateAfterCallCount, 0)
+    }
+
+    func test_applicationBoundReviewDelivery_trustRevokedAfterCaptureRejectsBeforeAnyOutput() async {
+        let runtime = Issue40ApplicationRuntime()
+        let activator = Issue40ApplicationActivator()
+        let trustProvider = Issue40AccessibilityTrustProvider()
+        let secureInput = Issue40SecureInputProvider(states: [false, false, false, false])
+        let frontmostProcess = Issue40FrontmostProcessProvider(processIdentifiers: [42, 42])
+        let pasteboard = Issue40PasteboardWriter()
+        let keyPoster = Issue40KeyEventPoster()
+        var snapshotReadCount = 0
+        var changeCountReadCount = 0
+        var restoreCount = 0
+        var restoreScheduleCount = 0
+        let output = SystemFinalTextOutput(
+            pasteboardWriter: pasteboard,
+            keyEventPoster: keyPoster,
+            secureInputStateProvider: secureInput,
+            frontmostProcessProvider: frontmostProcess,
+            reviewPasteboardSnapshot: {
+                snapshotReadCount += 1
+                return []
+            },
+            reviewPasteboardChangeCount: {
+                changeCountReadCount += 1
+                return 0
+            },
+            reviewPasteboardRestore: { _, _ in
+                restoreCount += 1
+            },
+            reviewPasteboardRestoreScheduler: { _ in
+                restoreScheduleCount += 1
+            }
+        )
+        let accessibility = Issue40StrictReviewAccess(
+            captureResult: .nonSecureCursorUnavailable
+        )
+        let delivery = SystemReviewDestinationDelivery(
+            applicationRuntime: runtime,
+            applicationActivator: activator,
+            accessibility: accessibility,
+            finalTextOutput: output,
+            accessibilityTrustProvider: trustProvider,
+            secureInputStateProvider: secureInput,
+            frontmostProcessProvider: frontmostProcess
+        )
+
+        let capture = delivery.capture(generation: 49)
+        guard case .captured(let destination) = capture else {
+            XCTFail("a trusted application-current-focus capture must produce a destination")
+            return
+        }
+        guard case .applicationCurrentFocus = destination.binding else {
+            XCTFail("this regression must exercise the application-current-focus fallback")
+            return
+        }
+        XCTAssertTrue(trustProvider.isAccessibilityTrusted)
+
+        trustProvider.isAccessibilityTrusted = false
+        let result = await delivery.deliver(
+            "exact draft retained while trust is revoked",
+            to: destination
+        )
+
+        XCTAssertEqual(result, .securityRejected)
+        XCTAssertNotEqual(result, .inserted)
+        XCTAssertEqual(activator.activationRequests, [])
+        XCTAssertEqual(accessibility.restoreCallCount, 0)
+        XCTAssertEqual(accessibility.validateAfterCallCount, 0)
+        XCTAssertEqual(secureInput.queryCount, 0)
+        XCTAssertEqual(frontmostProcess.queryCount, 0)
+        XCTAssertEqual(snapshotReadCount, 0)
+        XCTAssertEqual(changeCountReadCount, 0)
+        XCTAssertEqual(restoreCount, 0)
+        XCTAssertEqual(restoreScheduleCount, 0)
+        XCTAssertEqual(pasteboard.writtenTexts, [])
+        XCTAssertEqual(keyPoster.processIdentifiers, [])
+    }
+
+    func test_reviewFirst_trustRevokedAfterCaptureRetainsExactDraftAndAuthorityWithoutOutput() async {
+        let runtime = Issue40ApplicationRuntime()
+        let activator = Issue40ApplicationActivator()
+        let trustProvider = Issue40AccessibilityTrustProvider()
+        let secureInput = Issue40SecureInputProvider(states: [false, false, false, false])
+        let frontmostProcess = Issue40FrontmostProcessProvider(processIdentifiers: [42, 42])
+        let pasteboard = Issue40PasteboardWriter()
+        let keyPoster = Issue40KeyEventPoster()
+        var snapshotReadCount = 0
+        var changeCountReadCount = 0
+        var restoreCount = 0
+        var restoreScheduleCount = 0
+        let output = SystemFinalTextOutput(
+            pasteboardWriter: pasteboard,
+            keyEventPoster: keyPoster,
+            secureInputStateProvider: secureInput,
+            frontmostProcessProvider: frontmostProcess,
+            reviewPasteboardSnapshot: {
+                snapshotReadCount += 1
+                return []
+            },
+            reviewPasteboardChangeCount: {
+                changeCountReadCount += 1
+                return 0
+            },
+            reviewPasteboardRestore: { _, _ in
+                restoreCount += 1
+            },
+            reviewPasteboardRestoreScheduler: { _ in
+                restoreScheduleCount += 1
+            }
+        )
+        let systemDelivery = SystemReviewDestinationDelivery(
+            applicationRuntime: runtime,
+            applicationActivator: activator,
+            accessibility: Issue40StrictReviewAccess(
+                captureResult: .nonSecureCursorUnavailable
+            ),
+            finalTextOutput: output,
+            accessibilityTrustProvider: trustProvider,
+            secureInputStateProvider: secureInput,
+            frontmostProcessProvider: frontmostProcess
+        )
+        let delivery = Issue40TrustRevokingReviewDelivery(
+            delivery: systemDelivery,
+            trustProvider: trustProvider
+        )
+        let recorder = Issue40AudioRecorder()
+        let session = Issue40StreamingSession(
+            packetEvents: [],
+            finishEvent: .final("PRIVATE_TRUSTED_CAPTURE")
+        )
+        let provider = Issue40StreamingProvider(session: session)
+        let presenter = Issue40ReviewSurfacePresenter()
+        let viewModel = MainViewModel(
+            audioRecorder: recorder,
+            settings: AppSettings(
+                appId: "configured-app",
+                appSecret: "configured-secret",
+                autoInsert: true,
+                playSound: false,
+                reviewBeforeInsert: true
+            ),
+            hotKeyWakeRecovering: Issue40HotKeyWakeRecoverer(),
+            streamingProvider: provider,
+            accessibilityClient: Issue40AccessibilityClient(),
+            finalTextOutput: Issue40FinalTextOutput(),
+            overlayPresenter: Issue40OverlayPresenter(),
+            reviewDestinationDelivery: delivery,
+            reviewSurfacePresenter: presenter
+        )
+        let identity = StreamingSessionIdentity(generation: 50)
+
+        viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { recorder.startStreamingCallCount == 1 }
+        await waitUntilAsync { await provider.makeSessionCallCount == 1 }
+        viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        await waitUntil {
+            if case .editable = viewModel.transcriptionReviewState { return true }
+            return false
+        }
+
+        let frozenDraft = "trusted capture\nrevoked before confirmation"
+        viewModel.reviewDraftText = frozenDraft
+        viewModel.confirmReviewDraft()
+        await waitUntil { delivery.deliverCallCount == 1 }
+        await waitUntil {
+            if case .editable(_, _, feedback: .securityRejected) = viewModel.transcriptionReviewState {
+                return true
+            }
+            return false
+        }
+
+        XCTAssertEqual(delivery.captureCallCount, 1)
+        XCTAssertEqual(delivery.deliveredTexts, [frozenDraft])
+        XCTAssertEqual(delivery.deliveredDestinations.count, 1)
+        guard case .applicationCurrentFocus = delivery.deliveredDestinations[0].binding else {
+            XCTFail("coordinator must retain the captured application-current-focus authority")
+            return
+        }
+        XCTAssertEqual(
+            viewModel.transcriptionReviewState,
+            .editable(draft: frozenDraft, isPossiblyIncomplete: false, feedback: .securityRejected)
+        )
+        XCTAssertGreaterThanOrEqual(presenter.renderDraftCallCount, 4)
+        XCTAssertEqual(activator.activationRequests, [])
+        XCTAssertEqual(snapshotReadCount, 0)
+        XCTAssertEqual(changeCountReadCount, 0)
+        XCTAssertEqual(restoreCount, 0)
+        XCTAssertEqual(restoreScheduleCount, 0)
+        XCTAssertEqual(pasteboard.writtenTexts, [])
+        XCTAssertEqual(keyPoster.processIdentifiers, [])
+        XCTAssertEqual(secureInput.queryCount, 0)
+        XCTAssertEqual(frontmostProcess.queryCount, 0)
+    }
+
+    func test_applicationBoundReviewDelivery_trustRevokedBetweenPreflightCompositeStartAndEndFailsClosed() async {
+        let runtime = Issue40ApplicationRuntime()
+        let activator = Issue40ApplicationActivator()
+        let trustProvider = Issue40AccessibilityTrustProvider()
+        let secureInput = Issue40SecureInputProvider(states: [false, false, false, false])
+        let frontmostProcess = Issue40FrontmostProcessProvider(processIdentifiers: [42, 42])
+        let pasteboard = Issue40PasteboardWriter()
+        let keyPoster = Issue40KeyEventPoster()
+        var snapshotReadCount = 0
+        var changeCountReadCount = 0
+        var restoreCount = 0
+        var restoreScheduleCount = 0
+        let output = SystemFinalTextOutput(
+            pasteboardWriter: pasteboard,
+            keyEventPoster: keyPoster,
+            secureInputStateProvider: secureInput,
+            frontmostProcessProvider: frontmostProcess,
+            reviewPasteboardSnapshot: {
+                snapshotReadCount += 1
+                return []
+            },
+            reviewPasteboardChangeCount: {
+                changeCountReadCount += 1
+                return 0
+            },
+            reviewPasteboardRestore: { _, _ in
+                restoreCount += 1
+            },
+            reviewPasteboardRestoreScheduler: { _ in
+                restoreScheduleCount += 1
+            }
+        )
+        let delivery = SystemReviewDestinationDelivery(
+            applicationRuntime: runtime,
+            applicationActivator: activator,
+            accessibility: Issue40StrictReviewAccess(
+                captureResult: .nonSecureCursorUnavailable
+            ),
+            finalTextOutput: output,
+            accessibilityTrustProvider: trustProvider,
+            secureInputStateProvider: secureInput,
+            frontmostProcessProvider: frontmostProcess
+        )
+        let capture = delivery.capture(generation: 51)
+        guard case .captured(let destination) = capture else {
+            XCTFail("trusted capture must produce an application-current-focus destination")
+            return
+        }
+        trustProvider.setQueuedSamples([
+            true,  // initial validation
+            true, false,  // first composite: trust changes before its ending sample
+            false, false   // second composite still fails closed
+        ])
+
+        let result = await delivery.deliver("PRIVATE_PREFLIGHT_TRUST_RACE", to: destination)
+
+        XCTAssertEqual(result, .securityRejected)
+        XCTAssertNotEqual(result, .inserted)
+        XCTAssertEqual(trustProvider.readCount, 5)
+        XCTAssertEqual(activator.activationRequests, [runtime.capturedIdentity])
+        XCTAssertEqual(snapshotReadCount, 0)
+        XCTAssertEqual(changeCountReadCount, 0)
+        XCTAssertEqual(restoreCount, 0)
+        XCTAssertEqual(restoreScheduleCount, 0)
+        XCTAssertEqual(pasteboard.writtenTexts, [])
+        XCTAssertEqual(keyPoster.processIdentifiers, [])
+        XCTAssertEqual(secureInput.queryCount, 4)
+        XCTAssertEqual(frontmostProcess.queryCount, 2)
+    }
+
+    func test_applicationBoundReviewDelivery_trustRevokedDuringPostflightReturnsUncertainAfterOneMutation() async {
+        let runtime = Issue40ApplicationRuntime()
+        let activator = Issue40ApplicationActivator()
+        let trustProvider = Issue40AccessibilityTrustProvider()
+        let secureInput = Issue40SecureInputProvider(states: [false, false, false, false, false, false])
+        let frontmostProcess = Issue40FrontmostProcessProvider(processIdentifiers: [42, 42, 42])
+        let pasteboard = Issue40PasteboardWriter()
+        let keyPoster = Issue40KeyEventPoster()
+        var snapshotReadCount = 0
+        var changeCountReadCount = 0
+        var restoreCount = 0
+        var restoreScheduleCount = 0
+        let output = SystemFinalTextOutput(
+            pasteboardWriter: pasteboard,
+            keyEventPoster: keyPoster,
+            secureInputStateProvider: secureInput,
+            frontmostProcessProvider: frontmostProcess,
+            reviewPasteboardSnapshot: {
+                snapshotReadCount += 1
+                return []
+            },
+            reviewPasteboardChangeCount: {
+                changeCountReadCount += 1
+                return 0
+            },
+            reviewPasteboardRestore: { _, _ in
+                restoreCount += 1
+            },
+            reviewPasteboardRestoreScheduler: { _ in
+                restoreScheduleCount += 1
+            }
+        )
+        let delivery = SystemReviewDestinationDelivery(
+            applicationRuntime: runtime,
+            applicationActivator: activator,
+            accessibility: Issue40StrictReviewAccess(
+                captureResult: .nonSecureCursorUnavailable
+            ),
+            finalTextOutput: output,
+            accessibilityTrustProvider: trustProvider,
+            secureInputStateProvider: secureInput,
+            frontmostProcessProvider: frontmostProcess
+        )
+        let capture = delivery.capture(generation: 52)
+        guard case .captured(let destination) = capture else {
+            XCTFail("trusted capture must produce an application-current-focus destination")
+            return
+        }
+        trustProvider.setQueuedSamples([
+            true,  // initial validation
+            true, true, true, true,  // two stable preflight composites
+            true, false  // postflight trust transition after one mutation
+        ])
+
+        let result = await delivery.deliver("PRIVATE_POSTFLIGHT_TRUST_RACE", to: destination)
+
+        XCTAssertEqual(result, .deliveryUncertain)
+        XCTAssertNotEqual(result, .inserted)
+        XCTAssertEqual(trustProvider.readCount, 7)
+        XCTAssertEqual(activator.activationRequests, [runtime.capturedIdentity])
+        XCTAssertEqual(snapshotReadCount, 1)
+        XCTAssertEqual(changeCountReadCount, 1)
+        XCTAssertEqual(restoreCount, 0)
+        XCTAssertEqual(restoreScheduleCount, 0)
+        XCTAssertEqual(pasteboard.writtenTexts, ["PRIVATE_POSTFLIGHT_TRUST_RACE"])
+        XCTAssertEqual(keyPoster.processIdentifiers, [42])
+        XCTAssertEqual(secureInput.queryCount, 6)
+        XCTAssertEqual(frontmostProcess.queryCount, 3)
     }
 
     func test_applicationBoundReviewDelivery_rejectsSecureInputOrUnstablePIDBeforeCurrentFocusPost() async {
@@ -246,7 +585,8 @@ final class ReviewFirstApplicationFallbackTests: XCTestCase {
                 accessibility: Issue40StrictReviewAccess(
                     captureResult: .nonSecureCursorUnavailable
                 ),
-                finalTextOutput: output
+                finalTextOutput: output,
+                accessibilityTrustProvider: Issue40AccessibilityTrustProvider()
             )
             let destination = Issue40Fixtures.applicationBoundDestination(
                 identity: runtime.capturedIdentity,
@@ -289,7 +629,8 @@ final class ReviewFirstApplicationFallbackTests: XCTestCase {
             accessibility: Issue40StrictReviewAccess(
                 captureResult: .nonSecureCursorUnavailable
             ),
-            finalTextOutput: output
+            finalTextOutput: output,
+            accessibilityTrustProvider: Issue40AccessibilityTrustProvider()
         )
         let destination = Issue40Fixtures.applicationBoundDestination(
             identity: runtime.capturedIdentity,
@@ -332,6 +673,7 @@ final class ReviewFirstApplicationFallbackTests: XCTestCase {
                 captureResult: .nonSecureCursorUnavailable
             ),
             finalTextOutput: stableOutput,
+            accessibilityTrustProvider: Issue40AccessibilityTrustProvider(),
             secureInputStateProvider: stableSecureInput,
             frontmostProcessProvider: stableFrontmostProcess
         )
@@ -394,6 +736,7 @@ final class ReviewFirstApplicationFallbackTests: XCTestCase {
                 captureResult: .nonSecureCursorUnavailable
             ),
             finalTextOutput: transitionOutput,
+            accessibilityTrustProvider: Issue40AccessibilityTrustProvider(),
             secureInputStateProvider: transitionSecureInput,
             frontmostProcessProvider: transitionFrontmostProcess
         )
@@ -452,7 +795,8 @@ final class ReviewFirstApplicationFallbackTests: XCTestCase {
                 accessibility: Issue40StrictReviewAccess(
                     captureResult: .nonSecureCursorUnavailable
                 ),
-                finalTextOutput: output
+                finalTextOutput: output,
+                accessibilityTrustProvider: Issue40AccessibilityTrustProvider()
             )
             let destination = Issue40Fixtures.applicationBoundDestination(
                 identity: runtime.capturedIdentity,
@@ -529,7 +873,7 @@ final class ReviewFirstApplicationFallbackTests: XCTestCase {
         await waitUntilAsync { await session.finishCallCount == 1 }
     }
 
-    func test_reviewFirst_applicationBoundConfirmation_copiesUnsafeOrUncertainResultOnce() async {
+    func test_reviewFirst_applicationBoundConfirmationFailureReturnsExactDraftWithoutCopy() async {
         let delivery = Issue40ReviewDestinationDelivery(
             destination: Issue40Fixtures.applicationBoundDestination(generation: 43),
             result: .deliveryUncertain
@@ -551,12 +895,22 @@ final class ReviewFirstApplicationFallbackTests: XCTestCase {
         context.viewModel.confirmReviewDraft()
         context.viewModel.confirmReviewDraft()
         await waitUntil { delivery.deliveredTexts.count == 1 }
-        await waitUntil { delivery.copyCalls == 1 }
+        await waitUntil {
+            if case .editable(_, _, feedback: .deliveryUncertain) = context.viewModel.transcriptionReviewState {
+                return true
+            }
+            return false
+        }
 
         XCTAssertEqual(delivery.deliveredTexts, [frozenDraft])
-        XCTAssertEqual(delivery.copiedTexts, [frozenDraft])
-        XCTAssertEqual(delivery.copyCalls, 1)
-        XCTAssertEqual(context.viewModel.transcriptionReviewState, .idle)
+        XCTAssertEqual(delivery.copiedTexts, [])
+        XCTAssertEqual(delivery.copyCalls, 0)
+        XCTAssertEqual(context.output.cursorInsertedTexts, [])
+        XCTAssertEqual(context.output.currentFocusInsertedTexts, [])
+        XCTAssertEqual(
+            context.viewModel.transcriptionReviewState,
+            .editable(draft: frozenDraft, isPossiblyIncomplete: false, feedback: .deliveryUncertain)
+        )
     }
 
     private func makeReviewContext(
@@ -569,6 +923,7 @@ final class ReviewFirstApplicationFallbackTests: XCTestCase {
             finishEvent: .final(finishText)
         )
         let provider = Issue40StreamingProvider(session: session)
+        let output = Issue40FinalTextOutput()
         let viewModel = MainViewModel(
             audioRecorder: recorder,
             settings: AppSettings(
@@ -581,7 +936,7 @@ final class ReviewFirstApplicationFallbackTests: XCTestCase {
             hotKeyWakeRecovering: Issue40HotKeyWakeRecoverer(),
             streamingProvider: provider,
             accessibilityClient: Issue40AccessibilityClient(),
-            finalTextOutput: Issue40FinalTextOutput(),
+            finalTextOutput: output,
             overlayPresenter: Issue40OverlayPresenter(),
             reviewDestinationDelivery: delivery,
             reviewSurfacePresenter: Issue40ReviewSurfacePresenter()
@@ -589,7 +944,8 @@ final class ReviewFirstApplicationFallbackTests: XCTestCase {
         return Issue40ReviewContext(
             viewModel: viewModel,
             recorder: recorder,
-            provider: provider
+            provider: provider,
+            output: output
         )
     }
 
@@ -625,6 +981,7 @@ private struct Issue40ReviewContext {
     let viewModel: MainViewModel
     let recorder: Issue40AudioRecorder
     let provider: Issue40StreamingProvider
+    let output: Issue40FinalTextOutput
 }
 
 @MainActor
@@ -864,6 +1221,36 @@ private final class Issue40ApplicationActivator: ReviewApplicationActivating {
 }
 
 @MainActor
+private final class Issue40AccessibilityTrustProvider: AccessibilityTrustProviding {
+    private var trustedValue: Bool
+    private var queuedSamples: [Bool] = []
+    private(set) var readCount = 0
+
+    init(isAccessibilityTrusted: Bool = true) {
+        trustedValue = isAccessibilityTrusted
+    }
+
+    var isAccessibilityTrusted: Bool {
+        get {
+            readCount += 1
+            if !queuedSamples.isEmpty {
+                return queuedSamples.removeFirst()
+            }
+            return trustedValue
+        }
+        set {
+            trustedValue = newValue
+            queuedSamples = []
+        }
+    }
+
+    func setQueuedSamples(_ samples: [Bool]) {
+        queuedSamples = samples
+    }
+
+}
+
+@MainActor
 private final class Issue40StrictReviewAccess: ReviewDestinationAccessing {
     private let captureResult: ReviewCursorCaptureResult
     private let trace: Issue40ReviewTrace?
@@ -1091,6 +1478,40 @@ private final class Issue40ReviewDestinationDelivery: ReviewDestinationDeliverin
     }
 }
 
+@MainActor
+private final class Issue40TrustRevokingReviewDelivery: ReviewDestinationDelivering {
+    private let delivery: SystemReviewDestinationDelivery
+    private let trustProvider: Issue40AccessibilityTrustProvider
+    private(set) var captureCallCount = 0
+    private(set) var deliverCallCount = 0
+    private(set) var deliveredTexts: [String] = []
+    private(set) var deliveredDestinations: [ReviewDestinationToken] = []
+
+    init(
+        delivery: SystemReviewDestinationDelivery,
+        trustProvider: Issue40AccessibilityTrustProvider
+    ) {
+        self.delivery = delivery
+        self.trustProvider = trustProvider
+    }
+
+    func capture(generation: UInt64) -> ReviewDestinationCaptureResult {
+        captureCallCount += 1
+        return delivery.capture(generation: generation)
+    }
+
+    func deliver(
+        _ frozenText: String,
+        to destination: ReviewDestinationToken
+    ) async -> ReviewDeliveryResult {
+        deliverCallCount += 1
+        deliveredTexts.append(frozenText)
+        deliveredDestinations.append(destination)
+        trustProvider.isAccessibilityTrusted = false
+        return await delivery.deliver(frozenText, to: destination)
+    }
+}
+
 private actor Issue40StreamingSession: SpeechStreamingSession {
     private var packetEvents: [StreamingRecognitionEvent]
     private let finishEvent: StreamingRecognitionEvent
@@ -1172,6 +1593,7 @@ private final class Issue40ReviewSurfacePresenter: ReviewSurfacePresenting {
     var readOnlyRenderGateOpen = true
     private(set) var renderReadOnlyCallCount = 0
     private(set) var lastPresentedPreview = ""
+    private(set) var renderDraftCallCount = 0
 
     func renderReadOnly(phase: ReviewReadOnlyPhase, preview: String) {
         renderReadOnlyCallCount += 1
@@ -1179,15 +1601,17 @@ private final class Issue40ReviewSurfacePresenter: ReviewSurfacePresenting {
         lastPresentedPreview = preview
     }
 
-    func renderEditable(
-        draft: String,
-        isPossiblyIncomplete: Bool,
-        onDraftChange: @escaping @MainActor (String) -> Void,
-        onConfirm: @escaping @MainActor () -> Void,
-        onDiscard: @escaping @MainActor () -> Void
-    ) -> ReviewEditableTransitionResult {
-        .ready
+    func renderDraft(
+        state: TranscriptionReviewState,
+        onDraftChange: @escaping @MainActor @Sendable (String) -> Void,
+        onConfirm: @escaping @MainActor @Sendable () -> Void,
+        onRetryReadiness: @escaping @MainActor @Sendable () -> Void,
+        onDiscard: @escaping @MainActor @Sendable () -> Void
+    ) {
+        renderDraftCallCount += 1
     }
+
+    func requestEditableReadiness() async -> ReviewEditableTransitionResult { .ready }
 
     func dismiss() {}
 }

@@ -61,7 +61,14 @@ final class TranscriptionReviewViewTests: XCTestCase {
             "editable transition must explicitly activate FeishuSpeech"
         )
         XCTAssertTrue(source.contains("renderReadOnly"))
-        XCTAssertTrue(source.contains("renderEditable"))
+        XCTAssertTrue(
+            source.contains("renderDraft("),
+            "the canonical surface owns editable/pending/confirming draft states"
+        )
+        XCTAssertTrue(
+            source.contains("requestEditableReadiness()"),
+            "editable authority must be granted through the typed readiness seam"
+        )
 
         XCTAssertTrue(source.contains("width: 520"))
         XCTAssertTrue(source.contains("height: 320"))
@@ -85,22 +92,26 @@ final class TranscriptionReviewViewTests: XCTestCase {
             1,
             "streaming/sealing/editable must reuse one panel identity instead of recreating it"
         )
-        if let readOnlyStart = source.range(of: "renderReadOnly"),
-           let editableStart = source.range(of: "renderEditable"),
-           readOnlyStart.lowerBound < editableStart.lowerBound {
-            let readOnlyBody = source[readOnlyStart.lowerBound ..< editableStart.lowerBound]
-            XCTAssertFalse(
-                readOnlyBody.contains("activate("),
-                "read-only rendering must never activate FeishuSpeech"
-            )
-            XCTAssertTrue(readOnlyBody.contains("orderFrontRegardless()"))
+        guard let readOnlyStart = source.range(of: "func renderReadOnly("),
+              let editableStart = source.range(of: "func renderDraft(") else {
+            XCTFail("ReviewWindowController must expose the canonical renderReadOnly/renderDraft methods")
+            return
         }
-        if let editableStart = source.range(of: "renderEditable") {
-            XCTAssertFalse(
-                source[editableStart.lowerBound...].contains("ReviewPanel("),
-                "editable transition must not allocate a second panel"
-            )
-        }
+        XCTAssertLessThan(
+            readOnlyStart.lowerBound,
+            editableStart.lowerBound,
+            "read-only rendering must precede the canonical draft transition"
+        )
+        let readOnlyBody = source[readOnlyStart.lowerBound ..< editableStart.lowerBound]
+        XCTAssertFalse(
+            readOnlyBody.contains("activate("),
+            "read-only rendering must never activate FeishuSpeech"
+        )
+        XCTAssertTrue(readOnlyBody.contains("orderFrontRegardless()"))
+        XCTAssertFalse(
+            source[editableStart.lowerBound...].contains("ReviewPanel("),
+            "editable transition must not allocate a second panel"
+        )
     }
 
     func test_reviewWindowCloseRoutesToDiscardAndDismissClearsTranscriptCallbacks() throws {

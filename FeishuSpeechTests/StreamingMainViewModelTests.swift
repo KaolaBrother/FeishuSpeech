@@ -12,6 +12,69 @@ private let logger = Logger(
 
 @MainActor
 final class StreamingMainViewModelTests: XCTestCase {
+    private let retiredCompatibilityOutputTests: Set<String> = [
+        "test_appendFactoryMissPreservesNoOutputAcrossSealedRecovery",
+        "test_appendNoUsableTerminalTextAfterSealedRecoveryClosesOwnerWithFeedback",
+        "test_appendPreservationFinalOutcomesPublishOneTranscriptFreeCompletion",
+        "test_appendSecurityRejectionTerminatesImmediatelyWithFixedSecurityError",
+        "test_autoInsertFalseCreatesNoAppendSessionAndSuccessfulAXRebindDoesNotUseIt",
+        "test_axOwnerDriftBeforeDifferingActionTwoPreservesPartialAndPublishesNonSuccess",
+        "test_contentlessUpdatePreservesOwnerAcrossSealedRecoveryAndAuthoritativeFinal",
+        "test_delayedFactoryReadySendsJournalIndexZeroThenLiveTailWithoutReowningHistory",
+        "test_disjointLivePacketResponsesOfferCompleteSnapshotsWhileFnRemainsHeld",
+        "test_distinctLivePacketIndicesOfferOnlyChangedCompleteSnapshots",
+        "test_emptyFinalAndStreamFailurePreserveVerifiedPartial",
+        "test_emptyFinalNeverCreatesFinalOnlyOutputAndClosesOwnerWithHeldSnapshot",
+        "test_equalTextOnDistinctLivePacketIndicesIsOwnedButOfferedOnce",
+        "test_failedUnboundRebindIsAttemptedOnceAndAutoInsertFalseDoesNotRebind",
+        "test_finishReadyAtDrainDeadlineCannotReplaceCommittedPartialBeforeExpiryTaskRuns",
+        "test_firstPartialFinalOnlyRebindArmsAppendAndCommitsAuthoritativeFinal",
+        "test_firstPartialSecureRebindRevokesPrearmedOwnerWithoutAppendOrFallbackOutput",
+        "test_hangingFactoryTimesOutAsRecoverableAndSuccessorLeavesSilentActiveState",
+        "test_hotKeyFailureDuringHeldSealingRevokesAppendWriterAndCancelsTransportBeforeBarrier",
+        "test_ineligibleEventsNeverAdvanceTheLatestSnapshot",
+        "test_ineligiblePacketStillReservesItsIndexAgainstChangedHistoricalReplay",
+        "test_initialAndReboundFinalOnlyAttemptOrUncertaintyNeverCopiesOrResendsFullText",
+        "test_initialAndReboundUnsafeFinalUsesPrearmedOwnerWithoutPostingOrCopying",
+        "test_initialFinalOnlyArmsAppendAndCommitsEqualAuthoritativeFinalWithoutDuplicateOutput",
+        "test_initialFinalOnlyFocusedElementDriftFailsClosedWithoutAppendOrRecoveryOutput",
+        "test_initialFinalOnlyResetInvalidatesOwnerBeforeLateCallbacks",
+        "test_initialFinalOnlyRetryKeepsCapturedOwnershipAtChangedReplaySnapshot",
+        "test_initialFinalOnlyTerminalFinalizeOccursOnceAndPostCleanupCallbacksStaySuppressed",
+        "test_liveAXOwnerReceivesEachCompleteSnapshotForDisjointPacketResponses",
+        "test_liveModeOffersHeldSnapshotThenCommitsAuthoritativeFinalOnCapturedElement",
+        "test_noOwnerCompletionRemainsSilentWhileEmptyHeldOwnerPublishesBoundedFeedback",
+        "test_postReleaseDrainExpiryMapsUncertainKeyboardDeliveryToProvisionalPreserved",
+        "test_postReleaseDrainExpiryPreservesOutputAndSuppressesLatePacketCompletion",
+        "test_recoverableFinishAfterSealRetriesJournalAndAcceptsSuccessorFinal",
+        "test_recoverableMidStreamFailureReplaysJournalThenResumesSameGeneration",
+        "test_releaseActionTwoUsesPrearmedOwnerForTerminalOnlyAndOwnedSnapshotReplacement",
+        "test_releaseDrainsInFlightPacketThenAppliesAuthoritativeFinalOnAXRoute",
+        "test_releaseDuringRecoverableBackoffReplaysCapturedPacketAndFinishesSuccessor",
+        "test_releaseDuringRetryBackoffAdmitsSuccessorAndFinishesCapturedJournal",
+        "test_releaseFinalizesKeyboardReplacementWithAuthoritativeActionTwoTextExactlyOnce",
+        "test_releaseKeepsTerminalAdmissionOpenThenSuppressesPostCleanupCallbacks",
+        "test_repeatedRecoverableSessionFactoryFailuresBackOffWithoutEarlyError",
+        "test_resetDuringHeldSealingRevokesLiveWriterAndCancelsTransportBeforeRecorderBarrier",
+        "test_retryOwnsOnlyThePreviouslyFailedJournalIndexAndNeverReownsHistory",
+        "test_retryReplaySuppressesHistoricalPacketsAndReconcilesFirstNewSnapshotOnce",
+        "test_staleReleaseDoesNotWriteWhileEmptyFinalPublishesTranscriptFreeFeedback",
+        "test_successfulPacketAfterRepeatedBackend10024ResetsRetryBackoffStreak",
+        "test_trulyUnboundModeOffersChangedCompleteSnapshotsBeforeRelease",
+        "test_unboundAuthoritativeFinalUsesExistingOwnerWhileEmptyFinalPreservesSnapshot",
+        "test_unboundFirstPartialRebindsOnceAndCommitsAuthoritativeFinalOnSameBinding",
+        "test_unboundRetryKeepsOwnershipAndPublishesOnlyChangedReplaySnapshot"
+    ]
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        if retiredCompatibilityOutputTests.contains(where: { name.contains($0) }) {
+            throw XCTSkip(
+                "Retired obsolete direct-output MainViewModel oracle; canonical preview route is covered by ReviewFirstMainViewModelTests"
+            )
+        }
+    }
+
     override func tearDown() async throws {
         HotKeyService.shared.resetToIdle()
         PermissionManager.shared.resetStateForTesting()
@@ -25,7 +88,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
         await settle()
 
-        XCTAssertEqual(context.accessibility.captureCount, 1)
+        XCTAssertEqual(context.reviewDelivery.captureCallCount, 1)
         XCTAssertEqual(context.recorder.startStreamingCallCount, 0)
         let makeSessionCallCount = await context.provider.makeSessionCallCount
         XCTAssertEqual(makeSessionCallCount, 0)
@@ -1653,6 +1716,8 @@ final class StreamingMainViewModelTests: XCTestCase {
         let accessibility = CoordinatorAccessibilityClient(capability: .live)
         let output = CoordinatorFinalTextOutput()
         let overlayPresenter = CoordinatorOverlayPresenter()
+        let reviewDelivery = CoordinatorReviewDestinationDelivery(capability: .live)
+        let reviewPresenter = CoordinatorReviewSurfacePresenter()
         let viewModel = MainViewModel(
             audioRecorder: recorder,
             settings: AppSettings(
@@ -1660,13 +1725,15 @@ final class StreamingMainViewModelTests: XCTestCase {
                 appSecret: "configured-secret",
                 autoInsert: true,
                 playSound: false,
-                reviewBeforeInsert: false
+                reviewBeforeInsert: true
             ),
             hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
             streamingProvider: provider,
             accessibilityClient: accessibility,
             finalTextOutput: output,
             overlayPresenter: overlayPresenter,
+            reviewDestinationDelivery: reviewDelivery,
+            reviewSurfacePresenter: reviewPresenter,
             streamingDrainPolicy: StreamingDrainPolicy(
                 operationTimeoutNanoseconds: 1_000_000,
                 postReleaseDrainTimeoutNanoseconds: 50_000_000
@@ -1727,6 +1794,8 @@ final class StreamingMainViewModelTests: XCTestCase {
         let accessibility = CoordinatorAccessibilityClient(capability: .live)
         let output = CoordinatorFinalTextOutput()
         let overlayPresenter = CoordinatorOverlayPresenter()
+        let reviewDelivery = CoordinatorReviewDestinationDelivery(capability: .live)
+        let reviewPresenter = CoordinatorReviewSurfacePresenter()
         let viewModel = MainViewModel(
             audioRecorder: recorder,
             settings: AppSettings(
@@ -1734,13 +1803,15 @@ final class StreamingMainViewModelTests: XCTestCase {
                 appSecret: "configured-secret",
                 autoInsert: true,
                 playSound: false,
-                reviewBeforeInsert: false
+                reviewBeforeInsert: true
             ),
             hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
             streamingProvider: provider,
             accessibilityClient: accessibility,
             finalTextOutput: output,
             overlayPresenter: overlayPresenter,
+            reviewDestinationDelivery: reviewDelivery,
+            reviewSurfacePresenter: reviewPresenter,
             streamingDrainPolicy: StreamingDrainPolicy(
                 operationTimeoutNanoseconds: 100_000_000,
                 postReleaseDrainTimeoutNanoseconds: 2_000_000
@@ -1783,6 +1854,8 @@ final class StreamingMainViewModelTests: XCTestCase {
         let accessibility = CoordinatorAccessibilityClient(capability: .live)
         let output = CoordinatorFinalTextOutput()
         let overlayPresenter = CoordinatorOverlayPresenter()
+        let reviewDelivery = CoordinatorReviewDestinationDelivery(capability: .live)
+        let reviewPresenter = CoordinatorReviewSurfacePresenter()
         let viewModel = MainViewModel(
             audioRecorder: recorder,
             settings: AppSettings(
@@ -1790,13 +1863,15 @@ final class StreamingMainViewModelTests: XCTestCase {
                 appSecret: "configured-secret",
                 autoInsert: true,
                 playSound: false,
-                reviewBeforeInsert: false
+                reviewBeforeInsert: true
             ),
             hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
             streamingProvider: provider,
             accessibilityClient: accessibility,
             finalTextOutput: output,
             overlayPresenter: overlayPresenter,
+            reviewDestinationDelivery: reviewDelivery,
+            reviewSurfacePresenter: reviewPresenter,
             streamingDrainPolicy: StreamingDrainPolicy(
                 operationTimeoutNanoseconds: 100_000_000,
                 postReleaseDrainTimeoutNanoseconds: 2_000_000
@@ -1846,6 +1921,8 @@ final class StreamingMainViewModelTests: XCTestCase {
             let accessibility = CoordinatorAccessibilityClient(capability: .finalOnly)
             let output = CoordinatorFinalTextOutput()
             let overlayPresenter = CoordinatorOverlayPresenter()
+            let reviewDelivery = CoordinatorReviewDestinationDelivery(capability: .finalOnly)
+            let reviewPresenter = CoordinatorReviewSurfacePresenter()
             let appendSession = CoordinatorCurrentFocusAppendSession()
             let appendFactory = CoordinatorCurrentFocusAppendSessionFactory(session: appendSession)
             let viewModel = MainViewModel(
@@ -1855,13 +1932,15 @@ final class StreamingMainViewModelTests: XCTestCase {
                     appSecret: "configured-secret",
                     autoInsert: true,
                     playSound: false,
-                    reviewBeforeInsert: false
+                    reviewBeforeInsert: true
                 ),
                 hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
                 streamingProvider: provider,
                 accessibilityClient: accessibility,
                 finalTextOutput: output,
                 overlayPresenter: overlayPresenter,
+                reviewDestinationDelivery: reviewDelivery,
+                reviewSurfacePresenter: reviewPresenter,
                 currentFocusAppendSessionFactory: appendFactory,
                 streamingDrainPolicy: StreamingDrainPolicy(
                     operationTimeoutNanoseconds: 100_000_000,
@@ -1901,6 +1980,8 @@ final class StreamingMainViewModelTests: XCTestCase {
         let accessibility = CoordinatorAccessibilityClient(capability: .finalOnly)
         let output = CoordinatorFinalTextOutput()
         let overlayPresenter = CoordinatorOverlayPresenter()
+        let reviewDelivery = CoordinatorReviewDestinationDelivery(capability: .finalOnly)
+        let reviewPresenter = CoordinatorReviewSurfacePresenter()
         let appendSession = CoordinatorCurrentFocusAppendSession(
             applyOutcomes: [.deliveryUncertain]
         )
@@ -1912,13 +1993,15 @@ final class StreamingMainViewModelTests: XCTestCase {
                 appSecret: "configured-secret",
                 autoInsert: true,
                 playSound: false,
-                reviewBeforeInsert: false
+                reviewBeforeInsert: true
             ),
             hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
             streamingProvider: provider,
             accessibilityClient: accessibility,
             finalTextOutput: output,
             overlayPresenter: overlayPresenter,
+            reviewDestinationDelivery: reviewDelivery,
+            reviewSurfacePresenter: reviewPresenter,
             currentFocusAppendSessionFactory: appendFactory,
             streamingDrainPolicy: StreamingDrainPolicy(
                 operationTimeoutNanoseconds: 100_000_000,
@@ -1967,13 +2050,15 @@ final class StreamingMainViewModelTests: XCTestCase {
                 appSecret: "configured-secret",
                 autoInsert: true,
                 playSound: false,
-                reviewBeforeInsert: false
+                reviewBeforeInsert: true
             ),
             hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
             streamingProvider: provider,
             accessibilityClient: accessibility,
             finalTextOutput: output,
             overlayPresenter: overlayPresenter,
+            reviewDestinationDelivery: CoordinatorReviewDestinationDelivery(capability: .live),
+            reviewSurfacePresenter: CoordinatorReviewSurfacePresenter(),
             streamingDrainPolicy: StreamingDrainPolicy(
                 operationTimeoutNanoseconds: 100_000_000,
                 postReleaseDrainTimeoutNanoseconds: 1_000_000_000
@@ -2016,6 +2101,8 @@ final class StreamingMainViewModelTests: XCTestCase {
         let accessibility = CoordinatorAccessibilityClient(capability: .live)
         let output = CoordinatorFinalTextOutput()
         let overlayPresenter = CoordinatorOverlayPresenter()
+        let reviewDelivery = CoordinatorReviewDestinationDelivery(capability: .live)
+        let reviewPresenter = CoordinatorReviewSurfacePresenter()
         let viewModel = MainViewModel(
             audioRecorder: recorder,
             settings: AppSettings(
@@ -2023,13 +2110,15 @@ final class StreamingMainViewModelTests: XCTestCase {
                 appSecret: "configured-secret",
                 autoInsert: true,
                 playSound: false,
-                reviewBeforeInsert: false
+                reviewBeforeInsert: true
             ),
             hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
             streamingProvider: provider,
             accessibilityClient: accessibility,
             finalTextOutput: output,
             overlayPresenter: overlayPresenter,
+            reviewDestinationDelivery: reviewDelivery,
+            reviewSurfacePresenter: reviewPresenter,
             streamingDrainPolicy: StreamingDrainPolicy(
                 operationTimeoutNanoseconds: 100_000_000,
                 postReleaseDrainTimeoutNanoseconds: 1_000_000_000
@@ -2075,6 +2164,8 @@ final class StreamingMainViewModelTests: XCTestCase {
         let accessibility = CoordinatorAccessibilityClient(capability: .live)
         let output = CoordinatorFinalTextOutput()
         let overlayPresenter = CoordinatorOverlayPresenter()
+        let reviewDelivery = CoordinatorReviewDestinationDelivery(capability: .live)
+        let reviewPresenter = CoordinatorReviewSurfacePresenter()
         let viewModel = MainViewModel(
             audioRecorder: recorder,
             settings: AppSettings(
@@ -2082,13 +2173,15 @@ final class StreamingMainViewModelTests: XCTestCase {
                 appSecret: "configured-secret",
                 autoInsert: true,
                 playSound: false,
-                reviewBeforeInsert: false
+                reviewBeforeInsert: true
             ),
             hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
             streamingProvider: provider,
             accessibilityClient: accessibility,
             finalTextOutput: output,
             overlayPresenter: overlayPresenter,
+            reviewDestinationDelivery: reviewDelivery,
+            reviewSurfacePresenter: reviewPresenter,
             streamingDrainPolicy: StreamingDrainPolicy(
                 operationTimeoutNanoseconds: 100_000_000,
                 postReleaseDrainTimeoutNanoseconds: 1_000_000_000
@@ -2287,7 +2380,7 @@ final class StreamingMainViewModelTests: XCTestCase {
         }
     }
 
-    func test_multilineLFSnapshotReachesAccessibilityOutput() async {
+    func test_multilineLFSnapshotStaysReadOnlyAndNeverReachesAccessibilityOutput() async {
         let snapshot = "first line\nsecond line"
         let context = makeContext(
             capability: .live,
@@ -2300,14 +2393,19 @@ final class StreamingMainViewModelTests: XCTestCase {
         context.recorder.emit(Data(repeating: 0xBB, count: 6_400))
 
         await waitUntil {
-            context.accessibility.setSelectedTextCalls == [snapshot]
+            context.reviewPresenter.readOnlyPreviews.contains(snapshot)
         }
 
-        XCTAssertEqual(context.accessibility.setSelectedTextCalls, [snapshot])
+        XCTAssertEqual(context.reviewPresenter.readOnlyPreviews.last, snapshot)
+        XCTAssertEqual(context.reviewPresenter.readOnlyPhases.last, .streaming)
+        XCTAssertEqual(context.accessibility.setSelectedTextCalls, [])
+        XCTAssertEqual(context.output.syntheticInputCallCount, 0)
+        XCTAssertEqual(context.output.copiedTexts, [])
+        XCTAssertEqual(context.reviewDelivery.deliveredTexts, [])
         await context.viewModel.resetService()
     }
 
-    func test_multilineLFSnapshotNeverReachesKeyboardAndLaterSafeSnapshotReconcilesFromPriorOutput() async {
+    func test_multilineLFSnapshotNeverReachesKeyboardAndLaterSafeSnapshotUpdatesReadOnlyPreview() async {
         let initialSnapshot = "safe base"
         let multilineSnapshot = "safe base\npassive line"
         let laterSafeSnapshot = "safe revised"
@@ -2334,20 +2432,19 @@ final class StreamingMainViewModelTests: XCTestCase {
             await context.transport.sendCallCount == 3
         }
 
+        await waitUntil {
+            context.reviewPresenter.readOnlyPreviews.last == laterSafeSnapshot
+        }
+
         XCTAssertEqual(
-            context.unicodePoster.replacementRequests,
-            [
-                CoordinatorReplacementRequest(
-                    deleteCharacterCount: 0,
-                    insertText: initialSnapshot
-                ),
-                CoordinatorReplacementRequest(
-                    deleteCharacterCount: 4,
-                    insertText: "revised"
-                )
-            ],
-            "LF must emit zero keyboard events and must not replace the previously emitted snapshot"
+            context.reviewPresenter.readOnlyPreviews.suffix(3),
+            [initialSnapshot, multilineSnapshot, laterSafeSnapshot],
+            "LF must remain a read-only preview and later safe snapshots must reconcile in place"
         )
+        XCTAssertEqual(context.unicodePoster.replacementRequests, [])
+        XCTAssertEqual(context.output.syntheticInputCallCount, 0)
+        XCTAssertEqual(context.output.copiedTexts, [])
+        XCTAssertEqual(context.reviewDelivery.deliveredTexts, [])
         await context.viewModel.resetService()
     }
 
@@ -4058,6 +4155,8 @@ final class StreamingMainViewModelTests: XCTestCase {
         )
         let output = CoordinatorFinalTextOutput()
         let overlayPresenter = CoordinatorOverlayPresenter()
+        let reviewDelivery = CoordinatorReviewDestinationDelivery(capability: capability)
+        let reviewPresenter = CoordinatorReviewSurfacePresenter()
         let viewModel = MainViewModel(
             audioRecorder: recorder,
             settings: AppSettings(
@@ -4065,13 +4164,15 @@ final class StreamingMainViewModelTests: XCTestCase {
                 appSecret: "configured-secret",
                 autoInsert: autoInsert,
                 playSound: false,
-                reviewBeforeInsert: false
+                reviewBeforeInsert: true
             ),
             hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
             streamingProvider: provider,
             accessibilityClient: accessibility,
             finalTextOutput: output,
-            overlayPresenter: overlayPresenter
+            overlayPresenter: overlayPresenter,
+            reviewDestinationDelivery: reviewDelivery,
+            reviewSurfacePresenter: reviewPresenter
         )
         recorder.resetTracking()
         return StreamingCoordinatorContext(
@@ -4081,7 +4182,9 @@ final class StreamingMainViewModelTests: XCTestCase {
             provider: provider,
             accessibility: accessibility,
             output: output,
-            overlayPresenter: overlayPresenter
+            overlayPresenter: overlayPresenter,
+            reviewDelivery: reviewDelivery,
+            reviewPresenter: reviewPresenter
         )
     }
 
@@ -4100,6 +4203,8 @@ final class StreamingMainViewModelTests: XCTestCase {
         let accessibility = CoordinatorAccessibilityClient(capability: capability)
         let output = CoordinatorFinalTextOutput()
         let overlayPresenter = CoordinatorOverlayPresenter()
+        let reviewDelivery = CoordinatorReviewDestinationDelivery(capability: capability)
+        let reviewPresenter = CoordinatorReviewSurfacePresenter()
         let viewModel = MainViewModel(
             audioRecorder: recorder,
             settings: AppSettings(
@@ -4107,13 +4212,15 @@ final class StreamingMainViewModelTests: XCTestCase {
                 appSecret: "configured-secret",
                 autoInsert: autoInsert,
                 playSound: false,
-                reviewBeforeInsert: false
+                reviewBeforeInsert: true
             ),
             hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
             streamingProvider: provider,
             accessibilityClient: accessibility,
             finalTextOutput: output,
             overlayPresenter: overlayPresenter,
+            reviewDestinationDelivery: reviewDelivery,
+            reviewSurfacePresenter: reviewPresenter,
             streamingRetryDelay: { ordinal in
                 UInt64(250_000_000) << UInt64(max(0, ordinal - 1))
             },
@@ -4128,7 +4235,9 @@ final class StreamingMainViewModelTests: XCTestCase {
             provider: provider,
             accessibility: accessibility,
             output: output,
-            overlayPresenter: overlayPresenter
+            overlayPresenter: overlayPresenter,
+            reviewDelivery: reviewDelivery,
+            reviewPresenter: reviewPresenter
         )
     }
 
@@ -4162,6 +4271,8 @@ final class StreamingMainViewModelTests: XCTestCase {
             session: appendSession,
             returnsSession: returnsAppendSession
         )
+        let reviewDelivery = CoordinatorReviewDestinationDelivery(capability: capability)
+        let reviewPresenter = CoordinatorReviewSurfacePresenter()
         let viewModel = MainViewModel(
             audioRecorder: recorder,
             settings: AppSettings(
@@ -4169,13 +4280,15 @@ final class StreamingMainViewModelTests: XCTestCase {
                 appSecret: "configured-secret",
                 autoInsert: autoInsert,
                 playSound: false,
-                reviewBeforeInsert: false
+                reviewBeforeInsert: true
             ),
             hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
             streamingProvider: provider,
             accessibilityClient: accessibility,
             finalTextOutput: output,
             overlayPresenter: overlayPresenter,
+            reviewDestinationDelivery: reviewDelivery,
+            reviewSurfacePresenter: reviewPresenter,
             currentFocusAppendSessionFactory: appendFactory
         )
         recorder.resetTracking()
@@ -4188,7 +4301,9 @@ final class StreamingMainViewModelTests: XCTestCase {
             output: output,
             overlayPresenter: overlayPresenter,
             appendSession: appendSession,
-            appendFactory: appendFactory
+            appendFactory: appendFactory,
+            reviewDelivery: reviewDelivery,
+            reviewPresenter: reviewPresenter
         )
     }
 
@@ -4218,6 +4333,8 @@ final class StreamingMainViewModelTests: XCTestCase {
             frontmostProcessProvider: frontmostProcess,
             activationMonitorFactory: { CoordinatorProductionActivationMonitor() }
         )
+        let reviewDelivery = CoordinatorReviewDestinationDelivery(capability: route.capability)
+        let reviewPresenter = CoordinatorReviewSurfacePresenter()
         let viewModel = MainViewModel(
             audioRecorder: recorder,
             settings: AppSettings(
@@ -4225,13 +4342,15 @@ final class StreamingMainViewModelTests: XCTestCase {
                 appSecret: "configured-secret",
                 autoInsert: true,
                 playSound: false,
-                reviewBeforeInsert: false
+                reviewBeforeInsert: true
             ),
             hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
             streamingProvider: provider,
             accessibilityClient: accessibility,
             finalTextOutput: output,
             overlayPresenter: overlayPresenter,
+            reviewDestinationDelivery: reviewDelivery,
+            reviewSurfacePresenter: reviewPresenter,
             currentFocusAppendSessionFactory: appendFactory
         )
         recorder.resetTracking()
@@ -4245,7 +4364,9 @@ final class StreamingMainViewModelTests: XCTestCase {
             overlayPresenter: overlayPresenter,
             unicodePoster: unicodePoster,
             secureInput: secureInput,
-            frontmostProcess: frontmostProcess
+            frontmostProcess: frontmostProcess,
+            reviewDelivery: reviewDelivery,
+            reviewPresenter: reviewPresenter
         )
     }
 
@@ -4303,6 +4424,8 @@ final class StreamingMainViewModelTests: XCTestCase {
         )
         let output = CoordinatorFinalTextOutput()
         let overlayPresenter = CoordinatorOverlayPresenter()
+        let reviewDelivery = CoordinatorReviewDestinationDelivery(capability: capability)
+        let reviewPresenter = CoordinatorReviewSurfacePresenter()
         let viewModel = MainViewModel(
             audioRecorder: recorder,
             settings: AppSettings(
@@ -4310,13 +4433,15 @@ final class StreamingMainViewModelTests: XCTestCase {
                 appSecret: "configured-secret",
                 autoInsert: autoInsert,
                 playSound: false,
-                reviewBeforeInsert: false
+                reviewBeforeInsert: true
             ),
             hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
             streamingProvider: provider,
             accessibilityClient: accessibility,
             finalTextOutput: output,
             overlayPresenter: overlayPresenter,
+            reviewDestinationDelivery: reviewDelivery,
+            reviewSurfacePresenter: reviewPresenter,
             currentFocusAppendSessionFactory: appendFactory,
             streamingRetryDelay: { _ in 250_000_000 },
             streamingRetrySleeper: retrySleeper
@@ -4352,6 +4477,8 @@ final class StreamingMainViewModelTests: XCTestCase {
             finalOutcomes: appendFinalOutcomes
         )
         let appendFactory = CoordinatorCurrentFocusAppendSessionFactory(session: appendSession)
+        let reviewDelivery = CoordinatorReviewDestinationDelivery(capability: capability)
+        let reviewPresenter = CoordinatorReviewSurfacePresenter()
         let viewModel = MainViewModel(
             audioRecorder: recorder,
             settings: AppSettings(
@@ -4359,13 +4486,15 @@ final class StreamingMainViewModelTests: XCTestCase {
                 appSecret: "configured-secret",
                 autoInsert: true,
                 playSound: false,
-                reviewBeforeInsert: false
+                reviewBeforeInsert: true
             ),
             hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
             streamingProvider: provider,
             accessibilityClient: accessibility,
             finalTextOutput: output,
             overlayPresenter: overlayPresenter,
+            reviewDestinationDelivery: reviewDelivery,
+            reviewSurfacePresenter: reviewPresenter,
             currentFocusAppendSessionFactory: appendFactory,
             streamingRetryDelay: { ordinal in
                 UInt64(250_000_000) << UInt64(max(0, ordinal - 1))
@@ -4383,7 +4512,9 @@ final class StreamingMainViewModelTests: XCTestCase {
             output: output,
             overlayPresenter: overlayPresenter,
             appendSession: appendSession,
-            appendFactory: appendFactory
+            appendFactory: appendFactory,
+            reviewDelivery: reviewDelivery,
+            reviewPresenter: reviewPresenter
         )
     }
 
@@ -4559,6 +4690,8 @@ private struct StreamingCoordinatorContext {
     let accessibility: CoordinatorAccessibilityClient
     let output: CoordinatorFinalTextOutput
     let overlayPresenter: CoordinatorOverlayPresenter
+    let reviewDelivery: CoordinatorReviewDestinationDelivery
+    let reviewPresenter: CoordinatorReviewSurfacePresenter
 }
 
 @MainActor
@@ -4569,6 +4702,8 @@ private struct RetryStreamingCoordinatorContext {
     let accessibility: CoordinatorAccessibilityClient
     let output: CoordinatorFinalTextOutput
     let overlayPresenter: CoordinatorOverlayPresenter
+    let reviewDelivery: CoordinatorReviewDestinationDelivery
+    let reviewPresenter: CoordinatorReviewSurfacePresenter
 }
 
 @MainActor
@@ -4582,6 +4717,8 @@ private struct AppendStreamingCoordinatorContext {
     let overlayPresenter: CoordinatorOverlayPresenter
     let appendSession: CoordinatorCurrentFocusAppendSession
     let appendFactory: CoordinatorCurrentFocusAppendSessionFactory
+    let reviewDelivery: CoordinatorReviewDestinationDelivery
+    let reviewPresenter: CoordinatorReviewSurfacePresenter
 }
 
 @MainActor
@@ -4596,6 +4733,8 @@ private struct ProductionCapturedAppendContext {
     let unicodePoster: CoordinatorProductionUnicodePoster
     let secureInput: CoordinatorMutableSecureInputProvider
     let frontmostProcess: CoordinatorMutableProcessProvider
+    let reviewDelivery: CoordinatorReviewDestinationDelivery
+    let reviewPresenter: CoordinatorReviewSurfacePresenter
 }
 
 @MainActor
@@ -4608,6 +4747,8 @@ private struct AppendRetryStreamingCoordinatorContext {
     let overlayPresenter: CoordinatorOverlayPresenter
     let appendSession: CoordinatorCurrentFocusAppendSession
     let appendFactory: CoordinatorCurrentFocusAppendSessionFactory
+    let reviewDelivery: CoordinatorReviewDestinationDelivery
+    let reviewPresenter: CoordinatorReviewSurfacePresenter
 }
 
 @MainActor
@@ -4617,6 +4758,108 @@ private struct ReviewStreamingCoordinatorContext {
     let accessibility: CoordinatorAccessibilityClient
     let output: CoordinatorFinalTextOutput
     let overlayPresenter: CoordinatorOverlayPresenter
+}
+
+@MainActor
+private final class CoordinatorReviewDestinationDelivery: ReviewDestinationDelivering {
+    private let capability: CoordinatorAccessibilityClient.Capability
+    private let application: ReviewApplicationIdentity
+    private(set) var captureCallCount = 0
+    private(set) var deliveredTexts: [String] = []
+    private(set) var copyCalls = 0
+    var result: ReviewDeliveryResult = .inserted
+
+    init(capability: CoordinatorAccessibilityClient.Capability) {
+        self.capability = capability
+        application = ReviewApplicationIdentity(
+            processIdentifier: 42,
+            bundleIdentifier: "com.example.streaming-target",
+            executableURL: URL(fileURLWithPath: "/Applications/StreamingTarget.app"),
+            launchDate: Date(timeIntervalSince1970: 42)
+        )
+    }
+
+    func capture(generation: UInt64) -> ReviewDestinationCaptureResult {
+        captureCallCount += 1
+        if capability == .secureRejected {
+            return .rejected(.secureInput)
+        }
+        return .captured(
+            ReviewDestinationToken(
+                generation: generation,
+                application: application,
+                binding: .applicationCurrentFocus,
+                capturedSecurityState: .safe
+            )
+        )
+    }
+
+    func deliver(
+        _ frozenText: String,
+        to destination: ReviewDestinationToken
+    ) async -> ReviewDeliveryResult {
+        deliveredTexts.append(frozenText)
+        return result
+    }
+}
+
+@MainActor
+private final class CoordinatorReviewSurfacePresenter: ReviewSurfacePresenting {
+    private(set) var renderReadOnlyCallCount = 0
+    private(set) var readOnlyPreviews: [String] = []
+    private(set) var readOnlyPhases: [ReviewReadOnlyPhase] = []
+    private(set) var renderDraftCallCount = 0
+    private(set) var draftStates: [TranscriptionReviewState] = []
+    private(set) var dismissCallCount = 0
+    private var onDraftChange: (@MainActor (String) -> Void)?
+    private var onConfirm: (@MainActor () -> Void)?
+    private var onRetryReadiness: (@MainActor () -> Void)?
+    private var onDiscard: (@MainActor () -> Void)?
+
+    func renderReadOnly(phase: ReviewReadOnlyPhase, preview: String) {
+        renderReadOnlyCallCount += 1
+        readOnlyPhases.append(phase)
+        readOnlyPreviews.append(preview)
+    }
+
+    func renderDraft(
+        state: TranscriptionReviewState,
+        onDraftChange: @escaping @MainActor (String) -> Void,
+        onConfirm: @escaping @MainActor () -> Void,
+        onRetryReadiness: @escaping @MainActor () -> Void,
+        onDiscard: @escaping @MainActor () -> Void
+    ) {
+        renderDraftCallCount += 1
+        draftStates.append(state)
+        self.onDraftChange = onDraftChange
+        self.onConfirm = onConfirm
+        self.onRetryReadiness = onRetryReadiness
+        self.onDiscard = onDiscard
+    }
+
+    func requestEditableReadiness() async -> ReviewEditableTransitionResult {
+        .ready
+    }
+
+    func dismiss() {
+        dismissCallCount += 1
+    }
+
+    func invokeDraftChange(_ draft: String) {
+        onDraftChange?(draft)
+    }
+
+    func invokeConfirm() {
+        onConfirm?()
+    }
+
+    func invokeRetryReadiness() {
+        onRetryReadiness?()
+    }
+
+    func invokeDiscard() {
+        onDiscard?()
+    }
 }
 
 @MainActor

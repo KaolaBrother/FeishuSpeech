@@ -12,6 +12,15 @@
 
 ---
 
+> **Issue #40 v2 output-routing note.** This issue #28–#31 design predates the current one-route
+> review contract. Its capture/recognition/provider ownership split, bounded journal/retry model,
+> transport fallback, and no-UI-await/backpressure constraints remain applicable. Statements below
+> that retain cursor-bound output or reject a review surface are historical for the output boundary;
+> accepted interactions now use the same streaming/sealing/editable draft and explicit Send/Return
+> confirmation described in [D-40-01](../decisions/D-40-01.md) and
+> [streaming-speech-design.md](../streaming-speech-design.md). This note does not authorize changes
+> to the protected async or transport design in this record.
+
 ## Overview
 
 Owner report: **"It always stuck if it fails to connect to the server at the beginning."**
@@ -899,12 +908,12 @@ FeishuSpeech has no feature-flag service. **No user-facing “direct connect” 
 2. **Issues filed:** #28–#31. Workflow is **not** claimed; implementation has not started.
 3. **PRs in order** (see [PR Plan](#pr-plan)). Tests and production stay in separate custody: `tdd-guide` authors tests; `implementer` authors production code.
 4. **Validation:** `xcodebuild … test`, `swiftlint`, Debug+Release build. Focused tests named in [Acceptance surface](#acceptance-surface-tests-not-written-here).
-5. **Installed Release UAT** (owner-authorized, credential-bearing):  
-   - Feishu unreachable at Fn-down (disable Wi‑Fi / CONNECT black-hole); speak; restore before 60 s drain; text appears.  
-   - HTTP/SOCKS proxy that **black-holes** `URLSession` but allows direct `preferNoProxies`; 60 s offline then full-journal keep-alive replay.  
-   - **407/403 proxy:** recognition fails as today (**Q5-A**); capture still lives after PR 1+2.  
-   - **Captive 200 HTML:** hold ends as `流式识别失败` / malformed (**Q5-A**).  
-   - True bad App Secret still shows `认证失败，请检查应用凭据` and stops the hold.  
+5. **Installed Release UAT** (owner-authorized, credential-bearing):
+   - Feishu unreachable at Fn-down (disable Wi‑Fi / CONNECT black-hole); speak; restore before 60 s drain; text appears.
+   - HTTP/SOCKS proxy that **black-holes** `URLSession` but allows direct `preferNoProxies`; 60 s offline then full-journal keep-alive replay.
+   - **407/403 proxy:** recognition fails as today (**Q5-A**); capture still lives after PR 1+2.
+   - **Captive 200 HTML:** hold ends as `流式识别失败` / malformed (**Q5-A**).
+   - True bad App Secret still shows `认证失败，请检查应用凭据` and stops the hold.
    - VPN TUN that black-holes **all** routes: recording continues; recognition retries until drain; no crash; no IP allowlist. **Q2-B rejected** — no `en0` bind UAT.
 6. **Rollback:** revert the PR series. No schema to migrate. Direct client remains unused if PR4 is reverted while PR1–PR3 stay (capture still independent; recognition still retries on URLSession).
 

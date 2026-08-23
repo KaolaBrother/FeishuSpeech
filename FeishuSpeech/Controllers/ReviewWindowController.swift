@@ -22,8 +22,51 @@ final class ReviewPanel: NSPanel {
 }
 
 @MainActor
-final class ReviewWindowController: NSObject, NSWindowDelegate, ReviewSurfacePresenting,
-    ReviewEditableReadinessPresenting {
+final class ReviewWindowController: NSObject, NSWindowDelegate, ReviewSurfacePresenting {
+    struct ReadinessEnvironment {
+        let requestActivation: @MainActor () -> Bool
+        let applicationIsActive: @MainActor () -> Bool
+        let panelIsKey: @MainActor (ReviewPanel) -> Bool
+        let editorLookup: @MainActor (NSView?) -> NSTextView?
+        let editorAttached: @MainActor (NSTextView, ReviewPanel) -> Bool
+        let makeFirstResponder: @MainActor (ReviewPanel, NSTextView) -> Bool
+        let firstResponderIsEditor: @MainActor (ReviewPanel, NSTextView) -> Bool
+        let nowNanoseconds: @Sendable () -> UInt64
+        let sleep: @Sendable (UInt64) async throws -> Void
+
+        static var appKit: ReadinessEnvironment {
+            ReadinessEnvironment(
+                requestActivation: {
+                    NSRunningApplication.current.activate(options: [])
+                },
+                applicationIsActive: {
+                    NSApp.isActive
+                },
+                panelIsKey: { panel in
+                    panel.isKeyWindow
+                },
+                editorLookup: { view in
+                    ReviewWindowController.editableTextView(in: view)
+                },
+                editorAttached: { editor, panel in
+                    editor.window === panel
+                },
+                makeFirstResponder: { panel, editor in
+                    panel.makeFirstResponder(editor)
+                },
+                firstResponderIsEditor: { panel, editor in
+                    panel.firstResponder === editor
+                },
+                nowNanoseconds: {
+                    DispatchTime.now().uptimeNanoseconds
+                },
+                sleep: { nanoseconds in
+                    try await Task.sleep(nanoseconds: nanoseconds)
+                }
+            )
+        }
+    }
+
     static let shared = ReviewWindowController()
 
     private let initialWindowSize = NSSize(width: 520, height: 320)
@@ -31,26 +74,30 @@ final class ReviewWindowController: NSObject, NSWindowDelegate, ReviewSurfacePre
     private let maximumWindowSize = NSSize(width: 760, height: 600)
     private static let editableReadinessTimeoutNanoseconds: UInt64 = 2_000_000_000
     private static let editableReadinessPollNanoseconds: UInt64 = 20_000_000
+    private let readinessEnvironment: ReadinessEnvironment
 
     private var panel: ReviewPanel?
     private var hostingView: NSHostingView<TranscriptionReviewView>?
     private var onDraftChange: (@MainActor (String) -> Void)?
     private var onConfirm: (@MainActor () -> Void)?
+    private var onRetryReadiness: (@MainActor () -> Void)?
     private var onDiscard: (@MainActor () -> Void)?
-    private var isEditable = false
-    private var editableReadinessTask: Task<ReviewEditableTransitionResult, Never>?
+    private var isDraftSurfaceActive = false
+    private var isConfirming = false
     private var editableReadinessID: UUID?
-    private var editableReadinessObservers: [NSObjectProtocol] = []
+    private var readinessAttemptOrdinal: UInt64 = 0
 
-    override init() {
+    init(readinessEnvironment: ReadinessEnvironment? = nil) {
+        self.readinessEnvironment = readinessEnvironment ?? .appKit
         super.init()
     }
 
     func renderReadOnly(phase: ReviewReadOnlyPhase, preview: String) {
-        guard !isEditable else { return }
+        guard !isDraftSurfaceActive else { return }
 
         onDraftChange = nil
         onConfirm = nil
+        onRetryReadiness = nil
         onDiscard = nil
 
         let state: TranscriptionReviewState
@@ -156,131 +203,98 @@ final class ReviewWindowController: NSObject, NSWindowDelegate, ReviewSurfacePre
         )
     }
 
-    func renderEditable(
-        draft: String,
-        isPossiblyIncomplete: Bool,
+    func renderDraft(
+        state: TranscriptionReviewState,
         onDraftChange: @escaping @MainActor (String) -> Void,
         onConfirm: @escaping @MainActor () -> Void,
+        onRetryReadiness: @escaping @MainActor () -> Void,
         onDiscard: @escaping @MainActor () -> Void
-    ) -> ReviewEditableTransitionResult {
-        guard !isEditable else { return .ready }
-
-        let panel = configureEditableSurface(
-            draft: draft,
-            isPossiblyIncomplete: isPossiblyIncomplete,
-            onDraftChange: onDraftChange,
-            onConfirm: onConfirm,
-            onDiscard: onDiscard
-        )
-
-        guard requestEditableActivation(on: panel) else {
-            dismiss()
-            return .failed
+    ) {
+        switch state {
+        case .editablePending, .editable, .confirming:
+            break
+        case .idle, .streaming, .sealing:
+            logger.error("invalid review draft state supplied to presenter")
+            return
         }
-
-        guard editableSurfaceIsReady(on: panel) else {
-            dismiss()
-            return .failed
-        }
-
-        logger.debug("review editable surface activated")
-        return .ready
-    }
-
-    func renderEditableWhenReady(
-        draft: String,
-        isPossiblyIncomplete: Bool,
-        onDraftChange: @escaping @MainActor (String) -> Void,
-        onConfirm: @escaping @MainActor () -> Void,
-        onDiscard: @escaping @MainActor () -> Void
-    ) async -> ReviewEditableTransitionResult {
-        guard !Task.isCancelled else { return .failed }
-        guard !isEditable else { return .ready }
 
         cancelEditableReadiness()
-        let panel = configureEditableSurface(
-            draft: draft,
-            isPossiblyIncomplete: isPossiblyIncomplete,
-            onDraftChange: onDraftChange,
-            onConfirm: onConfirm,
-            onDiscard: onDiscard
-        )
-
-        guard requestEditableActivation(on: panel) else {
-            dismiss()
-            return .failed
+        if case .confirming = state {
+            isConfirming = true
+        } else {
+            isConfirming = false
         }
-
-        let readinessID = UUID()
-        editableReadinessID = readinessID
-        installEditableReadinessObservers(on: panel, readinessID: readinessID)
-        let readinessTask = Task { @MainActor [weak self] in
-            guard let self else { return ReviewEditableTransitionResult.failed }
-            return await self.waitForEditableReadiness(
-                on: panel,
-                readinessID: readinessID
-            )
-        }
-        editableReadinessTask = readinessTask
-
-        let result = await withTaskCancellationHandler {
-            await readinessTask.value
-        } onCancel: {
-            Task { @MainActor [weak self] in
-                self?.cancelEditableReadiness()
-            }
-        }
-
-        guard editableReadinessID == readinessID else {
-            return .failed
-        }
-        clearEditableReadiness()
-        guard result == .ready else {
-            dismiss()
-            return .failed
-        }
-
-        logger.debug("review editable surface activated")
-        return .ready
-    }
-
-    private func configureEditableSurface(
-        draft: String,
-        isPossiblyIncomplete: Bool,
-        onDraftChange: @escaping @MainActor (String) -> Void,
-        onConfirm: @escaping @MainActor () -> Void,
-        onDiscard: @escaping @MainActor () -> Void
-    ) -> ReviewPanel {
         let panel = ensurePanel()
         self.onDraftChange = onDraftChange
         self.onConfirm = onConfirm
+        self.onRetryReadiness = onRetryReadiness
         self.onDiscard = onDiscard
         install(
             TranscriptionReviewView(
-                state: .editable(
-                    draft: draft,
-                    isPossiblyIncomplete: isPossiblyIncomplete
-                ),
+                state: state,
                 onDraftChange: onDraftChange,
                 onConfirm: onConfirm,
+                onRetryReadiness: onRetryReadiness,
                 onDiscard: onDiscard
             ),
             on: panel
         )
 
-        isEditable = true
+        isDraftSurfaceActive = true
         panel.allowsKeyInteraction = true
         panel.ignoresMouseEvents = false
         setClosable(true, on: panel)
-        return panel
+        panel.orderFrontRegardless()
     }
 
-    private func requestEditableActivation(on panel: ReviewPanel) -> Bool {
-        guard NSRunningApplication.current.activate(options: []) else {
-            return false
+    func requestEditableReadiness() async -> ReviewEditableTransitionResult {
+        guard !Task.isCancelled else {
+            return .pending(.cancelled(lastUnmet: nil))
         }
+        guard isDraftSurfaceActive,
+              let panel,
+              panel.contentView != nil else {
+            return .pending(.surfaceInvalidated)
+        }
+
+        cancelEditableReadiness()
+        let readinessID = UUID()
+        editableReadinessID = readinessID
+        readinessAttemptOrdinal &+= 1
+        let attempt = readinessAttemptOrdinal
+        let attemptStart = readinessEnvironment.nowNanoseconds()
+        logReadiness(
+            event: "review_readiness_started",
+            attempt: attempt,
+            result: "started",
+            predicate: nil,
+            startNanoseconds: attemptStart
+        )
+
+        guard readinessEnvironment.requestActivation() else {
+            clearEditableReadiness()
+            logReadiness(
+                event: "review_readiness_pending",
+                attempt: attempt,
+                result: "activationRejected",
+                predicate: .activationRequest,
+                startNanoseconds: attemptStart
+            )
+            return .pending(.activationRejected)
+        }
+
         materializeEditableSurface(on: panel)
-        return true
+        let result = await waitForEditableReadiness(
+            on: panel,
+            readinessID: readinessID,
+            attempt: attempt,
+            startNanoseconds: attemptStart
+        )
+        guard editableReadinessID == readinessID else {
+            return .pending(.surfaceInvalidated)
+        }
+        clearEditableReadiness()
+        return result
     }
 
     private func materializeEditableSurface(on panel: ReviewPanel) {
@@ -290,111 +304,137 @@ final class ReviewWindowController: NSObject, NSWindowDelegate, ReviewSurfacePre
         hostingView?.layoutSubtreeIfNeeded()
     }
 
-    private func editableSurfaceIsReady(on panel: ReviewPanel) -> Bool {
-        guard NSApp.isActive, panel.isKeyWindow,
-              let editor = editableTextView(in: hostingView),
-              editor.window === panel,
-              panel.makeFirstResponder(editor),
-              panel.firstResponder === editor else {
-            return false
-        }
-        return true
-    }
-
     private func waitForEditableReadiness(
         on panel: ReviewPanel,
-        readinessID: UUID
+        readinessID: UUID,
+        attempt: UInt64,
+        startNanoseconds: UInt64
     ) async -> ReviewEditableTransitionResult {
-        let startNanoseconds = DispatchTime.now().uptimeNanoseconds
-        while !Task.isCancelled {
+        var lastUnmet: ReviewEditableReadinessPredicate?
+        while true {
             guard editableReadinessID == readinessID,
-                  isEditable,
+                  isDraftSurfaceActive,
                   let currentPanel = self.panel,
                   currentPanel === panel else {
-                return .failed
+                return .pending(.surfaceInvalidated)
+            }
+
+            if Task.isCancelled {
+                logReadiness(
+                    event: "review_readiness_cancelled",
+                    attempt: attempt,
+                    result: "cancelled",
+                    predicate: lastUnmet,
+                    startNanoseconds: startNanoseconds
+                )
+                return .pending(.cancelled(lastUnmet: lastUnmet))
             }
 
             materializeEditableSurface(on: panel)
-            if editableSurfaceIsReady(on: panel) {
+            if let unmet = firstUnmetReadinessPredicate(on: panel) {
+                lastUnmet = unmet
+            } else {
+                logReadiness(
+                    event: "review_readiness_ready",
+                    attempt: attempt,
+                    result: "ready",
+                    predicate: nil,
+                    startNanoseconds: startNanoseconds
+                )
                 return .ready
             }
 
-            let elapsedNanoseconds = DispatchTime.now().uptimeNanoseconds - startNanoseconds
+            let now = readinessEnvironment.nowNanoseconds()
+            let elapsedNanoseconds = now >= startNanoseconds
+                ? now - startNanoseconds
+                : Self.editableReadinessTimeoutNanoseconds
             guard elapsedNanoseconds < Self.editableReadinessTimeoutNanoseconds else {
-                return .failed
+                logReadiness(
+                    event: "review_readiness_pending",
+                    attempt: attempt,
+                    result: "timedOut",
+                    predicate: lastUnmet,
+                    startNanoseconds: startNanoseconds
+                )
+                return .pending(
+                    .timedOut(lastUnmet: lastUnmet ?? .activationRequest)
+                )
             }
             let remainingNanoseconds = Self.editableReadinessTimeoutNanoseconds - elapsedNanoseconds
             do {
-                try await Task.sleep(
-                    nanoseconds: min(
+                try await readinessEnvironment.sleep(
+                    min(
                         Self.editableReadinessPollNanoseconds,
                         remainingNanoseconds
                     )
                 )
             } catch {
-                return .failed
+                logReadiness(
+                    event: "review_readiness_cancelled",
+                    attempt: attempt,
+                    result: "cancelled",
+                    predicate: lastUnmet,
+                    startNanoseconds: startNanoseconds
+                )
+                return .pending(.cancelled(lastUnmet: lastUnmet))
             }
         }
-        return .failed
     }
 
-    private func installEditableReadinessObservers(
-        on panel: ReviewPanel,
-        readinessID: UUID
+    private func firstUnmetReadinessPredicate(
+        on panel: ReviewPanel
+    ) -> ReviewEditableReadinessPredicate? {
+        guard readinessEnvironment.applicationIsActive() else {
+            return .applicationActive
+        }
+        guard readinessEnvironment.panelIsKey(panel) else {
+            return .panelKey
+        }
+        guard let editor = readinessEnvironment.editorLookup(hostingView) else {
+            return .editorMaterialized
+        }
+        guard readinessEnvironment.editorAttached(editor, panel) else {
+            return .editorAttachedToPanel
+        }
+        guard readinessEnvironment.makeFirstResponder(panel, editor),
+              readinessEnvironment.firstResponderIsEditor(panel, editor) else {
+            return .editorFirstResponder
+        }
+        return nil
+    }
+
+    private func logReadiness(
+        event: String,
+        attempt: UInt64,
+        result: String,
+        predicate: ReviewEditableReadinessPredicate?,
+        startNanoseconds: UInt64
     ) {
-        let notificationCenter = NotificationCenter.default
-        editableReadinessObservers = [
-            notificationCenter.addObserver(
-                forName: NSApplication.didBecomeActiveNotification,
-                object: NSApp,
-                queue: .main
-            ) { [weak self] _ in
-                Task { @MainActor [weak self] in
-                    self?.probeEditableReadiness(on: panel, readinessID: readinessID)
-                }
-            },
-            notificationCenter.addObserver(
-                forName: NSWindow.didBecomeKeyNotification,
-                object: panel,
-                queue: .main
-            ) { [weak self] _ in
-                Task { @MainActor [weak self] in
-                    self?.probeEditableReadiness(on: panel, readinessID: readinessID)
-                }
-            }
-        ]
-    }
-
-    private func probeEditableReadiness(on panel: ReviewPanel, readinessID: UUID) {
-        guard editableReadinessID == readinessID,
-              isEditable,
-              let currentPanel = self.panel,
-              currentPanel === panel else {
-            return
-        }
-        materializeEditableSurface(on: panel)
-        _ = editableSurfaceIsReady(on: panel)
+        let now = readinessEnvironment.nowNanoseconds()
+        let elapsedMilliseconds = now >= startNanoseconds
+            ? (now - startNanoseconds) / 1_000_000
+            : 0
+        let predicateName = predicate?.rawValue ?? "none"
+        logger.info(
+            "\(event, privacy: .public) attempt=\(attempt, privacy: .public) result=\(result, privacy: .public) predicate=\(predicateName, privacy: .public) elapsedMs=\(elapsedMilliseconds, privacy: .public)"
+        )
     }
 
     private func cancelEditableReadiness() {
-        editableReadinessTask?.cancel()
         clearEditableReadiness()
     }
 
     private func clearEditableReadiness() {
-        for observer in editableReadinessObservers {
-            NotificationCenter.default.removeObserver(observer)
-        }
-        editableReadinessObservers.removeAll()
-        editableReadinessTask = nil
         editableReadinessID = nil
     }
 
     func dismiss() {
         cancelEditableReadiness()
-        isEditable = false
+        isDraftSurfaceActive = false
+        isConfirming = false
         onDraftChange = nil
         onConfirm = nil
+        onRetryReadiness = nil
         onDiscard = nil
 
         guard let panel else {
@@ -413,9 +453,9 @@ final class ReviewWindowController: NSObject, NSWindowDelegate, ReviewSurfacePre
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        guard isEditable else { return false }
+        guard isDraftSurfaceActive else { return false }
+        guard !isConfirming else { return false }
 
-        isEditable = false
         if let onDiscard {
             onDiscard()
         } else {
@@ -424,14 +464,14 @@ final class ReviewWindowController: NSObject, NSWindowDelegate, ReviewSurfacePre
         return true
     }
 
-    private func editableTextView(in view: NSView?) -> NSTextView? {
+    private static func editableTextView(in view: NSView?) -> NSTextView? {
         guard let view else { return nil }
         if let textView = view as? NSTextView, textView.isEditable {
             return textView
         }
 
         for subview in view.subviews.reversed() {
-            if let textView = editableTextView(in: subview) {
+            if let textView = Self.editableTextView(in: subview) {
                 return textView
             }
         }
@@ -443,24 +483,15 @@ final class ReviewWindowController: NSObject, NSWindowDelegate, ReviewSurfacePre
 protocol ReviewSurfacePresenting: AnyObject {
     func renderReadOnly(phase: ReviewReadOnlyPhase, preview: String)
 
-    func renderEditable(
-        draft: String,
-        isPossiblyIncomplete: Bool,
+    func renderDraft(
+        state: TranscriptionReviewState,
         onDraftChange: @escaping @MainActor (String) -> Void,
         onConfirm: @escaping @MainActor () -> Void,
+        onRetryReadiness: @escaping @MainActor () -> Void,
         onDiscard: @escaping @MainActor () -> Void
-    ) -> ReviewEditableTransitionResult
+    )
+
+    func requestEditableReadiness() async -> ReviewEditableTransitionResult
 
     func dismiss()
-}
-
-@MainActor
-protocol ReviewEditableReadinessPresenting: AnyObject {
-    func renderEditableWhenReady(
-        draft: String,
-        isPossiblyIncomplete: Bool,
-        onDraftChange: @escaping @MainActor (String) -> Void,
-        onConfirm: @escaping @MainActor () -> Void,
-        onDiscard: @escaping @MainActor () -> Void
-    ) async -> ReviewEditableTransitionResult
 }

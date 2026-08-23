@@ -57,7 +57,6 @@ protocol ReviewDestinationDelivering: AnyObject {
         _ frozenText: String,
         to destination: ReviewDestinationToken
     ) async -> ReviewDeliveryResult
-    func copyForManualRecovery(_ frozenText: String)
 }
 
 private func hasCompleteApplicationIdentity(_ identity: ReviewApplicationIdentity) -> Bool {
@@ -258,6 +257,7 @@ final class SystemReviewDestinationDelivery: ReviewDestinationDelivering {
     private let applicationActivator: ReviewApplicationActivating
     private let accessibility: ReviewDestinationAccessing
     private let finalTextOutput: FinalTextOutput
+    private let accessibilityTrustProvider: AccessibilityTrustProviding
     private let secureInputStateProvider: SecureInputStateProviding
     private let frontmostProcessProvider: FrontmostProcessProviding
 
@@ -266,6 +266,7 @@ final class SystemReviewDestinationDelivery: ReviewDestinationDelivering {
         applicationActivator: ReviewApplicationActivating,
         accessibility: ReviewDestinationAccessing,
         finalTextOutput: FinalTextOutput,
+        accessibilityTrustProvider: AccessibilityTrustProviding? = nil,
         secureInputStateProvider: SecureInputStateProviding? = nil,
         frontmostProcessProvider: FrontmostProcessProviding? = nil
     ) {
@@ -273,6 +274,9 @@ final class SystemReviewDestinationDelivery: ReviewDestinationDelivering {
         self.applicationActivator = applicationActivator
         self.accessibility = accessibility
         self.finalTextOutput = finalTextOutput
+        self.accessibilityTrustProvider = accessibilityTrustProvider
+            ?? (accessibility as? AccessibilityTrustProviding)
+            ?? SystemAccessibilityTrustProvider()
         let environment = finalTextOutput as? ReviewCurrentFocusEnvironmentProviding
         self.secureInputStateProvider = secureInputStateProvider
             ?? environment?.reviewSecureInputStateProvider
@@ -396,10 +400,6 @@ final class SystemReviewDestinationDelivery: ReviewDestinationDelivering {
         return reviewDeliveryResult(for: insertionResult)
     }
 
-    func copyForManualRecovery(_ frozenText: String) {
-        finalTextOutput.copyForManualRecovery(frozenText)
-    }
-
     private func destinationIsCurrent(_ destination: ReviewDestinationToken) -> Bool {
         guard destinationIsRunning(destination) else {
             return false
@@ -426,6 +426,10 @@ final class SystemReviewDestinationDelivery: ReviewDestinationDelivering {
             return .unsafeText
         }
         guard destination.capturedSecurityState == .safe else {
+            return .securityRejected
+        }
+        if case .applicationCurrentFocus = destination.binding,
+           !accessibilityTrustProvider.isAccessibilityTrusted {
             return .securityRejected
         }
         guard reviewDestinationTokenIsValid(destination) else {
@@ -513,9 +517,10 @@ final class SystemReviewDestinationDelivery: ReviewDestinationDelivering {
             return .destinationInvalid
         }
 
-        // Keep this as one composite sample. The initial security read must
-        // precede every destination read, and the final read closes the race
-        // where Secure Input turns on while the identities are being loaded.
+        // Keep this as one composite sample. The initial trust and Secure Input
+        // reads must precede every destination read, and the final reads close
+        // races where either permission changes while identities are loaded.
+        let accessibilityTrustedAtStart = accessibilityTrustProvider.isAccessibilityTrusted
         let secureInputAtStart = secureInputStateProvider.isSecureInputEnabled()
         let rawFrontmostProcessIdentifier = frontmostProcessProvider.frontmostProcessIdentifier()
         let running = applicationRuntime.identity(
@@ -523,8 +528,12 @@ final class SystemReviewDestinationDelivery: ReviewDestinationDelivering {
         )
         let frontmost = applicationRuntime.frontmostIdentity()
         let secureInputAtEnd = secureInputStateProvider.isSecureInputEnabled()
+        let accessibilityTrustedAtEnd = accessibilityTrustProvider.isAccessibilityTrusted
 
-        guard !secureInputAtStart, !secureInputAtEnd else {
+        guard accessibilityTrustedAtStart,
+              accessibilityTrustedAtEnd,
+              !secureInputAtStart,
+              !secureInputAtEnd else {
             return .securityRejected
         }
         guard rawFrontmostProcessIdentifier == destination.application.processIdentifier else {

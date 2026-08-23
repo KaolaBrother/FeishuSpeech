@@ -5,12 +5,13 @@ macOS 本地语音输入工具，使用飞书语音识别 API。
 ## 功能
 
 - 🎤 按住 **Fn 键** 0.3 秒开始流式识别
-- 👀 默认开启「输入前预览」：按住 Fn 时，同一预览面板以只读方式显示完整、不透明的流式 snapshot；相同 snapshot 不重复刷新，变长、缩短或修订都整体替换预览
+- 👀 每次 accepted Fn 交互都进入同一「输入前预览」：面板以只读方式显示完整、不透明的流式 snapshot；相同 snapshot 不重复刷新，变长、缩短或修订都整体替换预览。`reviewBeforeInsert` 的两个历史值都进入此路线
 - 🔄 可恢复流式失败不会立即报错；应用在 Fn 按住期间及松开后的 bounded drain 内持续使用新会话重试，并保留已录音频的有序回放
-- ✏️ 松开 **Fn 键** 后同一面板保持只读并显示「正在完成识别…」；只有权威 `action=2` 已结算且录音队列屏障通过后，它才转为可编辑草稿
-- ✅ 编辑器中按未修饰 **Return**（含数字键盘 **Enter**）、点击「输入」或按 **Command+Return** 才会将未裁剪的编辑结果写回开始录音时捕获的原应用（exact AX 目标优先，普通非安全 AX miss 使用该应用当前焦点）；**Shift+Return/Shift+Enter** 只插入换行，输入法组合文本（marked text）中的 Return 交给输入法；「取消」、Escape 或关闭窗口不写入
-- 🔒 审阅路由优先绑定原应用身份、精确 AX 元素与原选区；普通非安全目标无法完成严格 AX 光标捕获时，绑定开始交互时的完整原应用并在确认时使用该应用当前焦点；安全输入、密码框、身份不完整/漂移或交付不确定仍 fail closed，不重定向、不自动重试
-- ⚙️ 关闭「输入前预览」可保留原有按住期间连续输出路由；「自动插入文字」的旧语义只在该兼容模式生效
+- ✏️ 松开 **Fn 键** 后同一面板保持只读并显示「正在完成识别…」；只有权威 `action=2` 已结算且录音队列屏障通过后，它才转为可编辑草稿。捕获/录音和识别/provider 是独立异步根，均不等待面板或编辑器
+- ✅ 只有编辑器中的显式「发送」、未修饰 **Return**（含数字键盘 **Enter**）或 **Command+Return** 才会将未裁剪的编辑结果写回开始录音时捕获的原应用（exact AX 目标优先，普通非安全 AX miss 使用该应用当前焦点）；**Shift+Return/Shift+Enter** 只插入一个换行，输入法组合文本（marked text）中的 Return 交给输入法；「取消」、Escape 或关闭窗口不写入
+- 🔒 审阅路由优先绑定原应用身份、精确 AX 元素与原选区；普通非安全目标无法完成严格 AX 光标捕获时，绑定开始交互时的完整原应用并在确认时使用固定 PID 的当前焦点；安全输入、密码框、身份不完整/漂移或交付不确定仍 fail closed。确认前没有 AX setter、目标键盘事件、pasteboard 写入、直接插入或 recovery copy
+- 🛡️ 编辑器激活、key-window、编辑器 materialization、first-responder、取消/超时，以及交付/安全失败都会保留同一面板中的精确草稿和固定反馈；只提供显式重试/编辑/丢弃，不自动复制、重试、换目标或绕过审阅
+- ⚙️ 设置中的旧 `reviewBeforeInsert` / `autoInsert` 值仅为 Codable 迁移保留，不能关闭预览或恢复连续/直接输出
 - 🌐 流式识别的租户 token 与 `stream_recognize` 走绑定物理网卡的 keep-alive（bound UDP DNS + `IP_BOUND_IF`），跳过 VPN/TUN；连接失败不再回退系统 URLSession。整文件识别仍走系统 URLSession
 
 ## 系统要求
@@ -67,17 +68,15 @@ cp -R build/Build/Products/Release/FeishuSpeech.app /Applications/
 3. 继续按住并说话；「输入前预览」面板会以只读方式显示最新完整 snapshot，不会在原输入框中边听边改字
 4. 松开 **Fn 键**；面板保持同一个实例并转为「正在完成识别…」。松开只关闭采集，录音队列屏障后的尾包、在途请求、可恢复重连和 `action=2` 仍属于同一 generation
 5. 权威 `action=2` 结算后，同一面板转为多行编辑器。如果 final 为空但已有可用 snapshot，它会作为草稿并标注「可能不完整」；两者都无内容时不打开空编辑器
-6. 编辑后按未修饰 Return（含数字键盘 Enter）或点击「输入」确认；Shift+Return/Shift+Enter 插入换行，Command+Return 保持兼容确认。输入法组合文本（marked text）中的 Return 交给输入法；点击「取消」、按 Escape 或关闭窗口会放弃草稿而不写入，纯空白草稿不能确认
+6. action 2 与 recorder barrier 后，同一面板进入编辑阶段；若激活或编辑器就绪暂时失败，面板仍保留草稿并提供「重试编辑」或「取消」。编辑后点击「发送」、按未修饰 Return（含数字键盘 Enter）或按 Command+Return 确认；Shift+Return/Shift+Enter 插入一个换行，输入法组合文本（marked text）中的 Return 交给输入法；交付失败也保留精确草稿，仅用户再次显式确认才会产生新的投递，纯空白草稿不能确认
 
-默认审阅路由在开始音频/网络工作前捕获完整原应用身份，并优先捕获精确 AX 元素与原选区。普通非安全目标若严格 AX 光标捕获缺失，仍可绑定这个原应用；确认时重新激活该应用，执行两次连续复合 preflight，每次都按 Secure Input（开始）→ raw 捕获 PID → running/frontmost 完整身份 → Secure Input（结束）顺序检查，再只向捕获 PID 发送一次进程定向 Cmd+V；postflight 使用等价的复合安全检查。此 fallback 证明的是原应用，不是原控件或插入点；任何身份、激活、焦点、选区、Secure Input 或交付不确定都不会转向其他应用或自动重试。非取消失败会将冻结草稿精确复制一次，供用户手动恢复。成功粘贴前会保存剪贴板全部 item/type 数据，只在粘贴后的有界机会内且 `changeCount` 仍属于本次写入时恢复；第三方剪贴板变化永不会被覆盖。
+审阅路由在开始音频/网络工作前捕获完整原应用身份，并优先捕获精确 AX 元素与原选区。普通非安全目标若严格 AX 光标捕获缺失，仍可绑定这个原应用；确认时重新激活该应用，执行两次连续复合 preflight，每次都按 Secure Input（开始）→ raw 捕获 PID → running/frontmost 完整身份 → Secure Input（结束）顺序检查，再只向捕获 PID 发送一次进程定向 Cmd+V；postflight 使用等价的复合安全检查。此 fallback 证明的是原应用，不是原控件或插入点；任何身份、激活、焦点、选区、Secure Input 或交付不确定都不会转向其他应用、自动复制或自动重试。成功粘贴前会保存剪贴板全部 item/type 数据，只在粘贴后的有界机会内且 `changeCount` 仍属于本次写入时恢复；第三方剪贴板变化永不会被覆盖。
 
-审阅 UI 是独立的第三条异步轴：只读渲染为可取消的 fire-and-forget 主线程观察，不会让录音采集/音频 journal 等待界面，也不会让识别 consumer/重试/回放等待窗口。录音状态浮层仍然只显示状态，没有改成文字预览或编辑器。
+审阅 UI 是独立的第三条异步轴：只读渲染为可取消的 fire-and-forget 主线程观察，不会让录音采集/音频 journal 等待界面，也不会让识别 consumer/重试/回放等待窗口。录音状态浮层仍然只显示状态，没有改成文字预览或编辑器。设置不能关闭此路线；旧布尔值仅用于解码/保存迁移，运行时诊断不显示或哈希识别文本，也不记录音频、凭据、token、stream ID、目标控件或剪贴板内容。
 
-如果关闭「输入前预览」，则完整保留 issue #27 的连续输出兼容路由：支持 AX 范围的目标替换本次 hold 拥有的文字；通用键盘路由只替换已输出的 grapheme 尾部，并拒绝 LF/action controls。该模式才使用「自动插入文字」设置；无输出资格时仍然零输入、零改写、零复制。运行时诊断不显示或哈希识别文本，也不记录音频、凭据、token、stream ID、目标控件或剪贴板内容。
+> build 6 的隐私安全诊断已确认重复来自把每个新 packet index 的完整 snapshot 错当成 delta 拼接，而非 replay、重连或 transport 失败。当前契约改为完整 snapshot 替换；`CGEventPostToPid` 仍没有目标接受确认，Release owner UAT 仍是必需门槛。Issue #40 v2 的聚焦审阅套件已通过 79/79，完整串行套件通过 442（1 个预期 live-TCP skip），但不替代真实目标应用 UAT。
 
-> build 6 的隐私安全诊断已确认重复来自把每个新 packet index 的完整 snapshot 错当成 delta 拼接，而非 replay、重连或 transport 失败。当前契约改为完整 snapshot 替换；`CGEventPostToPid` 仍没有目标接受确认，Release owner UAT 仍是必需门槛。Issue #40 的聚焦审阅套件已通过 79/79，但不替代真实目标应用 UAT。
-
-Issue #39 最终候选已通过聚焦测试 40/40，完整套件为 423 个执行、1 个跳过、0 个失败，并通过 strict SwiftLint 与 Debug/Release 构建。这些自动化结果不替代真实麦克风、凭据、WindowServer、Accessibility 恢复和第三方应用 Cmd+V 接收 UAT。
+Issue #39 最终候选的 40/40 聚焦、423 个执行/1 个跳过/0 个失败，以及 Issue #40 v2 之前的候选结果均为历史证据；当前 79/79 与 442/1 skip 的自动化结果也不替代真实麦克风、凭据、WindowServer、Accessibility 恢复和第三方应用 Cmd+V 接收 UAT。
 
 ## 常见问题
 
@@ -112,20 +111,20 @@ UAT 并非停在该阶段：它已成功取得 token、发送首个 `action=1` �
 
 生产热键流程在每个飞书会话内保持严格串行，且任何时刻只有一个活动会话。麦克风采集线不等待飞书 factory：按住期间 PCM 先写入本次 hold 的 `HoldPacketJournal`，识别线再从 journal 发送。可恢复失败时，应用保留同一录音与入口，结束失败会话，退避后创建新会话，再从有序音频日志开头串行回放。回放追上实时前沿前不会把每个历史 partial 重复写入目标。这不是整段文件识别回退，也不会并发发送分片。每次 packet ACK（包括 replay ACK）会把连续失败退避重置到 250 ms；factory、packet send 和 finish 各有 30 秒 watchdog。
 
-松开 Fn 后，录音停止并跨过真实音频回调屏障；从屏障完成起，当前 generation 最多再用 60 秒排空、恢复和取得权威 final。这个预算到期、不可恢复失败或安全/生命周期失效时，会先关闭准入并使 generation 失效，再保留已可靠提交的文字；不确定交付会显示中性保留提示，没有安全输出时才显示固定流式失败。到期后的迟到结果不能再改字。重置、睡眠/唤醒、权限或 Secure Input 变化仍会立即撤销 authority。
+松开 Fn 后，录音停止并跨过真实音频回调屏障；从屏障完成起，当前 generation 最多再用 60 秒排空、恢复和取得权威 final。这个预算到期、不可恢复失败或安全/生命周期失效时，会先关闭准入并使 generation 失效；已有预览/草稿仍保留在同一面板中，交付不确定显示中性固定反馈，不自动复制、直接输出、重试或换目标。到期后的迟到结果不能再改字；只有用户显式丢弃或生命周期清理才撤销草稿 authority。重置、睡眠/唤醒、权限或 Secure Input 变化仍会立即撤销当次交付 authority，但不以瞬时失败销毁可编辑草稿。
 
 仅不可恢复的 provider/流式失败会在 Fn 按住期间立即进入终止路径。可恢复失败只写隐私安全的分类诊断，不设置错误状态、不隐藏/重显浮窗，也不发送系统通知。终止性失败会先隐藏屏幕中央的录音浮窗，再对当前会话执行一次清理；
 相同错误状态不会重复发布并重新进入清理。安装版仍出现浮窗不消失时，请确认测试的是本次修正后的 Release。
 
 ### 预览框没有实时显示文字
 
-先确认设置 → 录音中的「输入前预览」已开启。审阅路由不会在原输入框里边听边写；它只会在独立预览面板中整体替换最新完整 snapshot。它优先捕获精确 AX 目标；若目标是普通非安全控件但严格 AX 光标能力缺失，会绑定开始交互时的完整原应用并继续预览，不会把后来的当前焦点当成新目标。
+审阅路由始终开启，不再提供关闭开关。它不会在原输入框里边听边写；只会在独立预览面板中整体替换最新完整 snapshot。它优先捕获精确 AX 目标；若目标是普通非安全控件但严格 AX 光标能力缺失，会绑定开始交互时的完整原应用并继续预览，不会把后来的当前焦点当成新目标。
 
 ### 审阅启动时提示「无法确认输入位置」
 
-如果只是普通非安全的 final-only/可编辑 AX 目标无法提供严格光标、选区或 settable 属性，当前版本不应再因该能力缺失而显示此提示：审阅应使用绑定原应用的 current-focus fallback。该提示仍可能正确地表示 Secure Input、密码/安全 AX role、辅助功能信任丢失、应用身份字段不完整、PID 重用或身份漂移；这些情况保持 fail closed。fallback 只证明原应用，不证明原控件或 caret，确认后的可见 Cmd+V 接收仍需安装版 UAT。
+如果只是普通非安全的历史 final-only/可编辑 AX 目标无法提供严格光标、选区或 settable 属性，当前版本不应再因该能力缺失而显示此提示：审阅应使用绑定原应用的 current-focus fallback。该提示仍可能正确地表示 Secure Input、密码/安全 AX role、辅助功能信任丢失、应用身份字段不完整、PID 重用或身份漂移；这些情况保持 fail closed。fallback 只证明原应用，不证明原控件或 caret，确认后的可见 Cmd+V 接收仍需安装版 UAT。
 
-关闭「输入前预览」后，应用使用 issue #27 兼容路由。支持 AX 的目标会绑定原 PID 和精确 `AXUIElement`，并直接替换本次 hold 拥有的范围；无法建立 AX 范围时，固定 PID 键盘 owner 以 grapheme-counted Backspace 加 replacement suffix 替换自己已输出的尾部。任何物理输入、目标/安全状态变化或交付不确定均会永久中止该 owner，不回滚、不重发、不复制。
+旧版文档中的“关闭输入前预览”兼容路由属于历史候选行为，当前设置无法恢复它。任何物理输入、目标/安全状态变化或交付不确定都保持 fail closed；当前交互只允许用户在同一审阅面板中显式重试、编辑或丢弃。
 
 ### 启动时弹出钥匙串授权
 
@@ -157,9 +156,9 @@ FeishuSpeech/
 │   ├── ByteBoundedAudioIngress.swift # 精确字节上限的音频入口
 │   ├── FeishuStreamingSession.swift # 严格串行的飞书流
 │   ├── AccessibilityClient.swift # 原始目标捕获与安全校验
-│   ├── CursorTextSession.swift  # 暂定文本范围替换
-│   ├── CurrentFocusAppendSession.swift # 无 AX 范围时的同 PID snapshot 键盘替换
-│   ├── ReviewDestinationDelivery.swift # 原目标捕获、恢复和审阅确认交付
+│   ├── CursorTextSession.swift  # 保留的 AX 范围替换服务（Issue #40 路由不直接调用）
+│   ├── CurrentFocusAppendSession.swift # 保留的历史同 PID snapshot 键盘服务（v2 dormant）
+│   ├── ReviewDestinationDelivery.swift # 原目标捕获、安全校验和显式审阅确认交付
 │   ├── FeishuAPIService.swift   # token 与 HTTP 传输
 │   ├── LoginItemService.swift   # 开机启动
 │   ├── PermissionManager.swift  # 权限管理
@@ -171,7 +170,7 @@ FeishuSpeech/
 │   ├── PermissionView.swift     # 权限状态
 │   ├── RecordingOverlayView.swift # 原有录音状态
 │   ├── TranscriptionReviewView.swift # 流式预览和多行草稿
-│   └── SettingsView.swift       # 审阅/兼容设置
+│   └── SettingsView.swift       # 审阅说明与通用设置（旧路由键仅迁移保留）
 └── Resources/
     └── Assets.xcassets          # 图标
 ```

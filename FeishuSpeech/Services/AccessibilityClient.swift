@@ -75,7 +75,13 @@ protocol ReviewDestinationAccessing: AnyObject {
 }
 
 @MainActor
-final class MacAccessibilityClient: AccessibilityClient, ReviewDestinationAccessing {
+protocol AccessibilityTrustProviding: AnyObject {
+    var isAccessibilityTrusted: Bool { get }
+}
+
+@MainActor
+final class MacAccessibilityClient: AccessibilityClient, ReviewDestinationAccessing,
+    AccessibilityTrustProviding {
     private let runtime: AccessibilityRuntime
 
     init(runtime: AccessibilityRuntime) {
@@ -84,6 +90,10 @@ final class MacAccessibilityClient: AccessibilityClient, ReviewDestinationAccess
 
     convenience init() {
         self.init(runtime: SystemAccessibilityRuntime())
+    }
+
+    var isAccessibilityTrusted: Bool {
+        runtime.isProcessTrusted
     }
 
     func captureDestination(generation: UInt64) throws -> CursorCapabilityResult {
@@ -367,6 +377,13 @@ final class MacAccessibilityClient: AccessibilityClient, ReviewDestinationAccess
 
     private var supportedNonSecureSubroles: Set<String> {
         ["AXStandard", kAXSearchFieldSubrole as String]
+    }
+}
+
+@MainActor
+final class SystemAccessibilityTrustProvider: AccessibilityTrustProviding {
+    var isAccessibilityTrusted: Bool {
+        AXIsProcessTrusted()
     }
 }
 
