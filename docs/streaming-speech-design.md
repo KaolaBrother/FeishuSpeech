@@ -1,10 +1,11 @@
 # Streaming speech and review-first design
 
-Status: Issue #40 v5 one-route review-first plus issue #39 editable keyboard policy, application-bound
+Status: Issue #40 v6 one-route review-first plus issue #39 editable keyboard policy, application-bound
 non-secure AX-miss fallback, snapshot replacement, release-drain lifecycle, resilience watchdogs,
 and the atomic HID interference gate are implemented locally. V5 adds the nonblocking submission
 executor/control-plane, fixed opaque target lease, final security sandwich, and per-AX cancellation/
-deadline checkpoints. The former issue #27 direct/compatibility output branch remains historical/dormant
+deadline checkpoints; v6 retries lifecycle observer installation when Accessibility authorization lands
+after initialization. The former issue #27 direct/compatibility output branch remains historical/dormant
 and cannot be restored through settings. The final focused matrix passes 324 executed / 0 skipped /
 0 failures; all 105 streaming tests execute, and the full serialized target passes 537 tests with 1
 expected live-TCP environmental skip / 0 failures.
@@ -194,7 +195,8 @@ current is a no-op.
 
 ```text
 idle
-  | complete original-app capture -> exact AX or current-focus binding -> streaming(preview: "")
+  | verify/reinstall lifecycle observers -> complete original-app capture
+  | -> exact AX or current-focus binding -> streaming(preview: "")
 streaming
   | changed usable snapshot        -> streaming(replacedPreview)
   | physical Fn release            -> sealing(latestPreview)
@@ -1010,7 +1012,10 @@ proves the application rather than the original control or caret. D-40-01 v5 del
 barrier publishes `.editable` immediately, focus is advisory telemetry, and only a real
 Send/qualified Return creates the opaque confirmation intent. The pair is capped at 16,384 UTF-16
 units, read back for provenance, and reports terminal submitted-unverified after mandatory up without
-resend or ordinary confirmation re-exposure. The final v5 focused matrix passes 324 executed tests,
+resend or ordinary confirmation re-exposure. V6 additionally repairs the delayed-Accessibility-grant
+ordering defect by verifying the complete lifecycle observer set and reinstalling it immediately before
+original-target capture when initialization preceded authorization. A failed bounded retry remains
+pre-boundary and cannot emit any target signal. The final v6 focused matrix passes 324 executed tests,
 skips 0 tests, and has 0 failures; all 105 streaming tests execute, and the full serialized target
 passes 537 tests with 1 expected live-TCP environmental skip and 0 failures. The issue #27 writer remains historical
 dormant service code only; persisted settings cannot disable review-first or restore it. The repaired
@@ -1021,11 +1026,11 @@ Unsafe, oversized, empty, or stale previews still use fixed failure/preservation
 
 General-availability closure remains intentionally separate: the owner will self-test the replacement
 installed Release with real Feishu credentials and the live target-application matrix above. Until
-the v5 replacement build is installed and passes owner UAT, snapshot replacement, review WindowServer
+the v6 replacement build is installed and passes owner UAT, snapshot replacement, review WindowServer
 activation/focus, original-target Accessibility restoration, actual Unicode-pair consumption,
 action-3 acceptance, retry/replay recovery, release races, PCM/tail behavior, slow-network handling,
 same-PID caret risk, and broad cross-application compatibility remain unverified. No
 cumulative/delta/revision provider semantic is inferred beyond complete opaque replacement. Local
 `CGEventPostToPid` transaction submission cannot substitute for the visible target-acceptance
 observation required from owner UAT and never authorizes an uncertainty retry. The rejected v3
-installed candidate was stopped; no v5 replacement Release is installed yet.
+installed candidate was stopped; no v6 replacement Release is installed yet.

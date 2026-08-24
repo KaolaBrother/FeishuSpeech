@@ -779,7 +779,10 @@ class MainViewModel: ObservableObject {
         }
 
         switch result {
-        case .failure:
+        case .failure(let failure):
+            logger.error(
+                "Review target capture failed: \(String(describing: failure), privacy: .public)"
+            )
             pendingReviewCaptureApplication = nil
             Task { @MainActor [weak self] in
                 await self?.terminateAbnormally(

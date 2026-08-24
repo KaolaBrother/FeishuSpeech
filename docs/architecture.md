@@ -30,9 +30,9 @@ surface is non-authoritative and LF-preserving: it has no editor, Send, qualifie
 callback. Only action 2 plus the recorder barrier may continue the review line into authoritative
 `.editable` and `confirming`.
 
-### v5 final delivery contract
+### v6 final delivery contract
 
-The v5 repair keeps the streaming preview on a third presentation axis while the capture/recording and
+The v6 repair keeps the streaming preview on a third presentation axis while the capture/recording and
 recognition/provider lines remain independent asynchronous roots. Fn release closes capture; authoritative
 recognition action 2 plus the recorder barrier for the same generation freezes the durable editable draft in
 the same panel. There is no `editablePending`, readiness gate, or retry-editing control. The nonactivating
@@ -46,6 +46,9 @@ Before intent there is no target signal, AX setter, pasteboard/Cmd+V operation, 
 or retarget.
 
 The accepted path captures a positive PID, complete process identity, opaque target ID, and lifecycle lease.
+Because Accessibility approval can arrive after application initialization, target capture first verifies
+that all lifecycle observers are installed and retries their installation in place when the initial attempt
+predated authorization. A failed retry remains a typed pre-boundary failure; it never opens an output path.
 It never activates or retargets the target. After one real intent, `ReviewSubmissionExecutor` builds and
 reads back one immutable modifier-free Unicode pair (maximum 16,384 UTF-16 units), then executes the final
 leading/trailing security sandwich and fixed-target checks. Each AX object/message receives the same
@@ -728,7 +731,7 @@ recording overlay.
 ## Verification boundary
 
 The final issue #39 candidate passes 40/40 focused tests and a full run of 423 executed tests with
-1 skipped and 0 failures. The authoritative v5 Issue #40 focused matrix passes 324 tests with 0 skipped
+1 skipped and 0 failures. The authoritative v6 Issue #40 focused matrix passes 324 tests with 0 skipped
 and 0 failures; all 105 `StreamingMainViewModelTests` execute. The full serialized macOS target passes
 537 tests with 1 expected live-TCP environmental skip and 0 failures. It covers direct freeze-to-editable,
 real Send/qualified Return intent, blank/IME/modified/repeated/wrong-window Return rejection, zero
@@ -765,4 +768,4 @@ Unicode pair with no visible target text remains PARTIAL and must not trigger gl
 retries, rollback, retargeting, or a second automatic delivery path after uncertainty. The D-40
 fallback proves the original application only, not the original control or caret within it. The v3
 installed candidate was stopped after its Cancel-only/Return failure and residual image-paste risk;
-no v5 replacement Release is installed yet.
+no v6 replacement Release is installed yet.

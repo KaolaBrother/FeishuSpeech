@@ -1202,13 +1202,16 @@ final class SystemReviewSubmissionLifecycleObserver: ReviewSubmissionLifecycleMo
     func acquireLease(
         for target: StableApplicationIdentity
     ) -> ReviewSubmissionLifecycleLease? {
-        guard isArmed,
-              workspaceTokens.count == 3,
-              localMonitor != nil,
-              globalMonitor != nil else {
+        if !observersInstalled {
+            logger.info("Retrying review lifecycle observer installation before target capture")
+            installObservers()
+        }
+        guard observersInstalled else {
             isArmed = false
+            logger.error("Review lifecycle observers remain unavailable after retry")
             return nil
         }
+        isArmed = true
         let lease = ReviewSubmissionLifecycleLease()
         activeLeases[lease] = target
         return lease
@@ -1227,6 +1230,8 @@ final class SystemReviewSubmissionLifecycleObserver: ReviewSubmissionLifecycleMo
     }
 
     private func installObservers() {
+        removeObservers()
+
         let activationToken = workspaceCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil,
@@ -1282,6 +1287,12 @@ final class SystemReviewSubmissionLifecycleObserver: ReviewSubmissionLifecycleMo
         }
     }
 
+    private var observersInstalled: Bool {
+        workspaceTokens.count == 3
+            && localMonitor != nil
+            && globalMonitor != nil
+    }
+
     private func observeActivation() {
         guard !activeLeases.isEmpty else { return }
         CurrentFocusCombinedInterferenceEpoch.shared.advance()
@@ -1326,6 +1337,7 @@ final class SystemReviewSubmissionLifecycleObserver: ReviewSubmissionLifecycleMo
     }
 
     private func removeObservers() {
+        isArmed = false
         workspaceTokens.forEach { workspaceCenter.removeObserver($0) }
         workspaceTokens.removeAll()
         if let localMonitor {
