@@ -2,14 +2,21 @@
 
 ## [Unreleased]
 
-### Changed — Issue #40 v5 confirmation/output boundary (automated validation green; install/UAT pending)
+### Verified — Issue #40 v9 installed owner UAT (2026-08-24)
+- v9 将浏览器/Electron/Codex 类输入区可成功读取但非原生的焦点角色（例如 `AXWebArea`）归类为普通非安全 AX capability miss，复用已存在的冻结原应用 fallback；录音/识别仍是独立异步根，显式确认前保持零输出，Secure Input、信任、身份/前台、取消和 deadline 仍 fail closed。
+- owner UAT 已通过所演练的 **Fn → durable editable preview → panel-local Send/qualified Return 显式确认** 流程；owner 于 2026-08-24 报告安装版现已正常且未观察到问题。
+- focused security/delivery matrix 100/100；full macOS target 539 passed、1 个预期 live-TCP skip、0 failed；strict SwiftLint 0 violations。
+- Apple Development-signed `/Applications/FeishuSpeech.app` 为唯一安装副本；安装核验 PID `21271`、CDHash `5bbecdf0c1f33a1cb2e477021c98a75ee32392bd`、executable SHA-256 `c2e9f2797c86789e69394e68dbd8c308767f5bd5cbb971d839e2213cd681d0ea`。
+- 本次关闭仅覆盖上述演练流程；不宣称广泛跨应用兼容性，也不宣称操作系统已确认目标消费 posted Unicode pair。
+
+### Changed — Issue #40 v5 confirmation/output boundary (historical validation snapshot; superseded by v9 installed UAT)
 - action 2 与 recorder barrier 现在在同一保留面板直接冻结并发布 `.editable` 草稿；录音与识别仍是独立异步根。没有 `editablePending`、readiness retry 或「重试编辑」authority。
 - 流式预览、Fn release/sealing、action 2、recorder barrier、编辑和取消在显式确认前均不得产生目标 AX setter、键盘/CGEvent、pasteboard、copy/paste、delivery、retry、activation 或 retarget。
 - 非激活预览只接受真实 panel-local Send 或 qualified Return/Enter；blank、IME marked text、modified、repeat、wrong-window 和 non-descendant responder 的 Return 都拒绝。焦点结果只是 presentation telemetry，不能授权交付。
 - 确认后固定 opaque target/lease 只允许一次尝试：先构造并读回一个完整 16,384 UTF-16 上限内的 Unicode pair，再执行 leading/trailing security sandwich；每个 AX message 受 per-AX cancellation/deadline 保护。无剪贴板、Cmd+V、目标激活或 ambient retarget。
 - 通过边界时只发送一次 Unicode down，并强制发送一次 up；down 后终态只能是 `submitted-unverified`，不声称目标消费、不 resend、不重新暴露确认 authority。pre-boundary 失败才保留可编辑草稿；drain 到期的 safe preview 仍是无 Send/Return 的非权威 read-only recovery。
 - v5 final validation：focused 324/324（0 skip、0 failure），full 537/537 加 1 个预期 live-TCP skip；Debug/Release build、strict SwiftLint 与 reviews PASS。
-- v3 安装候选已拒绝并停止；replacement Release 安装、唯一副本审计与 owner UAT 尚未完成，Issue #40 仍 open。
+- [Historical v5 snapshot] v3 安装候选已拒绝并停止；当时 replacement Release 安装、唯一副本审计与 owner UAT 尚未完成，Issue #40 仍 open。
 
 ### Changed — Issue #40 v3 installed-UAT correction (validation remains open)
 - [历史候选，已由 v4 supersede] v3 的 readiness gating 说明只记录当时的失败与修正背景；当前 `.editable` 不再等待 focus readiness，Send/Return 不由 readiness 隐藏或禁用。
@@ -122,16 +129,16 @@
 ### Verification
 
 - issue #27 的最终候选 Release 1.0 build 8 已通过 316/316 完整测试、strict SwiftLint、Debug 与 Release 构建。发布 drain、权威 final、重复 `10024` 恢复、watchdog、deadline race、迟到回调和 fixed-target 安全边界均有自动化覆盖；这些本地门槛不证明真实凭据服务或目标控件实际接受 PID-targeted 事件。
-- Issue #40 v5 final focused serialized matrix passed 324 tests with 0 skipped and 0 failures; the full macOS target passed 537 tests with 1 expected live-TCP environmental skip and 0 failures. Coverage includes direct freeze-to-editable, real Send/qualified Return intent, rejection of blank/IME/modified/repeated/wrong-window Return, zero pre-confirm side effects, no-pasteboard/no-Cmd+V output, opaque fixed-target leases, 16,384 UTF-16 limits, pair readback, final security sandwich, per-AX cancellation/deadline, mandatory up, terminal submitted-unverified semantics, and independent async roots. This automated result does not replace replacement Release installation or owner UAT.
-- Issue #40 v9 focused security/delivery validation passed 100/100; the full macOS target passed 539 tests with 1 expected live-TCP environmental skip and 0 failures; strict SwiftLint reported 0 violations. The Apple Development-signed v9 Release is installed as the sole application copy. Owner Fn → durable editable preview → explicit Send/Return UAT is still required before closure.
+- [Historical v5 automation] Issue #40 v5 final focused serialized matrix passed 324 tests with 0 skipped and 0 failures; the full macOS target passed 537 tests with 1 expected live-TCP environmental skip and 0 failures. Coverage includes direct freeze-to-editable, real Send/qualified Return intent, rejection of blank/IME/modified/repeated/wrong-window Return, zero pre-confirm side effects, no-pasteboard/no-Cmd+V output, opaque fixed-target leases, 16,384 UTF-16 limits, pair readback, final security sandwich, per-AX cancellation/deadline, mandatory up, terminal submitted-unverified semantics, and independent async roots. This v5 automation snapshot predates the v9 installed UAT and does not establish broad compatibility or OS-level target consumption.
+- Issue #40 v9 focused security/delivery validation passed 100/100; the full macOS target passed 539 tests with 1 expected live-TCP environmental skip and 0 failures; strict SwiftLint reported 0 violations. The Apple Development-signed v9 Release is installed as the sole application copy. Owner UAT passed on 2026-08-24 for the exercised Fn → durable editable preview → explicit Send/qualified Return flow; no broad cross-application compatibility or OS target-consumption acknowledgement is claimed.
 
 ### Verification pending
 
-- 既有安装版 UAT 已证明 held-time snapshot replacement 基本符合预期，并暴露 build 7 在 Fn-up 后抑制有效 tail/final 的截断；build 8 已在本地修复为 release drain，但尚未经过本轮真实凭据与目标应用 UAT，不声明端到端通过。
-- `CGEventPostToPid` 没有目标控件接受确认；v5 的 `submittedUnverified` 仅记录一次 pair 已跨过本地 submission boundary，不能证明目标完成了可见替换。仍须安装版 owner UAT，若无可见输出应报告 PARTIAL，不能通过全局 HID、重复事件、回滚或剪贴板回退扩展行为。
-- 真实飞书凭据下的后续 action、终止请求空音频编码、首次 token 刷新同序列重试、PCM/tail 兼容性和慢网行为仍需安装版 Release UAT。issue #26 的本地拼接策略已由 build 6 证据否定；issue #27 将响应按可相同、变长、缩短或修订的完整不透明 snapshot 替换，仍不推断稳定词或做文本归一化。
+- [历史 v5 记录] 既有安装版 UAT 已证明 held-time snapshot replacement 基本符合预期，并暴露 build 7 在 Fn-up 后抑制有效 tail/final 的截断；build 8 已在本地修复为 release drain，但尚未经过当时的真实凭据与目标应用 UAT，不声明当时的端到端通过。
+- `CGEventPostToPid` 没有目标控件接受确认；v5 的 `submittedUnverified` 仅记录一次 pair 已跨过本地 submission boundary，不能证明目标完成了可见替换。v9 的 owner UAT 只关闭了所演练的 Fn → durable editable preview → explicit confirmation 流程；仍不宣称 OS target-consumption acknowledgement，若无可见输出应报告 PARTIAL，不能通过全局 HID、重复事件、回滚或剪贴板回退扩展行为。
+- 真实飞书凭据下的额外 action、终止请求空音频编码、首次 token 刷新同序列重试、PCM/tail 兼容性和慢网行为仍属于额外 Release UAT 范围。issue #26 的本地拼接策略已由 build 6 证据否定；issue #27 将响应按可相同、变长、缩短或修订的完整不透明 snapshot 替换，仍不推断稳定词或做文本归一化。
 - TextEdit/原生控件、浏览器、Electron、终端和富文本编辑器的 Accessibility 范围、焦点干扰、Unicode 与 undo 行为仍需跨应用实机 UAT；当前不声明广泛兼容性。
-- Issue #40 仍需 replacement Release 安装和 owner UAT：一个此前因普通非安全 strict-AX miss 显示「无法确认输入位置」的目标、一个 exact-AX 目标、Secure Input/密码框拒绝、确认期间跨应用切换、多行草稿、非 BMP/16,384 边界，以及强制 post/postflight 不确定后的 terminal submitted-unverified 语义。fallback 只证明原应用，不证明原控件或 caret 已消费 Unicode pair；当前没有安装版 v5 通过声明。
+- Issue #40 的上述演练流程已由 2026-08-24 owner UAT 通过；额外的 exact-AX 目标、Secure Input/密码框拒绝、确认期间跨应用切换、多行草稿、非 BMP/16,384 边界，以及强制 post/postflight 不确定后的 terminal submitted-unverified 语义仍是未覆盖场景。fallback 只证明原应用，不证明原控件或 caret 已消费 Unicode pair；不作广泛跨应用兼容性或 OS target-consumption 声明。
 
 ## [0.3.0] - 2025
 

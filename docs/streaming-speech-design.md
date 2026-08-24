@@ -16,8 +16,9 @@ and cannot be restored through settings. The final focused matrix passes 324 exe
 0 failures; all 105 streaming tests execute, and the v9 full serialized target passes 539 tests with 1
 expected live-TCP environmental skip / 0 failures.
 The authorized Apple Development-signed v6 Release failed original-target capture and was stopped.
-The signed v9 replacement is installed as the sole application copy; owner UAT remains pending and no
-target-consumption or general compatibility claim is made.
+The signed v9 replacement is installed as the sole application copy. Owner UAT passed on 2026-08-24 for
+the exercised Fn → durable editable preview → explicit Send/qualified Return flow, with no observed
+problem; no broad cross-application compatibility or OS target-consumption acknowledgement is claimed.
 
 ## 1. Outcome
 
@@ -351,7 +352,8 @@ business rejection at that stage is therefore pre-stream authentication failure 
 fixed public message `认证失败，请检查应用凭据`; no associated backend detail is exposed. The latest
 installed-Release UAT passed that boundary and accepted two packets before HTTP 200 / business code
 `10024` failed the third. Current official sources do not define `10024`; no pacing, quota, tenant,
-or lifecycle meaning is asserted. The new abort/retry behavior still requires owner UAT.
+or lifecycle meaning is asserted. Additional abort/retry behavior remains outside the exercised v9
+review-flow UAT.
 
 Events exposed to the coordinator are typed:
 
@@ -577,9 +579,9 @@ missing recognition.
 
 `CGEventPostToPid` does not report whether the destination control accepted, transformed, ignored,
 or displayed the replacement. A `.posted` transaction therefore closes only the local submission
-contract. Installed owner UAT is still required; no visible output after submission is PARTIAL and
-does not authorize retry, global HID posting, rollback, or clipboard fallback after
-uncertainty.
+contract. The scoped v9 owner UAT passed on 2026-08-24 for the exercised review flow; broader target
+acceptance remains unverified. No visible output after submission is PARTIAL and does not authorize
+retry, global HID posting, rollback, or clipboard fallback after uncertainty.
 
 ## 10. Review-first surface and original-target delivery
 
@@ -806,17 +808,19 @@ No cursor destination survives the process lifetime or is persisted to UserDefau
      16,384 UTF-16/provenance/epoch gates are implemented locally. Drain expiry preserves an eligible
      safe exact-LF preview in the same panel as non-authoritative `ReviewReadOnlyPhase.recovery`
      without Send/Return, editing, output, retry, or retarget; authoritative action 2 plus the
-     recorder barrier remain required for `.editable`. Independent final review and replacement
-     installation remain outstanding.
+     recorder barrier remain required for `.editable`. The v9 replacement installation and scoped
+     owner UAT are complete; broader target-application coverage remains separate.
 7. **UI/settings docking — complete**
    - `reviewBeforeInsert` and `autoInsert` safely decode legacy payloads but are runtime-inert. The
      separate review panel exposes the intended transcript while the unchanged overlay remains
      status-only; `playSound` is unchanged.
-8. **Live installed-Release gate — pending owner UAT**
-   - Credential-bearing abort/retry/replay, real same-panel WindowServer/focus behavior, original-
-     target AX restoration, process-targeted Unicode-pair consumption, and exact versus
-     application-bound current-focus review delivery must be tested in the installed Release before
-     general availability. The v7 replacement is installed, but owner UAT remains open.
+8. **Live installed-Release gate — exercised flow passed; broader coverage remains**
+   - Owner UAT passed on 2026-08-24 for the installed v9 Fn → durable editable preview → explicit
+     panel-local Send/qualified Return flow. Additional credential-bearing abort/retry/replay, real
+     same-panel WindowServer/focus behavior, original-target AX restoration, process-targeted
+     Unicode-pair consumption, and exact versus application-bound current-focus review delivery remain
+     outside that exercised scope; no broad compatibility or OS target-consumption acknowledgement is
+     claimed.
 
 Test/production custody separation was preserved for the automated implementation cycle.
 
@@ -1032,13 +1036,13 @@ non-authoritative `ReviewReadOnlyPhase.recovery` in the same panel; it has no Se
 authority, and authoritative action 2 plus the recorder barrier remain required for `.editable`.
 Unsafe, oversized, empty, or stale previews still use fixed failure/preservation behavior.
 
-General-availability closure remains intentionally separate: the owner will self-test the replacement
-installed Release with real Feishu credentials and the live target-application matrix above. Until
-the installed v7 replacement passes owner UAT, snapshot replacement, review WindowServer
-activation/focus, original-target Accessibility restoration, actual Unicode-pair consumption,
+The v9 installed Release owner UAT passed on 2026-08-24 for the exercised Fn → durable editable preview
+→ explicit panel-local Send/qualified Return flow, and the owner reported no observed problem. Remaining
+unverified scope includes snapshot replacement under additional live conditions, review WindowServer
+activation/focus, original-target Accessibility restoration, actual OS-level Unicode-pair consumption,
 action-3 acceptance, retry/replay recovery, release races, PCM/tail behavior, slow-network handling,
-same-PID caret risk, and broad cross-application compatibility remain unverified. No
-cumulative/delta/revision provider semantic is inferred beyond complete opaque replacement. Local
-`CGEventPostToPid` transaction submission cannot substitute for the visible target-acceptance
-observation required from owner UAT and never authorizes an uncertainty retry. The rejected v3
-installed candidate was stopped; the authorized v6 replacement was also rejected after capture failure.
+same-PID caret risk, and broad cross-application compatibility. No cumulative/delta/revision provider
+semantic is inferred beyond complete opaque replacement. Local `CGEventPostToPid` transaction submission
+cannot substitute for an OS target-acceptance acknowledgement and never authorizes an uncertainty retry.
+The rejected v3 installed candidate was stopped; the authorized v6 replacement was also rejected after
+capture failure.

@@ -61,8 +61,9 @@ never claims consumption, retries, resends, or re-exposes ordinary confirmation.
 
 V8 leaves this behavior unchanged. It persists only value-only capture step/result enums for original-app
 identity, frontmost PID, Secure Input, Accessibility trust, and AX operations at info level. The observer
-receives no AX object, transcript, draft, target text, or selection value; it exists so installed owner UAT
-can identify one exact fail-closed capture branch instead of the aggregate `securityRejected` label.
+receives no AX object, transcript, draft, target text, or selection value; it was introduced so the v8
+installed owner UAT could identify one exact fail-closed capture branch instead of the aggregate
+`securityRejected` label.
 
 V9 corrects the installed failure exposed by that diagnosis: a successfully read focused role outside the
 native `AXTextField` / `AXTextArea` pair (notably browser/Electron `AXWebArea`) is an ordinary non-secure AX
@@ -182,8 +183,8 @@ official Feishu/Lark documentation and SDK do not define it.
 
 These packet sizes, tail padding, lowercase stream IDs, same-sequence token retry, strict
 serialization, and exact-once terminal behavior are FeishuSpeech application invariants. Public
-Feishu documentation does not guarantee their runtime acceptance or idempotency; credential-bearing
-Release UAT remains pending.
+Feishu documentation does not guarantee their runtime acceptance or idempotency; additional
+credential-bearing transport/provider scenarios remain outside the exercised v9 review-flow UAT.
 
 ### Review-first third axis and same-panel authority
 
@@ -751,9 +752,11 @@ and 0 failures; all 105 `StreamingMainViewModelTests` execute. The full serializ
 real Send/qualified Return intent, blank/IME/modified/repeated/wrong-window Return rejection, zero
 pre-confirm side effects, no-pasteboard/no-Cmd+V output, fixed opaque target leases, 16,384 UTF-16 limits,
 pair readback, final security sandwich, per-AX cancellation/deadline, mandatory up, terminal
-submitted-unverified semantics, and retained read-only recovery. This automated evidence does not include
-replacement Release installation, target consumption, or owner UAT; final independent review/build gates
-are separate.
+submitted-unverified semantics, and retained read-only recovery. This automated evidence does not by
+itself prove target consumption or broad compatibility. The v9 focused security/delivery matrix passes
+100/100; the full target passes 539 with one expected live-TCP skip and 0 failures; strict SwiftLint is
+clean; and the signed v9 Release is installed as the sole copy. Owner UAT passed on 2026-08-24 for the
+exercised Fn → durable editable preview → explicit Send/qualified Return flow.
 
 Issue #26's 272/272 lifecycle-free evidence predates the issue #27 correction and must not be used
 as proof of snapshot reconciliation. Issue #27 requires focused and full-suite evidence for
@@ -785,4 +788,6 @@ installed candidate was stopped after its Cancel-only/Return failure and residua
 The authorized v6 candidate also failed original-target capture and was stopped. Installed v7 owner UAT
 still failed twice as `securityRejected`; its debug-level step observer was not persisted. V8 made that
 diagnosis observable, and v9 corrected the unsupported-role classification. The signed v9 Release is
-installed as the sole application copy; owner UAT remains required.
+installed as the sole application copy. Its owner UAT passed on 2026-08-24 for the exercised Fn → durable
+editable preview → explicit Send/qualified Return flow; no broad cross-application compatibility or OS
+target-consumption acknowledgement is claimed.

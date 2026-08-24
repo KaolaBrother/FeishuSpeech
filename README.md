@@ -2,7 +2,7 @@
 
 macOS 本地语音输入工具，使用飞书语音识别 API。
 
-当前 Issue #40 v5 已通过本地自动化门槛，但 replacement Release 尚未安装；应用保持停止状态，真实目标消费与 owner UAT 仍待完成。
+截至 2026-08-24，Issue #40 v9 的安装版 owner UAT 已通过，覆盖按住 Fn → durable editable preview → panel-local Send/qualified Return 显式确认流程，且未观察到问题；这不代表广泛跨应用兼容性或操作系统确认目标已消费 Unicode pair。
 
 ## 功能
 
@@ -77,9 +77,9 @@ cp -R build/Build/Products/Release/FeishuSpeech.app /Applications/
 
 审阅 UI 是独立的第三条异步轴：只读渲染为可取消的 fire-and-forget 主线程观察，不会让录音采集/音频 journal 等待界面，也不会让识别 consumer/重试/回放等待窗口。录音状态浮层仍然只显示状态，没有改成文字预览或编辑器。设置不能关闭此路线；旧布尔值仅用于解码/保存迁移，运行时诊断不显示或哈希识别文本，也不记录音频、凭据、token、stream ID、目标控件或剪贴板内容。
 
-> build 6 的隐私安全诊断已确认重复来自把每个新 packet index 的完整 snapshot 错当成 delta 拼接，而非 replay、重连或 transport 失败。当前契约改为完整 snapshot 替换。此前安装候选的图片残留进一步定位到旧 review pasteboard/Cmd+V 恢复竞态；目标没有消费确认，延迟事件可能在恢复图片后才读取剪贴板；受影响候选已停止，剪贴板没有被本次诊断清理或改写。v5 已删除这条交付路径。最终 focused matrix 为 324 passed / 0 skipped / 0 failed，`StreamingMainViewModelTests` 为 105/105，完整 macOS 测试为 537 passed、另有 1 个预期 live-TCP 环境 skip；这些都不替代真实目标应用 UAT。v3 安装候选仍被拒绝并停止，replacement Release 尚未安装。
+> [历史 v5 验证记录，不代表当前 v9 状态] build 6 的隐私安全诊断已确认重复来自把每个新 packet index 的完整 snapshot 错当成 delta 拼接，而非 replay、重连或 transport 失败。当前契约改为完整 snapshot 替换。此前安装候选的图片残留进一步定位到旧 review pasteboard/Cmd+V 恢复竞态；目标没有消费确认，延迟事件可能在恢复图片后才读取剪贴板；受影响候选已停止，剪贴板没有被本次诊断清理或改写。v5 已删除这条交付路径。最终 focused matrix 为 324 passed / 0 skipped / 0 failed，`StreamingMainViewModelTests` 为 105/105，完整 macOS 测试为 537 passed、另有 1 个预期 live-TCP 环境 skip；当时的自动化结果不替代安装版 UAT。v3 安装候选仍被拒绝并停止，replacement Release 尚未安装。
 
-Issue #39 最终候选的 40/40 聚焦、423 个执行/1 个跳过/0 个失败，以及 Issue #40 v2/v3/v4 候选结果均为历史证据；当前 v5 的 324 focused / 0 skipped / 0 failed、`StreamingMainViewModelTests` 105/105、完整 537 passed + 1 个预期 live-TCP skip 也不替代真实麦克风、凭据、WindowServer、Accessibility 和第三方应用 Unicode pair 接收 UAT。
+Issue #39 最终候选的 40/40 聚焦、423 个执行/1 个跳过/0 个失败，以及 Issue #40 v2/v3/v4 候选结果均为历史证据；历史 v5 自动化记录中的 324 focused / 0 skipped / 0 failed、`StreamingMainViewModelTests` 105/105、完整 537 passed + 1 个预期 live-TCP skip 不替代当时的真实安装版 UAT。2026-08-24 的 v9 owner UAT 只覆盖本页开头所述演练流程，不扩展为广泛跨应用或 OS target-consumption 结论。
 
 ## 常见问题
 
@@ -101,8 +101,7 @@ Issue #39 最终候选的 40/40 聚焦、423 个执行/1 个跳过/0 个失败�
 若显示固定提示“认证失败，请检查应用凭据”，说明租户 token 获取阶段已被飞书拒绝；
 应用不会把飞书返回的凭据、正文或后端错误详情显示到界面或日志。历史 Release UAT 曾成功
 取得 token、发送首个 `action=1` 请求并收到 HTTP 200，随后被旧版客户端的过严响应契约拒绝；
-这不是当前 v5 安装版成功声明。当前客户端已移除该拒绝条件，但 replacement Release 仍须由
-安装版实机确认真正的识别文本、后续 action/final 和目标应用输出。
+这不是旧 v5 安装版的成功声明。当前 v9 已于 2026-08-24 通过 owner UAT 的 Fn → durable editable preview → panel-local Send/qualified Return 流程；该 UAT 不宣称广泛跨应用兼容性、操作系统已确认目标消费 Unicode pair，或其他未演练的后续 action/final 场景。
 
 应用会在连续失败 3 次后自动重置服务状态。
 
@@ -125,7 +124,7 @@ Issue #39 最终候选的 40/40 聚焦、423 个执行/1 个跳过/0 个失败�
 
 ### 审阅启动时提示「无法确认输入位置」
 
-如果只是普通非安全的历史 final-only/可编辑 AX 目标无法提供严格光标、选区或 settable 属性，当前版本不应再因该能力缺失而显示此提示：审阅应使用绑定原应用的固定 PID fallback。该提示仍可能正确地表示 Secure Input、密码/安全 AX role、辅助功能信任丢失、应用身份字段不完整、PID 重用或身份漂移；这些情况保持 fail closed。fallback 只证明原应用，不证明原控件或 caret；v5 使用固定 PID 的单次 Unicode 文本对，并不声称目标已消费文字，安装版 UAT 仍是确认可见结果的唯一证据。
+如果只是普通非安全的历史 final-only/可编辑 AX 目标无法提供严格光标、选区或 settable 属性，当前版本不应再因该能力缺失而显示此提示：审阅应使用绑定原应用的固定 PID fallback。该提示仍可能正确地表示 Secure Input、密码/安全 AX role、辅助功能信任丢失、应用身份字段不完整、PID 重用或身份漂移；这些情况保持 fail closed。fallback 只证明原应用，不证明原控件或 caret；v5 使用固定 PID 的单次 Unicode 文本对，并不声称目标已消费文字。2026-08-24 的 v9 owner UAT 已通过本页开头所述演练流程，但不扩展为广泛兼容性或 OS target-consumption acknowledgement。
 
 旧版文档中的“关闭输入前预览”兼容路由属于历史候选行为，当前设置无法恢复它。任何物理输入、目标/安全状态变化或交付不确定都保持 fail closed；当前交互只允许用户在同一审阅面板中编辑、再次显式确认或丢弃，绝不自动重试、复制、粘贴或换目标。
 
