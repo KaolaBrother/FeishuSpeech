@@ -8,16 +8,108 @@ private let logger = Logger(
     category: "ReviewWindowController"
 )
 
+struct ReviewConfirmationIntent: Equatable, Sendable {
+    private enum GestureMarker: Equatable, Sendable {
+        case realPreviewGesture
+    }
+
+    fileprivate enum Source: Equatable, Sendable {
+        case sendButton
+        case qualifiedReturn
+    }
+
+    fileprivate let source: Source
+    private let gestureMarker: GestureMarker
+
+    fileprivate init(source: Source) {
+        self.source = source
+        self.gestureMarker = .realPreviewGesture
+    }
+
+    fileprivate static func sendButton() -> ReviewConfirmationIntent {
+        ReviewConfirmationIntent(source: .sendButton)
+    }
+
+    fileprivate static func qualifiedPreviewReturn() -> ReviewConfirmationIntent {
+        ReviewConfirmationIntent(source: .qualifiedReturn)
+    }
+}
+
+@MainActor
+private enum ReviewPreviewReturnArbiter {
+    static func consumesWhitespaceOnlyReturn(
+        _ event: NSEvent,
+        panel: ReviewPanel,
+        editor: NSTextView?,
+        panelIsKey: @MainActor (ReviewPanel) -> Bool
+    ) -> Bool {
+        guard panelIsKey(panel),
+              event.windowNumber == panel.windowNumber,
+              event.keyCode == 36 || event.keyCode == 76,
+              !event.isARepeat,
+              event.modifierFlags.isDisjoint(
+                  with: .deviceIndependentFlagsMask.subtracting(.numericPad)
+              ),
+              let responder = panel.firstResponder as? NSView,
+              let contentView = panel.contentView,
+              responder === contentView || responder.isDescendant(of: contentView),
+              let editor,
+              !editor.hasMarkedText() else {
+            return false
+        }
+        return editor.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    static func qualifies(
+        _ event: NSEvent,
+        panel: ReviewPanel,
+        editor: NSTextView?,
+        panelIsKey: @MainActor (ReviewPanel) -> Bool
+    ) -> Bool {
+        guard panelIsKey(panel),
+              event.windowNumber == panel.windowNumber,
+              event.keyCode == 36 || event.keyCode == 76,
+              !event.isARepeat,
+              event.modifierFlags.isDisjoint(
+                  with: .deviceIndependentFlagsMask.subtracting(.numericPad)
+              ),
+              let responder = panel.firstResponder as? NSView,
+              let contentView = panel.contentView,
+              responder === contentView || responder.isDescendant(of: contentView) else {
+            return false
+        }
+
+        if let editor {
+            guard !editor.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return false
+            }
+            if responder === editor, editor.hasMarkedText() {
+                return false
+            }
+        }
+        return true
+    }
+}
+
 @MainActor
 final class ReviewPanel: NSPanel {
     var allowsKeyInteraction = false
+    var onPreviewReturn: (@MainActor (NSEvent) -> Bool)?
 
     override var canBecomeKey: Bool {
         allowsKeyInteraction
     }
 
     override var canBecomeMain: Bool {
-        allowsKeyInteraction
+        false
+    }
+
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .keyDown,
+           onPreviewReturn?(event) == true {
+            return
+        }
+        super.sendEvent(event)
     }
 }
 
@@ -26,6 +118,8 @@ final class ReviewWindowController: NSObject, NSWindowDelegate, ReviewSurfacePre
     struct ReadinessEnvironment {
         let requestActivation: @MainActor () -> Bool
         let applicationIsActive: @MainActor () -> Bool
+        let frontmostApplication: @MainActor () -> StableApplicationIdentity?
+        let feishuSpeechIsActive: @MainActor () -> Bool
         let panelIsKey: @MainActor (ReviewPanel) -> Bool
         let editorLookup: @MainActor (NSView?) -> NSTextView?
         let editorAttached: @MainActor (NSTextView, ReviewPanel) -> Bool
@@ -34,13 +128,60 @@ final class ReviewWindowController: NSObject, NSWindowDelegate, ReviewSurfacePre
         let nowNanoseconds: @Sendable () -> UInt64
         let sleep: @Sendable (UInt64) async throws -> Void
 
+        init(
+            requestActivation: @escaping @MainActor () -> Bool,
+            applicationIsActive: @escaping @MainActor () -> Bool,
+            frontmostApplication: @escaping @MainActor () -> StableApplicationIdentity? = { nil },
+            feishuSpeechIsActive: @escaping @MainActor () -> Bool = { false },
+            panelIsKey: @escaping @MainActor (ReviewPanel) -> Bool,
+            editorLookup: @escaping @MainActor (NSView?) -> NSTextView?,
+            editorAttached: @escaping @MainActor (NSTextView, ReviewPanel) -> Bool,
+            makeFirstResponder: @escaping @MainActor (ReviewPanel, NSTextView) -> Bool,
+            firstResponderIsEditor: @escaping @MainActor (ReviewPanel, NSTextView) -> Bool,
+            nowNanoseconds: @escaping @Sendable () -> UInt64,
+            sleep: @escaping @Sendable (UInt64) async throws -> Void
+        ) {
+            self.requestActivation = requestActivation
+            self.applicationIsActive = applicationIsActive
+            self.frontmostApplication = frontmostApplication
+            self.feishuSpeechIsActive = feishuSpeechIsActive
+            self.panelIsKey = panelIsKey
+            self.editorLookup = editorLookup
+            self.editorAttached = editorAttached
+            self.makeFirstResponder = makeFirstResponder
+            self.firstResponderIsEditor = firstResponderIsEditor
+            self.nowNanoseconds = nowNanoseconds
+            self.sleep = sleep
+        }
+
         static var appKit: ReadinessEnvironment {
             ReadinessEnvironment(
-                requestActivation: {
-                    NSRunningApplication.current.activate(options: [])
-                },
+                // Retained only as a compatibility seam for injected tests.
+                // v5 presentation focus never activates FeishuSpeech.
+                requestActivation: { false },
                 applicationIsActive: {
-                    NSApp.isActive
+                    guard let frontmostApplication = NSWorkspace.shared.frontmostApplication else {
+                        return false
+                    }
+                    return frontmostApplication.processIdentifier
+                        != ProcessInfo.processInfo.processIdentifier
+                },
+                frontmostApplication: {
+                    guard let application = NSWorkspace.shared.frontmostApplication,
+                          let bundleIdentifier = application.bundleIdentifier,
+                          let executableURL = application.executableURL,
+                          let launchDate = application.launchDate else {
+                        return nil
+                    }
+                    return StableApplicationIdentity(
+                        processIdentifier: application.processIdentifier,
+                        bundleIdentifier: bundleIdentifier,
+                        executableURL: executableURL,
+                        launchDate: launchDate
+                    )
+                },
+                feishuSpeechIsActive: {
+                    NSRunningApplication.current.isActive
                 },
                 panelIsKey: { panel in
                     panel.isKeyWindow
@@ -83,6 +224,7 @@ final class ReviewWindowController: NSObject, NSWindowDelegate, ReviewSurfacePre
     private var onDiscard: (@MainActor () -> Void)?
     private var isDraftSurfaceActive = false
     private var isConfirming = false
+    private var renderedState: TranscriptionReviewState = .idle
     private var presentationFocusID: UUID?
     private var presentationFocusAttemptOrdinal: UInt64 = 0
     private var currentPresentationFocusRequest: ReviewPresentationFocusRequest?
@@ -98,6 +240,9 @@ final class ReviewWindowController: NSObject, NSWindowDelegate, ReviewSurfacePre
         onDraftChange = nil
         onConfirm = nil
         onDiscard = nil
+        renderedState = phase == .streaming
+            ? .streaming(preview: preview)
+            : .sealing(preview: preview)
 
         let panel = ensurePanel()
         let rootView: TranscriptionReviewView
@@ -120,6 +265,7 @@ final class ReviewWindowController: NSObject, NSWindowDelegate, ReviewSurfacePre
         install(rootView, on: panel)
 
         panel.allowsKeyInteraction = false
+        panel.onPreviewReturn = nil
         panel.ignoresMouseEvents = true
         setClosable(false, on: panel)
         panel.orderFrontRegardless()
@@ -133,7 +279,7 @@ final class ReviewWindowController: NSObject, NSWindowDelegate, ReviewSurfacePre
 
         let panel = ReviewPanel(
             contentRect: NSRect(origin: .zero, size: initialWindowSize),
-            styleMask: [.titled, .closable, .resizable],
+            styleMask: [.titled, .closable, .resizable, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
@@ -147,6 +293,7 @@ final class ReviewWindowController: NSObject, NSWindowDelegate, ReviewSurfacePre
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.hidesOnDeactivate = false
         panel.isFloatingPanel = true
+        panel.becomesKeyOnlyIfNeeded = true
         panel.title = "输入前预览"
         panel.titleVisibility = .visible
         panel.titlebarAppearsTransparent = false
@@ -157,6 +304,7 @@ final class ReviewWindowController: NSObject, NSWindowDelegate, ReviewSurfacePre
         panel.setFrame(centeredFrame(for: initialWindowSize), display: false)
 
         self.panel = panel
+        panel.onPreviewReturn = nil
         install(TranscriptionReviewView(state: .idle), on: panel)
         setClosable(false, on: panel)
         return panel
@@ -211,7 +359,7 @@ final class ReviewWindowController: NSObject, NSWindowDelegate, ReviewSurfacePre
         onDiscard: @escaping @MainActor () -> Void
     ) {
         switch state {
-        case .editable, .confirming:
+        case .editable, .confirming, .preparingSubmission, .submittedUnverifiedTerminal:
             break
         case .idle, .streaming, .sealing:
             logger.error("invalid review draft state supplied to presenter")
@@ -224,6 +372,7 @@ final class ReviewWindowController: NSObject, NSWindowDelegate, ReviewSurfacePre
         } else {
             isConfirming = false
         }
+        renderedState = state
         let panel = ensurePanel()
         self.onDraftChange = onDraftChange
         self.onConfirm = onConfirm
@@ -232,7 +381,9 @@ final class ReviewWindowController: NSObject, NSWindowDelegate, ReviewSurfacePre
             TranscriptionReviewView(
                 state: state,
                 onDraftChange: onDraftChange,
-                onConfirm: onConfirm,
+                onConfirm: { [weak self] in
+                    self?.handleSendGesture()
+                },
                 onDiscard: onDiscard
             ),
             on: panel
@@ -240,9 +391,23 @@ final class ReviewWindowController: NSObject, NSWindowDelegate, ReviewSurfacePre
 
         isDraftSurfaceActive = true
         panel.allowsKeyInteraction = true
+        panel.onPreviewReturn = { [weak self] event in
+            self?.handlePreviewReturn(event) ?? false
+        }
         panel.ignoresMouseEvents = false
         setClosable(true, on: panel)
         panel.orderFrontRegardless()
+    }
+
+    private func handleSendGesture() {
+        guard isDraftSurfaceActive,
+              !isConfirming,
+              case .editable = renderedState,
+              let onConfirm else {
+            return
+        }
+        isConfirming = true
+        onConfirm(ReviewConfirmationIntent.sendButton())
     }
 
     func requestPresentationFocus(
@@ -277,16 +442,6 @@ final class ReviewWindowController: NSObject, NSWindowDelegate, ReviewSurfacePre
             predicate: nil,
             startNanoseconds: attemptStart
         )
-
-        if !readinessEnvironment.requestActivation() {
-            logPresentationFocus(
-                event: "review_presentation_focus_activation_advisory_rejected",
-                attempt: attempt,
-                result: "activationAdvisoryRejected",
-                predicate: .activationRequest,
-                startNanoseconds: attemptStart
-            )
-        }
 
         materializeEditableSurface(on: panel)
         let result = await waitForPresentationFocus(
@@ -343,7 +498,7 @@ final class ReviewWindowController: NSObject, NSWindowDelegate, ReviewSurfacePre
             }
 
             materializeEditableSurface(on: panel)
-            if let unmet = firstUnmetReadinessPredicate(on: panel) {
+            if let unmet = firstUnmetReadinessPredicate(on: panel, request: request) {
                 lastUnmet = unmet
             } else {
                 logPresentationFocus(
@@ -369,7 +524,7 @@ final class ReviewWindowController: NSObject, NSWindowDelegate, ReviewSurfacePre
                     startNanoseconds: startNanoseconds
                 )
                 return .notFocused(
-                    .timedOut(lastUnmet: lastUnmet ?? .activationRequest)
+                    .timedOut(lastUnmet: lastUnmet ?? .panelKey)
                 )
             }
             let remainingNanoseconds = Self.presentationFocusTimeoutNanoseconds - elapsedNanoseconds
@@ -394,10 +549,19 @@ final class ReviewWindowController: NSObject, NSWindowDelegate, ReviewSurfacePre
     }
 
     private func firstUnmetReadinessPredicate(
-        on panel: ReviewPanel
+        on panel: ReviewPanel,
+        request: ReviewPresentationFocusRequest
     ) -> ReviewPresentationFocusPredicate? {
-        guard readinessEnvironment.applicationIsActive() else {
-            return .applicationActive
+        if let capturedApplication = request.capturedApplication {
+            guard let frontmostApplication = readinessEnvironment.frontmostApplication(),
+                  frontmostApplication == capturedApplication,
+                  !readinessEnvironment.feishuSpeechIsActive() else {
+                return .applicationActive
+            }
+        } else {
+            guard readinessEnvironment.applicationIsActive() else {
+                return .applicationActive
+            }
         }
         guard readinessEnvironment.panelIsKey(panel) else {
             return .panelKey
@@ -448,12 +612,14 @@ final class ReviewWindowController: NSObject, NSWindowDelegate, ReviewSurfacePre
         return current.reviewID == request.reviewID
             && current.generation == request.generation
             && current.focusAttemptID == request.focusAttemptID
+            && current.capturedApplication == request.capturedApplication
     }
 
     func dismiss() {
         cancelPresentationFocus()
         isDraftSurfaceActive = false
         isConfirming = false
+        renderedState = .idle
         onDraftChange = nil
         onConfirm = nil
         onDiscard = nil
@@ -465,6 +631,7 @@ final class ReviewWindowController: NSObject, NSWindowDelegate, ReviewSurfacePre
 
         panel.resignKey()
         panel.allowsKeyInteraction = false
+        panel.onPreviewReturn = nil
         panel.ignoresMouseEvents = true
         setClosable(false, on: panel)
         panel.orderOut(nil)
@@ -497,6 +664,44 @@ final class ReviewWindowController: NSObject, NSWindowDelegate, ReviewSurfacePre
             }
         }
         return nil
+    }
+
+    private func handlePreviewReturn(_ event: NSEvent) -> Bool {
+        guard isDraftSurfaceActive,
+              !isConfirming,
+              case .editable = renderedState,
+              let panel else {
+            return false
+        }
+
+        let editor = Self.editableTextView(in: hostingView)
+        if ReviewPreviewReturnArbiter.consumesWhitespaceOnlyReturn(
+            event,
+            panel: panel,
+            editor: editor,
+            panelIsKey: readinessEnvironment.panelIsKey
+        ) {
+            return true
+        }
+        guard ReviewPreviewReturnArbiter.qualifies(
+            event,
+            panel: panel,
+            editor: editor,
+            panelIsKey: readinessEnvironment.panelIsKey
+        ) else {
+            return false
+        }
+
+        guard let responder = panel.firstResponder as? NSView,
+              let contentView = panel.contentView,
+              responder === contentView || responder.isDescendant(of: contentView),
+              let onConfirm else {
+            return false
+        }
+
+        isConfirming = true
+        onConfirm(ReviewConfirmationIntent.qualifiedPreviewReturn())
+        return true
     }
 }
 

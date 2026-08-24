@@ -358,7 +358,7 @@ final class ReviewDestinationDeliveryTests: XCTestCase {
         XCTAssertEqual(output.mutationCount, 0)
     }
 
-    func test_systemReviewDelivery_activationTimeoutIsBoundedAndDoesNotRetarget() async throws {
+    func test_systemReviewDelivery_nonactivatingTargetPreservesCapturedFrontmostAndDoesNotRetarget() async throws {
         let runtime = Issue38ReviewApplicationRuntime()
         let activator = Issue38ReviewApplicationActivator(result: .timedOut)
         let accessibility = Issue38ReviewDestinationAccess()
@@ -381,10 +381,16 @@ final class ReviewDestinationDeliveryTests: XCTestCase {
 
         let result = await delivery.deliver("PRIVATE_TIMEOUT", to: destination)
 
-        XCTAssertEqual(result, .activationFailed)
-        XCTAssertEqual(activator.requestedTimeouts, [2_000_000_000])
-        XCTAssertEqual(activator.activationRequests, [destination.application])
-        XCTAssertEqual(output.mutationCount, 0)
+        XCTAssertEqual(result, .submittedUnverified)
+        XCTAssertEqual(
+            runtime.frontmost,
+            destination.application,
+            "v5 must keep the captured application frontmost rather than activate or retarget"
+        )
+        XCTAssertEqual(activator.requestedTimeouts, [])
+        XCTAssertEqual(activator.activationRequests, [])
+        XCTAssertEqual(output.mutationCount, 1)
+        XCTAssertEqual(output.insertedTexts, ["PRIVATE_TIMEOUT"])
     }
 
     func test_systemReviewDelivery_restoresSelectionBeforePasteAndPostflightFailureIsUncertain() async throws {

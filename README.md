@@ -2,6 +2,8 @@
 
 macOS 本地语音输入工具，使用飞书语音识别 API。
 
+当前 Issue #40 v5 已通过本地自动化门槛，但 replacement Release 尚未安装；应用保持停止状态，真实目标消费与 owner UAT 仍待完成。
+
 ## 功能
 
 - 🎤 按住 **Fn 键** 0.3 秒开始流式识别
@@ -9,8 +11,8 @@ macOS 本地语音输入工具，使用飞书语音识别 API。
 - 🔄 可恢复流式失败不会立即报错；应用在 Fn 按住期间及松开后的 bounded drain 内持续使用新会话重试，并保留已录音频的有序回放。drain 到期时若仍有同 generation、非空、safe 且不超 16,384 UTF-16 的预览（包括 LF），会在清理前保留原面板和精确文本为 durable、非权威的 `ReviewReadOnlyPhase.recovery` 只读恢复面；它没有 Send/qualified Return、编辑或 delivery authority，只有权威 `action=2` 加 recorder barrier 才能进入 `.editable`；不做 append、AX/Unicode/clipboard 输出、retry 或 retarget
 - ✏️ 松开 **Fn 键** 后同一面板保持只读并显示「正在完成识别…」；只有权威 `action=2` 已结算且录音队列屏障通过后，它才直接转为可编辑草稿。捕获/录音和识别/provider 是独立异步根，均不等待面板或编辑器
 - ✅ 草稿成型后「发送」和符合规则的 **Return/Enter** 立即可用；**Command+Return** 仍是显式快捷键，**Shift+Return/Shift+Enter** 只插入一个换行，输入法组合文本（marked text）中的 Return 交给输入法。「取消」、Escape 或关闭窗口不写入。只有这些真实 UI 确认手势才能开始一次交付
-- 🔒 审阅路由优先绑定原应用身份、精确 AX 元素与原选区；普通非安全 AX miss 使用开始交互时捕获的完整原应用和固定 PID。确认前没有 AX setter、目标键盘/CGEvent、pasteboard 读写、copy/paste、直接插入、重试或 retarget；提交 gate 先在短临界区外完成 binding-specific 身份/信任/Secure Input/frontmost 校验，再按 activation→input 顺序只重查 live epoch 与 Command/Shift/Control/Option/Fn/Caps Lock modifiers，最后发送已准备好的 Unicode pair；安全输入、密码框、身份不完整/漂移或交付不确定仍 fail closed
-- 🛡️ accessory-app 激活和编辑器 focus 只是 advisory presentation telemetry，不能隐藏或禁用 Send/Return，也不能触发交付。交付使用一个带来源校验、无修饰键的 Unicode down/up 文本对，最多 16,384 个 UTF-16 code units；操作系统没有目标消费确认，因此结果保持可编辑并标记为 submitted-unverified，不能声称目标已经接受文字
+- 🔒 审阅路由优先绑定原应用身份、精确 AX 元素与原选区；普通非安全 AX miss 使用开始交互时捕获的完整原应用、正 PID 与 opaque target lease。确认前没有 AX setter、目标键盘/CGEvent、pasteboard 读写、copy/paste、直接插入、重试或 retarget；先构造并读回一次完整 Unicode pair，再在 pair 之后执行 leading/trailing security sandwich、固定目标校验及 modifier/epoch gate。每个 AX 对象都遵守同一绝对 deadline 与 cancellation 检查；不激活目标或 FeishuSpeech，不用 ambient target
+- 🛡️ 非激活预览只接受 panel-local Send 或符合规则的 Return/Enter。空白、IME marked text、带修饰键、repeat、错误窗口或非当前面板 responder 的 Return 全部拒绝。一次确认最多发送一个无修饰 Unicode down，随后强制发送一次 up；down 后唯一终态是 `submitted-unverified`，不声称目标消费、不得 resend 或重新暴露确认 authority
 - 🖼️ 流式预览与多行编辑器共用 18pt transcript 字体；面板初始尺寸仍为 520×320，最小/最大尺寸仍为 420×240 / 760×600，不因增大字体而放大。只读正文不使用 full-size content view，保持在标题栏和交通灯按钮下方
 - ⚙️ 设置中的旧 `reviewBeforeInsert` / `autoInsert` 值仅为 Codable 迁移保留，不能关闭预览或恢复连续/直接输出
 - 🌐 流式识别的租户 token 与 `stream_recognize` 走绑定物理网卡的 keep-alive（bound UDP DNS + `IP_BOUND_IF`），跳过 VPN/TUN；连接失败不再回退系统 URLSession。整文件识别仍走系统 URLSession
@@ -69,15 +71,15 @@ cp -R build/Build/Products/Release/FeishuSpeech.app /Applications/
 3. 继续按住并说话；「输入前预览」面板会以只读方式显示最新完整 snapshot，不会在原输入框中边听边改字
 4. 松开 **Fn 键**；面板保持同一个实例并转为「正在完成识别…」。松开只关闭采集，录音队列屏障后的尾包、在途请求、可恢复重连和 `action=2` 仍属于同一 generation
 5. 权威 `action=2` 结算后，同一面板转为多行编辑器。如果 final 为空但已有可用 snapshot，它会作为草稿并标注「可能不完整」；两者都无内容时不打开空编辑器
-6. action 2 与 recorder barrier 后，同一面板立即进入 `.editable`，并安装编辑、发送和 Return/Enter 回调；编辑器是否及时成为 first responder 只作为 presentation telemetry，不是确认门槛。用户可点击「发送」、按符合规则的 Return（含数字键盘 Enter）或按 Command+Return 确认。Shift+Return/Shift+Enter 插入一个换行，输入法组合文本（marked text）中的 Return 交给输入法；交付失败或不确定也保留精确草稿，只有用户再次显式确认才会产生新的投递，纯空白草稿不能确认
+6. action 2 与 recorder barrier 后，同一面板立即进入 `.editable`，并安装编辑、发送和 Return/Enter 回调；编辑器是否及时成为 first responder 只作为 presentation telemetry，不是确认门槛。用户可点击 panel-local「发送」或按符合规则的 Return（含数字键盘 Enter）确认。Shift+Return/Shift+Enter 插入一个换行，输入法组合文本（marked text）中的 Return 交给输入法；空白、带修饰键、repeat、错误窗口或非面板 responder 的 Return 不确认。pre-boundary 失败保留精确草稿；down 后只产生 terminal `submitted-unverified`，不重发
 
-审阅路由在开始音频/网络工作前捕获完整原应用身份，并优先捕获精确 AX 元素与原选区。普通非安全目标若严格 AX 光标捕获缺失，仍可绑定这个原应用；确认时重新激活该应用，执行两次连续复合 preflight，每次都按 Secure Input（开始）→ raw 捕获 PID → running/frontmost 完整身份 → Secure Input（结束）顺序检查，再只向捕获 PID 发送一个完整 Unicode 文本 down/up 对。此 fallback 证明的是原应用，不是原控件或插入点；任何身份、激活、焦点、选区、Secure Input 或交付不确定都不会转向其他应用、自动复制或自动重试。审阅交付完全不读取、写入或恢复系统剪贴板，也不发送 Cmd+V；目标消费没有操作系统确认，提交后只报告 submitted-unverified 并保留草稿。
+审阅路由在开始音频/网络工作前捕获完整原应用身份，并优先捕获精确 AX 元素与原选区。普通非安全目标若严格 AX 光标捕获缺失，仍绑定这个原应用的固定 PID 与 opaque lease；确认时不激活、不重定向，只在捕获目标仍满足 identity/frontmost/Secure Input/Accessibility/epoch gates 时投递。pair 构造与读回先完成，随后完成 binding-specific final security sandwich；每个 AX 调用都在独立 executor 上执行并遵守 cancellation/deadline。审阅交付完全不读取、写入或恢复系统剪贴板，也不发送 Cmd+V；目标消费没有操作系统确认，提交后只报告 `submitted-unverified`，不 resend。
 
 审阅 UI 是独立的第三条异步轴：只读渲染为可取消的 fire-and-forget 主线程观察，不会让录音采集/音频 journal 等待界面，也不会让识别 consumer/重试/回放等待窗口。录音状态浮层仍然只显示状态，没有改成文字预览或编辑器。设置不能关闭此路线；旧布尔值仅用于解码/保存迁移，运行时诊断不显示或哈希识别文本，也不记录音频、凭据、token、stream ID、目标控件或剪贴板内容。
 
-> build 6 的隐私安全诊断已确认重复来自把每个新 packet index 的完整 snapshot 错当成 delta 拼接，而非 replay、重连或 transport 失败。当前契约改为完整 snapshot 替换。此前安装候选的图片残留进一步定位到旧 review pasteboard/Cmd+V 恢复竞态：目标没有消费确认，延迟事件可能在恢复图片后才读取剪贴板；受影响候选已停止，剪贴板没有被本次诊断清理或改写。v4 已删除这条交付路径。R4 最终 focused matrix 为 265 passed / 0 skipped / 0 failed，`StreamingMainViewModelTests` 为 105/105，完整 macOS 测试为 483 passed、另有 1 个与产品无关的 live-TCP 环境 skip；这些都不替代真实目标应用 UAT。v3 安装候选仍是失败/open，尚未安装 v4 Release。
+> build 6 的隐私安全诊断已确认重复来自把每个新 packet index 的完整 snapshot 错当成 delta 拼接，而非 replay、重连或 transport 失败。当前契约改为完整 snapshot 替换。此前安装候选的图片残留进一步定位到旧 review pasteboard/Cmd+V 恢复竞态；目标没有消费确认，延迟事件可能在恢复图片后才读取剪贴板；受影响候选已停止，剪贴板没有被本次诊断清理或改写。v5 已删除这条交付路径。最终 focused matrix 为 324 passed / 0 skipped / 0 failed，`StreamingMainViewModelTests` 为 105/105，完整 macOS 测试为 537 passed、另有 1 个预期 live-TCP 环境 skip；这些都不替代真实目标应用 UAT。v3 安装候选仍被拒绝并停止，replacement Release 尚未安装。
 
-Issue #39 最终候选的 40/40 聚焦、423 个执行/1 个跳过/0 个失败，以及 Issue #40 v2/v3 候选结果均为历史证据；当前 R4 的 265 focused / 0 skipped / 0 failed、`StreamingMainViewModelTests` 105/105、完整 483 passed + 1 个无关 live-TCP skip 也不替代真实麦克风、凭据、WindowServer、Accessibility 恢复和第三方应用 Unicode pair 接收 UAT。
+Issue #39 最终候选的 40/40 聚焦、423 个执行/1 个跳过/0 个失败，以及 Issue #40 v2/v3/v4 候选结果均为历史证据；当前 v5 的 324 focused / 0 skipped / 0 failed、`StreamingMainViewModelTests` 105/105、完整 537 passed + 1 个预期 live-TCP skip 也不替代真实麦克风、凭据、WindowServer、Accessibility 和第三方应用 Unicode pair 接收 UAT。
 
 ## 常见问题
 
@@ -99,7 +101,7 @@ Issue #39 最终候选的 40/40 聚焦、423 个执行/1 个跳过/0 个失败�
 若显示固定提示“认证失败，请检查应用凭据”，说明租户 token 获取阶段已被飞书拒绝；
 应用不会把飞书返回的凭据、正文或后端错误详情显示到界面或日志。历史 Release UAT 曾成功
 取得 token、发送首个 `action=1` 请求并收到 HTTP 200，随后被旧版客户端的过严响应契约拒绝；
-这不是当前 v4 安装版成功声明。当前客户端已移除该拒绝条件，但 replacement Release 仍须由
+这不是当前 v5 安装版成功声明。当前客户端已移除该拒绝条件，但 replacement Release 仍须由
 安装版实机确认真正的识别文本、后续 action/final 和目标应用输出。
 
 应用会在连续失败 3 次后自动重置服务状态。
@@ -123,7 +125,7 @@ Issue #39 最终候选的 40/40 聚焦、423 个执行/1 个跳过/0 个失败�
 
 ### 审阅启动时提示「无法确认输入位置」
 
-如果只是普通非安全的历史 final-only/可编辑 AX 目标无法提供严格光标、选区或 settable 属性，当前版本不应再因该能力缺失而显示此提示：审阅应使用绑定原应用的 current-focus fallback。该提示仍可能正确地表示 Secure Input、密码/安全 AX role、辅助功能信任丢失、应用身份字段不完整、PID 重用或身份漂移；这些情况保持 fail closed。fallback 只证明原应用，不证明原控件或 caret；v4 使用固定 PID 的单次 Unicode 文本对，并不声称目标已消费文字，安装版 UAT 仍是确认可见结果的唯一证据。
+如果只是普通非安全的历史 final-only/可编辑 AX 目标无法提供严格光标、选区或 settable 属性，当前版本不应再因该能力缺失而显示此提示：审阅应使用绑定原应用的固定 PID fallback。该提示仍可能正确地表示 Secure Input、密码/安全 AX role、辅助功能信任丢失、应用身份字段不完整、PID 重用或身份漂移；这些情况保持 fail closed。fallback 只证明原应用，不证明原控件或 caret；v5 使用固定 PID 的单次 Unicode 文本对，并不声称目标已消费文字，安装版 UAT 仍是确认可见结果的唯一证据。
 
 旧版文档中的“关闭输入前预览”兼容路由属于历史候选行为，当前设置无法恢复它。任何物理输入、目标/安全状态变化或交付不确定都保持 fail closed；当前交互只允许用户在同一审阅面板中编辑、再次显式确认或丢弃，绝不自动重试、复制、粘贴或换目标。
 

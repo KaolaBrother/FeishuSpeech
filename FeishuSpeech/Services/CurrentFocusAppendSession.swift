@@ -204,6 +204,7 @@ nonisolated final class CurrentFocusInputInterferenceEpoch: @unchecked Sendable 
     func observePreDispatch(type: CGEventType, event: CGEvent) {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             advance()
+            CurrentFocusCombinedInterferenceEpoch.shared.advance()
             return
         }
         guard Self.isInterferingPhysicalInput(type: type, event: event) else {
@@ -213,6 +214,7 @@ nonisolated final class CurrentFocusInputInterferenceEpoch: @unchecked Sendable 
             return
         }
         advance()
+        CurrentFocusCombinedInterferenceEpoch.shared.advance()
     }
 
     private func advance() {
@@ -232,6 +234,140 @@ nonisolated final class CurrentFocusInputInterferenceEpoch: @unchecked Sendable 
             return virtualKey != functionKeyCode
         default:
             return false
+        }
+    }
+}
+
+/// A value-only epoch used by v5 submission attempts.  It is intentionally
+/// independent from the legacy provisional-output epoch so an observer can
+/// advance it synchronously while the raw executor is in AX work.  The
+/// executor takes the same primitive's reservation through its final direct
+/// post section; no callback or getter runs while that reservation is owned.
+nonisolated enum CurrentFocusCommitAdmission: Sendable {
+    case acquired
+    case unavailable
+    case drifted
+}
+
+nonisolated struct CurrentFocusEpochSnapshot: Equatable, Sendable {
+    let rawValue: UInt64
+    let hasPendingAdvance: Bool
+
+    func isStable(expectedValue: UInt64) -> Bool {
+        rawValue == expectedValue && !hasPendingAdvance
+    }
+}
+
+nonisolated final class CurrentFocusCombinedInterferenceEpoch: @unchecked Sendable {
+    static let shared = CurrentFocusCombinedInterferenceEpoch()
+
+    // The epoch reservation is deliberately nonrecursive. An observer first
+    // announces pending work under this separate short lock, then attempts to
+    // advance the raw value. If the reservation is held, the pending work is
+    // drained by the waiting observer after release, or by the typed
+    // postflight snapshot if the bounded wait expires.
+    private let lock = NSLock()
+    private let pendingLock = NSLock()
+    private var rawValue: UInt64 = 0
+    private var pendingAdvanceCount: UInt64 = 0
+
+    var value: UInt64 {
+        lock.lock()
+        let currentValue = rawValue
+        lock.unlock()
+        drainPendingAdvances()
+        return currentValue
+    }
+
+    func advance() {
+        pendingLock.lock()
+        pendingAdvanceCount &+= 1
+        pendingLock.unlock()
+
+        if Thread.isMainThread {
+            guard lock.try() else { return }
+            drainPendingAdvancesWhileHoldingLock()
+            lock.unlock()
+            return
+        }
+
+        // The observer may contend with the short final-post reservation, but
+        // it must not hold an unbounded wait. A normal pair releases this
+        // reservation before the bounded retry window expires; if it does not,
+        // the pending marker remains for the postflight snapshot to drain.
+        let deadline = DispatchTime.now().uptimeNanoseconds &+ 500_000_000
+        while true {
+            if lock.try() {
+                drainPendingAdvancesWhileHoldingLock()
+                lock.unlock()
+                return
+            }
+            guard DispatchTime.now().uptimeNanoseconds < deadline else {
+                return
+            }
+            Thread.sleep(forTimeInterval: 0.0005)
+        }
+    }
+
+    func capture() -> UInt64 {
+        value
+    }
+
+    func captureSnapshot() -> CurrentFocusEpochSnapshot {
+        let pendingBeforeRawRead = pendingAdvanceIsInProgress()
+        drainPendingAdvances()
+        lock.lock()
+        let finalRawValue = rawValue
+        lock.unlock()
+        let pendingAfterRawRead = pendingAdvanceIsInProgress()
+        return CurrentFocusEpochSnapshot(
+            rawValue: finalRawValue,
+            hasPendingAdvance: pendingBeforeRawRead || pendingAfterRawRead
+        )
+    }
+
+    /// Reserves the epoch for the final direct-post section. The caller must
+    /// release the reservation with `endCommitReservation()`. No callback or
+    /// getter is performed while the reservation is held.
+    func beginCommitReservation(
+        expectedValue: UInt64
+    ) -> CurrentFocusCommitAdmission {
+        guard lock.try() else { return .unavailable }
+        guard rawValue == expectedValue,
+              !pendingAdvanceIsInProgress() else {
+            lock.unlock()
+            drainPendingAdvances()
+            return .drifted
+        }
+        return .acquired
+    }
+
+    func endCommitReservation() {
+        lock.unlock()
+    }
+
+    private func pendingAdvanceIsInProgress() -> Bool {
+        pendingLock.lock()
+        defer { pendingLock.unlock() }
+        return pendingAdvanceCount > 0
+    }
+
+    private func drainPendingAdvances() {
+        guard lock.try() else { return }
+        drainPendingAdvancesWhileHoldingLock()
+        lock.unlock()
+    }
+
+    private func drainPendingAdvancesWhileHoldingLock() {
+        while true {
+            pendingLock.lock()
+            guard pendingAdvanceCount > 0 else {
+                pendingLock.unlock()
+                break
+            }
+            pendingAdvanceCount &-= 1
+            pendingLock.unlock()
+            rawValue &+= 1
         }
     }
 }
@@ -794,6 +930,7 @@ final class WorkspaceCurrentFocusInputMonitor: CurrentFocusInputMonitoring {
         ]
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { event in
             guard Self.isExternalCaretAffectingEvent(event) else { return event }
+            CurrentFocusCombinedInterferenceEpoch.shared.advance()
             handler()
             return event
         }
@@ -803,6 +940,7 @@ final class WorkspaceCurrentFocusInputMonitor: CurrentFocusInputMonitoring {
 
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { event in
             guard Self.isExternalCaretAffectingEvent(event) else { return }
+            CurrentFocusCombinedInterferenceEpoch.shared.advance()
             MainActor.assumeIsolated {
                 handler()
             }
@@ -892,6 +1030,7 @@ final class WorkspaceCurrentFocusActivationMonitor: NSObject, CurrentFocusActiva
         epochLock.lock()
         rawActivationEpoch &+= 1
         epochLock.unlock()
+        CurrentFocusCombinedInterferenceEpoch.shared.advance()
         handler?(application.processIdentifier)
     }
 

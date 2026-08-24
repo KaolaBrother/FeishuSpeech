@@ -20,6 +20,21 @@ nonisolated enum TranscriptionReviewState: Equatable, Sendable {
         draft: String = "",
         isPossiblyIncomplete: Bool = false
     )
+    /// The exact draft is frozen while the one-shot submission admission is
+    /// being resolved.  This state deliberately carries no confirmation
+    /// capability.
+    case preparingSubmission(
+        draft: String,
+        isPossiblyIncomplete: Bool,
+        feedback: ReviewDraftFeedback? = nil
+    )
+    /// A complete output attempt crossed the irreversible key-down boundary.
+    /// The preview is terminal and must never expose Send or Return again.
+    case submittedUnverifiedTerminal(
+        draft: String,
+        isPossiblyIncomplete: Bool,
+        feedback: ReviewDraftFeedback? = .deliveryUncertain
+    )
 }
 
 nonisolated enum ReviewReadOnlyPhase: Equatable, Sendable {
@@ -52,6 +67,19 @@ nonisolated struct ReviewPresentationFocusRequest: Equatable, Sendable {
     let reviewID: UUID
     let generation: UInt64
     let focusAttemptID: UInt64
+    let capturedApplication: StableApplicationIdentity?
+
+    init(
+        reviewID: UUID,
+        generation: UInt64,
+        focusAttemptID: UInt64,
+        capturedApplication: StableApplicationIdentity? = nil
+    ) {
+        self.reviewID = reviewID
+        self.generation = generation
+        self.focusAttemptID = focusAttemptID
+        self.capturedApplication = capturedApplication
+    }
 }
 
 nonisolated struct ReviewPresentationFocusOutcome: Equatable, Sendable {

@@ -263,9 +263,9 @@ final class TranscriptionReviewViewTests: XCTestCase {
         logger.debug("checking review window shortcut policy")
         let source = try productionSource(relativePath: "FeishuSpeech/Views/TranscriptionReviewView.swift")
 
-        XCTAssertTrue(
-            source.contains("keyboardShortcut(.return, modifiers: .command)"),
-            "Command+Return is the explicit confirmation shortcut"
+        XCTAssertFalse(
+            source.contains("keyboardShortcut(.return"),
+            "confirmation must not be granted by a default Return key equivalent"
         )
         XCTAssertTrue(
             source.contains("keyboardShortcut(.cancelAction)"),
@@ -274,6 +274,15 @@ final class TranscriptionReviewViewTests: XCTestCase {
         XCTAssertFalse(
             source.contains("keyboardShortcut(.enter)"),
             "the editor must not use Enter as a second confirmation shortcut"
+        )
+    }
+
+    func test_v5SendButtonHasNoDefaultKeyEquivalent() throws {
+        let source = try productionSource(relativePath: "FeishuSpeech/Views/TranscriptionReviewView.swift")
+
+        XCTAssertFalse(
+            source.contains("keyboardShortcut(.return"),
+            "Send must be an explicit button intent, not an AppKit default Return key equivalent"
         )
     }
 
@@ -301,11 +310,7 @@ final class TranscriptionReviewViewTests: XCTestCase {
         )
         XCTAssertTrue(
             source.contains("makeKeyAndOrderFront"),
-            "editable transition must make the same panel key-capable"
-        )
-        XCTAssertTrue(
-            source.contains("activate(options: [])"),
-            "editable transition must explicitly activate FeishuSpeech"
+            "editable transition must make the same panel key-capable when needed"
         )
         XCTAssertTrue(source.contains("renderReadOnly"))
         XCTAssertTrue(
@@ -332,9 +337,9 @@ final class TranscriptionReviewViewTests: XCTestCase {
             "review must center on the active screen rather than reuse the recording overlay"
         )
         XCTAssertFalse(source.contains("OverlayWindowController.shared"))
-        XCTAssertFalse(
+        XCTAssertTrue(
             source.contains(".nonactivatingPanel"),
-            "authority mode must not depend on a runtime nonactivatingPanel style flip"
+            "the retained panel must preserve the captured target with a non-activating style"
         )
 
         let panelConstructionCount = source.components(separatedBy: "ReviewPanel(").count - 1
@@ -391,55 +396,30 @@ final class TranscriptionReviewViewTests: XCTestCase {
         XCTAssertFalse(windowSource.contains("logger.info(\"\\(draft"))
     }
 
-    @MainActor
     func test_v4OnlyOpaqueIntentFromQualifiedNativeReturnCanAuthorizeDelivery() throws {
-        var confirmCount = 0
-        let window = makeWindow(
-            rootView: TranscriptionReviewView(
-                state: .editable(
-                    draft: "PRIVATE_PERFORM_CLICK_DRAFT",
-                    isPossiblyIncomplete: false,
-                    feedback: nil
-                ),
-                onConfirm: { _ in confirmCount += 1 }
-            )
-        )
-        defer {
-            window.orderOut(nil)
-            window.close()
-        }
-
-        let editor = try XCTUnwrap(
-            editableTextView(in: window.contentView),
-            "the real frozen-draft native editor must be present"
-        )
-        XCTAssertTrue(window.makeFirstResponder(editor))
-        let returnEvent = try XCTUnwrap(
-            NSEvent.keyEvent(
-                with: .keyDown,
-                location: .zero,
-                modifierFlags: [],
-                timestamp: 0,
-                windowNumber: window.windowNumber,
-                context: nil,
-                characters: "\r",
-                charactersIgnoringModifiers: "\r",
-                isARepeat: false,
-                keyCode: 36
-            )
-        )
-        editor.keyDown(with: returnEvent)
-        XCTAssertEqual(
-            confirmCount,
-            1,
-            "qualified native Return must create exactly one UI confirmation"
-        )
-
         let viewSource = try productionSource(relativePath: "FeishuSpeech/Views/TranscriptionReviewView.swift")
+        let controllerSource = try productionSource(relativePath: "FeishuSpeech/Controllers/ReviewWindowController.swift")
         let coordinatorSource = try productionSource(relativePath: "FeishuSpeech/ViewModels/MainViewModel.swift")
-        XCTAssertTrue(viewSource.contains("ReviewConfirmationIntent"))
-        XCTAssertTrue(viewSource.contains("fileprivate"))
-        XCTAssertTrue(viewSource.contains("keyDown(with event: NSEvent)"))
+
+        XCTAssertFalse(
+            viewSource.contains("ReviewConfirmationIntent") ||
+                viewSource.contains("qualifiedPreviewReturn") ||
+                viewSource.contains("sendButton()"),
+            "SwiftUI view code must receive only a no-argument gesture callback and never own intent construction"
+        )
+        XCTAssertTrue(
+            controllerSource.contains("fileprivate init(source:") &&
+                controllerSource.contains("fileprivate static func sendButton()") &&
+                controllerSource.contains("fileprivate static func qualifiedPreviewReturn()"),
+            "the controller must own both fileprivate intent factories and the initializer"
+        )
+        XCTAssertTrue(
+            controllerSource.contains("ReviewPreviewReturnArbiter.qualifies") &&
+                controllerSource.contains("ReviewConfirmationIntent.qualifiedPreviewReturn()") &&
+                controllerSource.contains("ReviewConfirmationIntent.sendButton()"),
+            "only the production panel Send/Return gesture bridges may mint the opaque confirmation intent"
+        )
+        XCTAssertTrue(controllerSource.contains("panel.onPreviewReturn"))
         XCTAssertFalse(
             coordinatorSource.contains("func confirmReviewDraft()"),
             "the coordinator must not expose a forgeable zero-argument confirmation entry point"
@@ -454,17 +434,52 @@ final class TranscriptionReviewViewTests: XCTestCase {
         )
     }
 
+    func test_v5IntentConstructionIsConfinedToRealSendOrPanelReturnGestureSites() throws {
+        let viewSource = try productionSource(
+            relativePath: "FeishuSpeech/Views/TranscriptionReviewView.swift"
+        )
+        let controllerSource = try productionSource(
+            relativePath: "FeishuSpeech/Controllers/ReviewWindowController.swift"
+        )
+        let coordinatorSource = try productionSource(
+            relativePath: "FeishuSpeech/ViewModels/MainViewModel.swift"
+        )
+
+        XCTAssertFalse(
+            viewSource.contains("ReviewConfirmationIntent") ||
+                viewSource.contains("qualifiedPreviewReturn") ||
+                viewSource.contains("sendButton()"),
+            "intent construction must not remain in the SwiftUI view"
+        )
+        XCTAssertTrue(
+            controllerSource.contains("fileprivate init(source:") &&
+                controllerSource.contains("fileprivate static func sendButton()") &&
+                controllerSource.contains("fileprivate static func qualifiedPreviewReturn()"),
+            "both intent factories and the initializer must be fileprivate in the controller"
+        )
+        XCTAssertTrue(
+            controllerSource.contains("panel.sendEvent") ||
+                controllerSource.contains("onPreviewReturn"),
+            "the production panel must mint Return intent only from its native event route"
+        )
+        XCTAssertFalse(
+            coordinatorSource.contains("qualifiedPreviewReturn()") ||
+                coordinatorSource.contains("sendButton()") ||
+                coordinatorSource.contains("ReviewConfirmationIntent("),
+            "the coordinator must never manufacture a confirmation capability"
+        )
+    }
+
     func test_v4NoProgrammaticOrStaleConfirmationPathCanBypassTheOpaqueIntentFence() throws {
-        let viewSource = try productionSource(relativePath: "FeishuSpeech/Views/TranscriptionReviewView.swift")
         let windowSource = try productionSource(relativePath: "FeishuSpeech/Controllers/ReviewWindowController.swift")
         let coordinatorSource = try productionSource(relativePath: "FeishuSpeech/ViewModels/MainViewModel.swift")
-        XCTAssertTrue(viewSource.contains("ReviewConfirmationIntent"))
         XCTAssertTrue(windowSource.contains("ReviewConfirmationIntent"))
         XCTAssertFalse(coordinatorSource.contains("onConfirm: { [weak self]"))
         XCTAssertFalse(windowSource.contains("onConfirm: @escaping @MainActor () -> Void"))
-        XCTAssertFalse(viewSource.contains("onConfirm: (@MainActor () -> Void)?"))
         XCTAssertTrue(
-            viewSource.contains("hasCommand") && viewSource.contains("hasShift"),
+            windowSource.contains("event.keyCode == 36 || event.keyCode == 76") &&
+                windowSource.contains("event.isARepeat") &&
+                windowSource.contains("deviceIndependentFlagsMask"),
             "native Return/Enter qualification must remain explicit and modifier-aware"
         )
     }
@@ -544,6 +559,120 @@ final class TranscriptionReviewViewTests: XCTestCase {
 }
 
 @MainActor
+private final class Issue40KeyboardRecorder {
+    var currentDraft: String
+    var confirmedDrafts: [String] = []
+    var discardCount = 0
+
+    init(draft: String) {
+        currentDraft = draft
+    }
+}
+
+@MainActor
+private final class Issue40KeyboardProductionSurface {
+    @MainActor
+    final class ReadinessState {
+        var panelIsKey = true
+    }
+
+    let recorder: Issue40KeyboardRecorder
+    let readinessState: ReadinessState
+    private(set) var controller: ReviewWindowController!
+    private(set) var panel: ReviewPanel!
+    private(set) var editor: NSTextView!
+
+    init(draft: String) throws {
+        recorder = Issue40KeyboardRecorder(draft: draft)
+        readinessState = ReadinessState()
+        let appKit = ReviewWindowController.ReadinessEnvironment.appKit
+        let controller = ReviewWindowController(
+            readinessEnvironment: ReviewWindowController.ReadinessEnvironment(
+                requestActivation: { false },
+                applicationIsActive: { true },
+                frontmostApplication: { nil },
+                feishuSpeechIsActive: { false },
+                panelIsKey: { [readinessState] _ in readinessState.panelIsKey },
+                editorLookup: appKit.editorLookup,
+                editorAttached: appKit.editorAttached,
+                makeFirstResponder: appKit.makeFirstResponder,
+                firstResponderIsEditor: appKit.firstResponderIsEditor,
+                nowNanoseconds: appKit.nowNanoseconds,
+                sleep: appKit.sleep
+            )
+        )
+        self.controller = controller
+        controller.renderDraft(
+            state: .editable(
+                draft: draft,
+                isPossiblyIncomplete: false,
+                feedback: nil
+            ),
+            onDraftChange: { [weak recorder] value in
+                recorder?.currentDraft = value
+            },
+            onConfirm: { [weak recorder] _ in
+                guard let recorder else { return }
+                recorder.confirmedDrafts.append(recorder.currentDraft)
+            },
+            onDiscard: { [weak recorder] in
+                recorder?.discardCount += 1
+            }
+        )
+
+        guard let panel = NSApp.windows.compactMap({ $0 as? ReviewPanel }).last,
+              let contentView = panel.contentView else {
+            controller.dismiss()
+            throw NSError(
+                domain: "Issue40KeyboardProductionSurface",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "real ReviewPanel/editor did not materialize"]
+            )
+        }
+        self.panel = panel
+        panel.makeKeyAndOrderFront(nil)
+        panel.displayIfNeeded()
+        contentView.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+        guard let editor = editableTextView(in: contentView) else {
+            controller.dismiss()
+            throw NSError(
+                domain: "Issue40KeyboardProductionSurface",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "real ReviewPanel/editor did not materialize"]
+            )
+        }
+        self.editor = editor
+        guard panel.makeFirstResponder(editor) else {
+            controller.dismiss()
+            throw NSError(
+                domain: "Issue40KeyboardProductionSurface",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "real editor did not become first responder"]
+            )
+        }
+    }
+
+    func dismiss() {
+        controller.dismiss()
+    }
+
+    @MainActor
+    private func editableTextView(in view: NSView?) -> NSTextView? {
+        guard let view else { return nil }
+        if let textView = view as? NSTextView, textView.isEditable {
+            return textView
+        }
+        for subview in view.subviews.reversed() {
+            if let textView = editableTextView(in: subview) {
+                return textView
+            }
+        }
+        return nil
+    }
+}
+
+@MainActor
 final class TranscriptionReviewViewKeyboardTests: XCTestCase {
     private var windows: [NSWindow] = []
 
@@ -557,75 +686,176 @@ final class TranscriptionReviewViewKeyboardTests: XCTestCase {
     }
 
     func test_editableReview_bareReturnConfirmsCurrentDraftExactlyOnce() throws {
-        var currentDraft = "  draft with spaces  "
-        var confirmedDrafts: [String] = []
-        var discardCount = 0
-        let (window, editor) = try makeEditableSurface(
-            draft: currentDraft,
-            onDraftChange: { currentDraft = $0 },
-            onConfirm: { _ in confirmedDrafts.append(currentDraft) },
-            onDiscard: { discardCount += 1 }
-        )
-
-        sendKey(
+        let surface = try Issue40KeyboardProductionSurface(draft: "  draft with spaces  ")
+        defer { surface.dismiss() }
+        sendPanelKey(
+            to: surface,
             keyCode: 36,
             modifiers: [],
             characters: "\r",
-            to: editor,
-            in: window
+            isARepeat: false
         )
 
         XCTAssertEqual(
-            confirmedDrafts,
+            surface.recorder.confirmedDrafts,
             ["  draft with spaces  "],
             "bare Return must confirm the current untrimmed draft exactly once"
         )
-        XCTAssertEqual(discardCount, 0)
+        XCTAssertEqual(surface.recorder.discardCount, 0)
     }
 
     func test_editableReview_keypadEnterConfirmsCurrentDraftExactlyOnce() throws {
-        var currentDraft = "  keypad draft  "
-        var confirmedDrafts: [String] = []
-        let (window, editor) = try makeEditableSurface(
-            draft: currentDraft,
-            onDraftChange: { currentDraft = $0 },
-            onConfirm: { _ in confirmedDrafts.append(currentDraft) },
-            onDiscard: {}
-        )
-
-        sendKey(
+        let surface = try Issue40KeyboardProductionSurface(draft: "  keypad draft  ")
+        defer { surface.dismiss() }
+        sendPanelKey(
+            to: surface,
             keyCode: 76,
             modifiers: [],
             characters: "\r",
-            to: editor,
-            in: window
+            isARepeat: false
         )
 
-        XCTAssertEqual(confirmedDrafts, ["  keypad draft  "])
+        XCTAssertEqual(surface.recorder.confirmedDrafts, ["  keypad draft  "])
     }
 
-    func test_editableReview_commandReturnConfirmsExactlyOnce() throws {
-        var currentDraft = "command draft"
-        var confirmedDrafts: [String] = []
-        let (window, editor) = try makeEditableSurface(
-            draft: currentDraft,
-            onDraftChange: { currentDraft = $0 },
-            onConfirm: { _ in confirmedDrafts.append(currentDraft) },
-            onDiscard: {}
+    func test_exactUnmodifiedNonrepeatReturnThroughKeyPanelConfirmsExactlyOnce() throws {
+        let draft = "PRIVATE_NATIVE_MAIN_RETURN"
+        let surface = try Issue40KeyboardProductionSurface(draft: draft)
+        defer { surface.dismiss() }
+        sendPanelKey(
+            to: surface,
+            keyCode: 36,
+            modifiers: [],
+            characters: "\r",
+            isARepeat: false
         )
 
-        sendKey(
+        XCTAssertEqual(surface.recorder.confirmedDrafts, [draft])
+    }
+
+    func test_exactUnmodifiedNonrepeatKeypadEnterThroughKeyPanelConfirmsExactlyOnce() throws {
+        let draft = "PRIVATE_NATIVE_KEYPAD_ENTER"
+        let surface = try Issue40KeyboardProductionSurface(draft: draft)
+        defer { surface.dismiss() }
+        sendPanelKey(
+            to: surface,
+            keyCode: 76,
+            modifiers: [],
+            characters: "\r",
+            isARepeat: false
+        )
+
+        XCTAssertEqual(surface.recorder.confirmedDrafts, [draft])
+    }
+
+    func test_previewReturnRepeatMainAndKeypadNeverCreatesConfirmation() throws {
+        for keyCode in [UInt16(36), UInt16(76)] {
+            let surface = try Issue40KeyboardProductionSurface(
+                draft: "PRIVATE_REPEAT_\(keyCode)"
+            )
+            defer { surface.dismiss() }
+
+            sendPanelKey(
+                to: surface,
+                keyCode: keyCode,
+                modifiers: [],
+                characters: "\r",
+                isARepeat: true
+            )
+
+            XCTAssertEqual(
+                surface.recorder.confirmedDrafts,
+                [],
+                "repeating Return/Enter must not create controller confirmation"
+            )
+        }
+    }
+
+    func test_previewReturnFromWrongWindowNeverCreatesConfirmation() throws {
+        let surface = try Issue40KeyboardProductionSurface(draft: "PRIVATE_WRONG_WINDOW")
+        defer { surface.dismiss() }
+
+        sendPanelKey(
+            to: surface,
+            keyCode: 36,
+            modifiers: [],
+            characters: "\r",
+            isARepeat: false,
+            windowNumber: surface.panel.windowNumber + 1
+        )
+
+        XCTAssertEqual(
+            surface.recorder.confirmedDrafts,
+            [],
+            "a Return event from another window must not create controller confirmation"
+        )
+    }
+
+    func test_previewReturnFromNonKeyPanelNeverCreatesConfirmation() throws {
+        let surface = try Issue40KeyboardProductionSurface(draft: "PRIVATE_NON_KEY_PANEL")
+        defer { surface.dismiss() }
+        surface.readinessState.panelIsKey = false
+
+        sendPanelKey(
+            to: surface,
+            keyCode: 76,
+            modifiers: [],
+            characters: "\r",
+            isARepeat: false
+        )
+
+        XCTAssertEqual(
+            surface.recorder.confirmedDrafts,
+            [],
+            "Return in a non-key panel must not create controller confirmation"
+        )
+    }
+
+    func test_controlReturnAndControlKeypadEnterProduceZeroIntentAndZeroDelivery() throws {
+        let cases: [(keyCode: UInt16, label: String)] = [
+            (36, "main Control+Return"),
+            (76, "keypad Control+Enter")
+        ]
+
+        for testCase in cases {
+            let draft = "PRIVATE_CONTROL_\(testCase.label)"
+            let surface = try Issue40KeyboardProductionSurface(draft: draft)
+            defer { surface.dismiss() }
+            sendPanelKey(
+                to: surface,
+                keyCode: testCase.keyCode,
+                modifiers: [.control],
+                characters: "\r",
+                isARepeat: false
+            )
+
+            XCTAssertEqual(
+                surface.recorder.confirmedDrafts,
+                [],
+                "\(testCase.label) must not create a controller confirmation intent"
+            )
+            XCTAssertTrue(
+                surface.editor.string.hasPrefix(draft),
+                "\(testCase.label) must not replace or discard the current draft"
+            )
+        }
+    }
+
+    func test_editableReview_commandReturnDoesNotCreateConfirmationIntent() throws {
+        let surface = try Issue40KeyboardProductionSurface(draft: "command draft")
+        defer { surface.dismiss() }
+        sendPanelKey(
+            to: surface,
             keyCode: 36,
             modifiers: [.command],
             characters: "\r",
-            to: editor,
-            in: window
+            isARepeat: false
         )
 
-        XCTAssertEqual(confirmedDrafts, ["command draft"])
+        XCTAssertEqual(surface.recorder.confirmedDrafts, [])
     }
 
-    func test_editableReview_mainAndKeypadCommandAndShiftCommandConfirmExactlyOnce() throws {
+    func test_editableReview_mainAndKeypadCommandAndShiftCommandDoNotConfirm() throws {
         let cases: [(keyCode: UInt16, modifiers: NSEvent.ModifierFlags, label: String)] = [
             (36, [.command], "main Command+Return"),
             (36, [.command, .shift], "main Shift+Command+Return"),
@@ -634,27 +864,22 @@ final class TranscriptionReviewViewKeyboardTests: XCTestCase {
         ]
 
         for testCase in cases {
-            var currentDraft = "  exact \(testCase.label) draft  "
-            var confirmedDrafts: [String] = []
-            let (window, editor) = try makeEditableSurface(
-                draft: currentDraft,
-                onDraftChange: { currentDraft = $0 },
-                onConfirm: { _ in confirmedDrafts.append(currentDraft) },
-                onDiscard: {}
+            let surface = try Issue40KeyboardProductionSurface(
+                draft: "  exact \(testCase.label) draft  "
             )
-
-            sendKey(
+            defer { surface.dismiss() }
+            sendPanelKey(
+                to: surface,
                 keyCode: testCase.keyCode,
                 modifiers: testCase.modifiers,
                 characters: "\r",
-                to: editor,
-                in: window
+                isARepeat: false
             )
 
             XCTAssertEqual(
-                confirmedDrafts,
-                ["  exact \(testCase.label) draft  "],
-                "\(testCase.label) must confirm exactly once"
+                surface.recorder.confirmedDrafts,
+                [],
+                "\(testCase.label) must not create a controller confirmation intent"
             )
         }
     }
@@ -666,26 +891,27 @@ final class TranscriptionReviewViewKeyboardTests: XCTestCase {
         ]
 
         for testCase in cases {
-            var currentDraft = "first line"
-            var confirmCount = 0
-            let (window, editor) = try makeEditableSurface(
-                draft: currentDraft,
-                onDraftChange: { currentDraft = $0 },
-                onConfirm: { _ in confirmCount += 1 },
-                onDiscard: {}
-            )
-
-            sendKey(
+            let surface = try Issue40KeyboardProductionSurface(draft: "first line")
+            defer { surface.dismiss() }
+            sendPanelKey(
+                to: surface,
                 keyCode: testCase.keyCode,
                 modifiers: [.shift],
                 characters: "\r",
-                to: editor,
-                in: window
+                isARepeat: false
             )
 
-            XCTAssertEqual(currentDraft, "first line\n", "\(testCase.label) must insert one LF")
-            XCTAssertEqual(editor.string, "first line\n", "\(testCase.label) must grow the document by one LF")
-            XCTAssertEqual(confirmCount, 0, "Shift+\(testCase.label) is multiline editing, not confirmation")
+            XCTAssertEqual(
+                surface.recorder.confirmedDrafts,
+                [],
+                "Shift+\(testCase.label) is multiline editing, not confirmation"
+            )
+            XCTAssertEqual(surface.editor.string, "first line\n", "\(testCase.label) must insert one LF")
+            XCTAssertEqual(
+                surface.recorder.currentDraft,
+                "first line\n",
+                "\(testCase.label) must update the real editor binding"
+            )
         }
     }
 
@@ -703,29 +929,26 @@ final class TranscriptionReviewViewKeyboardTests: XCTestCase {
         ]
 
         for testCase in cases {
-            var currentDraft = "first line"
-            var confirmCount = 0
-            let (window, editor) = try makeEditableSurface(
-                draft: currentDraft,
-                onDraftChange: { currentDraft = $0 },
-                onConfirm: { _ in confirmCount += 1 },
-                onDiscard: {}
-            )
-
-            sendKey(
+            let surface = try Issue40KeyboardProductionSurface(draft: "first line")
+            defer { surface.dismiss() }
+            sendPanelKey(
+                to: surface,
                 keyCode: testCase.keyCode,
                 modifiers: testCase.modifiers,
                 characters: "\r",
-                to: editor,
-                in: window
+                isARepeat: false
             )
 
             XCTAssertEqual(
-                currentDraft,
+                surface.editor.string,
                 "first line\(testCase.expectedSuffix)",
                 "\(testCase.label) must be passed through to the editor"
             )
-            XCTAssertEqual(confirmCount, 0, "\(testCase.label) must never confirm")
+            XCTAssertEqual(
+                surface.recorder.confirmedDrafts,
+                [],
+                "\(testCase.label) must never create controller confirmation"
+            )
         }
     }
 
@@ -736,88 +959,76 @@ final class TranscriptionReviewViewKeyboardTests: XCTestCase {
         ]
 
         for testCase in cases {
-            var currentDraft = "prefix"
-            var confirmCount = 0
-            let (window, editor) = try makeEditableSurface(
-                draft: currentDraft,
-                onDraftChange: { currentDraft = $0 },
-                onConfirm: { _ in confirmCount += 1 },
-                onDiscard: {}
-            )
-            let insertionPoint = editor.string.utf16.count
-            editor.setSelectedRange(NSRange(location: insertionPoint, length: 0))
-            editor.setMarkedText(
+            let surface = try Issue40KeyboardProductionSurface(draft: "prefix")
+            defer { surface.dismiss() }
+            let insertionPoint = surface.editor.string.utf16.count
+            surface.editor.setSelectedRange(NSRange(location: insertionPoint, length: 0))
+            surface.editor.setMarkedText(
                 "拼",
                 selectedRange: NSRange(location: 1, length: 0),
                 replacementRange: NSRange(location: insertionPoint, length: 0)
             )
 
-            XCTAssertTrue(editor.hasMarkedText(), "the test must establish a live IME composition")
-            sendKey(
+            XCTAssertTrue(
+                surface.editor.hasMarkedText(),
+                "the test must establish a live IME composition"
+            )
+            sendPanelKey(
+                to: surface,
                 keyCode: testCase.keyCode,
                 modifiers: [],
                 characters: "\r",
-                to: editor,
-                in: window
+                isARepeat: false
             )
 
-            XCTAssertEqual(confirmCount, 0, "marked-text \(testCase.label) must not confirm")
             XCTAssertEqual(
-                editor.string,
+                surface.recorder.confirmedDrafts,
+                [],
+                "marked-text \(testCase.label) must not create controller confirmation"
+            )
+            XCTAssertEqual(
+                surface.editor.string,
                 "prefix\n",
                 "marked-text \(testCase.label) must be processed by NSTextView instead of confirming"
             )
-            XCTAssertEqual(currentDraft, "prefix\n")
+            XCTAssertEqual(surface.recorder.currentDraft, "prefix\n")
         }
     }
 
     func test_editableReview_editorChangeImmediatelyBeforeReturnConfirmsExactUntrimmedDraft() throws {
-        var currentDraft = "seed"
-        var confirmedDrafts: [String] = []
-        let (window, editor) = try makeEditableSurface(
-            draft: currentDraft,
-            onDraftChange: { currentDraft = $0 },
-            onConfirm: { _ in confirmedDrafts.append(currentDraft) },
-            onDiscard: {}
-        )
-        let replacementRange = NSRange(location: 0, length: editor.string.utf16.count)
-        editor.setSelectedRange(replacementRange)
-        editor.insertText("  edited immediately  ", replacementRange: replacementRange)
+        let surface = try Issue40KeyboardProductionSurface(draft: "seed")
+        defer { surface.dismiss() }
+        let replacementRange = NSRange(location: 0, length: surface.editor.string.utf16.count)
+        surface.editor.setSelectedRange(replacementRange)
+        surface.editor.insertText("  edited immediately  ", replacementRange: replacementRange)
 
-        XCTAssertEqual(currentDraft, "  edited immediately  ")
-        sendKey(
+        XCTAssertEqual(surface.recorder.currentDraft, "  edited immediately  ")
+        sendPanelKey(
+            to: surface,
             keyCode: 36,
             modifiers: [],
             characters: "\r",
-            to: editor,
-            in: window
+            isARepeat: false
         )
 
-        XCTAssertEqual(confirmedDrafts, ["  edited immediately  "])
+        XCTAssertEqual(surface.recorder.confirmedDrafts, ["  edited immediately  "])
     }
 
     func test_editableReview_mainAndKeypadWhitespaceReturnNeverConfirm() throws {
         for keyCode in [UInt16(36), UInt16(76)] {
-            var currentDraft = " \n\t"
-            var confirmCount = 0
-            let (window, editor) = try makeEditableSurface(
-                draft: currentDraft,
-                onDraftChange: { currentDraft = $0 },
-                onConfirm: { _ in confirmCount += 1 },
-                onDiscard: {}
-            )
-
-            sendKey(
+            let surface = try Issue40KeyboardProductionSurface(draft: " \n\t")
+            defer { surface.dismiss() }
+            sendPanelKey(
+                to: surface,
                 keyCode: keyCode,
                 modifiers: [],
                 characters: "\r",
-                to: editor,
-                in: window
+                isARepeat: false
             )
 
-            XCTAssertEqual(confirmCount, 0)
-            XCTAssertEqual(currentDraft, " \n\t")
-            XCTAssertEqual(editor.string, " \n\t")
+            XCTAssertEqual(surface.recorder.confirmedDrafts, [])
+            XCTAssertEqual(surface.recorder.currentDraft, " \n\t")
+            XCTAssertEqual(surface.editor.string, " \n\t")
         }
     }
 
@@ -826,7 +1037,7 @@ final class TranscriptionReviewViewKeyboardTests: XCTestCase {
         let (_, editor) = try makeEditableSurface(
             draft: currentDraft,
             onDraftChange: { currentDraft = $0 },
-            onConfirm: { _ in },
+            onConfirm: {},
             onDiscard: {}
         )
         let selectedRange = NSRange(location: 0, length: "original".utf16.count)
@@ -864,7 +1075,7 @@ final class TranscriptionReviewViewKeyboardTests: XCTestCase {
         let (_, editor) = try makeEditableSurface(
             draft: draft,
             onDraftChange: { _ in },
-            onConfirm: { _ in },
+            onConfirm: {},
             onDiscard: {}
         )
 
@@ -873,14 +1084,8 @@ final class TranscriptionReviewViewKeyboardTests: XCTestCase {
     }
 
     func test_editableReview_escapeInvokesDiscardWithoutConfirming() throws {
-        var confirmCount = 0
-        var discardCount = 0
-        let (window, _) = try makeEditableSurface(
-            draft: "discard me",
-            onDraftChange: { _ in },
-            onConfirm: { _ in confirmCount += 1 },
-            onDiscard: { discardCount += 1 }
-        )
+        let surface = try Issue40KeyboardProductionSurface(draft: "discard me")
+        defer { surface.dismiss() }
 
         let event = try XCTUnwrap(
             NSEvent.keyEvent(
@@ -888,7 +1093,7 @@ final class TranscriptionReviewViewKeyboardTests: XCTestCase {
                 location: .zero,
                 modifierFlags: [],
                 timestamp: 0,
-                windowNumber: window.windowNumber,
+                windowNumber: surface.panel.windowNumber,
                 context: nil,
                 characters: "\u{1b}",
                 charactersIgnoringModifiers: "\u{1b}",
@@ -896,10 +1101,10 @@ final class TranscriptionReviewViewKeyboardTests: XCTestCase {
                 keyCode: 53
             )
         )
-        XCTAssertTrue(window.performKeyEquivalent(with: event))
+        XCTAssertTrue(surface.panel.performKeyEquivalent(with: event))
 
-        XCTAssertEqual(confirmCount, 0)
-        XCTAssertEqual(discardCount, 1)
+        XCTAssertEqual(surface.recorder.confirmedDrafts, [])
+        XCTAssertEqual(surface.recorder.discardCount, 1)
     }
 
     func test_editableReview_exposesMultilineNativeEditorAndScrollingDocument() throws {
@@ -907,7 +1112,7 @@ final class TranscriptionReviewViewKeyboardTests: XCTestCase {
         let (_, editor) = try makeEditableSurface(
             draft: longDraft,
             onDraftChange: { _ in },
-            onConfirm: { _ in },
+            onConfirm: {},
             onDiscard: {}
         )
         let scrollView = try XCTUnwrap(editor.enclosingScrollView)
@@ -942,7 +1147,7 @@ final class TranscriptionReviewViewKeyboardTests: XCTestCase {
     private func makeEditableSurface(
         draft: String,
         onDraftChange: @escaping @MainActor (String) -> Void,
-        onConfirm: @escaping @MainActor (ReviewConfirmationIntent) -> Void,
+        onConfirm: @escaping @MainActor () -> Void,
         onDiscard: @escaping @MainActor () -> Void,
         size: NSSize = NSSize(width: 520, height: 320)
     ) throws -> (NSWindow, NSTextView) {
@@ -1006,5 +1211,34 @@ final class TranscriptionReviewViewKeyboardTests: XCTestCase {
         )
         editor.keyDown(with: event!)
         RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01))
+    }
+
+    @discardableResult
+    private func sendPanelKey(
+        to surface: Issue40KeyboardProductionSurface,
+        keyCode: UInt16,
+        modifiers: NSEvent.ModifierFlags,
+        characters: String,
+        isARepeat: Bool,
+        windowNumber: Int? = nil
+    ) -> Bool {
+        guard let event = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: modifiers,
+            timestamp: 0,
+            windowNumber: windowNumber ?? surface.panel.windowNumber,
+            context: nil,
+            characters: characters,
+            charactersIgnoringModifiers: characters,
+            isARepeat: isARepeat,
+            keyCode: keyCode
+        ) else {
+            return false
+        }
+        XCTAssertTrue(surface.panel.makeFirstResponder(surface.editor))
+        surface.panel.sendEvent(event)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01))
+        return true
     }
 }

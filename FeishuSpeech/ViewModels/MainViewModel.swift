@@ -219,10 +219,15 @@ class MainViewModel: ObservableObject {
     private struct ReviewSurfaceAuthority {
         let identifier: UUID
         let generation: UInt64
-        let destination: ReviewDestinationToken
+        let target: ReviewTargetAuthority
         var draft: ReviewDraft?
         var revision: UInt64
         var confirmationAttempt: UInt64
+    }
+
+    private enum ReviewTargetAuthority {
+        case production(CapturedReviewTargetDescriptor)
+        case legacy(ReviewDestinationToken)
     }
 
     private struct ReviewDraft {
@@ -267,7 +272,8 @@ class MainViewModel: ObservableObject {
     private let audioRecorder: AudioRecorder
     private let streamingProvider: any SpeechStreamingSessionProviding
     private let overlayPresenter: RecordingOverlayPresenting
-    private let reviewDestinationDelivery: ReviewDestinationDelivering
+    private let reviewDestinationDelivery: ReviewDestinationDelivering?
+    private let reviewSubmissionFacade: ReviewSubmissionFacade?
     private let reviewSurfacePresenter: ReviewSurfacePresenting
     private let streamingDrainPolicy: StreamingDrainPolicy
     private let streamingMonotonicNow: @Sendable () -> ContinuousClock.Instant
@@ -307,6 +313,11 @@ class MainViewModel: ObservableObject {
     private var stopSoundPlayed = false
     private var isCompletionFeedbackPresented = false
     private var reviewSurfaceAuthority: ReviewSurfaceAuthority?
+    private var reviewSurfaceIdentifier: UUID?
+    private var pendingReviewCaptureApplication: StableApplicationIdentity?
+    private var pendingReviewTerminalIdentity: StreamingSessionIdentity?
+    private var pendingReviewTerminalDraft: String?
+    private var pendingReviewTerminalIncomplete = false
     private var reviewSurfaceRevision: UInt64 = 0
     private var reviewTerminalPending = false
     private var reviewDraftIsPossiblyIncomplete = false
@@ -319,6 +330,11 @@ class MainViewModel: ObservableObject {
     private var reviewPresentationFocusRequest: ReviewPresentationFocusRequest?
     private var nextPresentationFocusAttemptID: UInt64 = 0
     private var reviewDeliveryTask: Task<Void, Never>?
+    private var reviewSubmissionHandle: ReviewSubmissionAttemptHandle?
+    private var reviewSubmissionRequest: ReviewSubmissionRequestDescriptor?
+    private var reviewSubmissionEnvelope: ReviewSubmissionAdmissionEnvelope?
+    private var reviewSubmissionCancellationRequested = false
+    private var reviewSubmissionStarted = false
 
     var statusText: String {
         status.text
@@ -333,6 +349,7 @@ class MainViewModel: ObservableObject {
         finalTextOutput: FinalTextOutput? = nil,
         overlayPresenter: RecordingOverlayPresenting? = nil,
         reviewDestinationDelivery: ReviewDestinationDelivering? = nil,
+        reviewSubmissionFacade: ReviewSubmissionFacade? = nil,
         reviewSurfacePresenter: ReviewSurfacePresenting? = nil,
         currentFocusAppendSessionFactory: (any CurrentFocusProvisionalOutputSessionFactory)? = nil,
         streamingDrainPolicy: StreamingDrainPolicy = StreamingDrainPolicy(),
@@ -348,7 +365,16 @@ class MainViewModel: ObservableObject {
         self.hotKeyWakeRecovering = hotKeyWakeRecovering ?? HotKeyService.shared
         self.streamingProvider = streamingProvider ?? FeishuAPIService.shared
         self.overlayPresenter = overlayPresenter ?? OverlayWindowController.shared
-        self.reviewDestinationDelivery = reviewDestinationDelivery ?? SystemReviewDestinationDelivery()
+        if let reviewSubmissionFacade {
+            self.reviewSubmissionFacade = reviewSubmissionFacade
+            self.reviewDestinationDelivery = reviewDestinationDelivery
+        } else if let reviewDestinationDelivery {
+            self.reviewSubmissionFacade = nil
+            self.reviewDestinationDelivery = reviewDestinationDelivery
+        } else {
+            self.reviewSubmissionFacade = SystemReviewSubmissionFacade()
+            self.reviewDestinationDelivery = nil
+        }
         self.reviewSurfacePresenter = reviewSurfacePresenter ?? ReviewWindowController.shared
         self.streamingDrainPolicy = streamingDrainPolicy
         self.streamingMonotonicNow = streamingMonotonicNow
@@ -369,6 +395,9 @@ class MainViewModel: ObservableObject {
         setupAudioRecorderFailureObserver()
         setupPermissionObserver()
         setupErrorRecovery()
+        self.reviewSubmissionFacade?.setEventHandler { [weak self] event in
+            self?.handleReviewSubmissionEvent(event)
+        }
     }
 
     private func setupAudioRecorderFailureObserver() {
@@ -428,6 +457,13 @@ class MainViewModel: ObservableObject {
     }
 
     private func preserveReviewDraftAfterAmbientSecurityChange() {
+        if let handle = reviewSubmissionHandle {
+            if !reviewSubmissionCancellationRequested {
+                reviewSubmissionCancellationRequested = true
+                reviewSubmissionFacade?.enqueueCancellation(handle)
+            }
+            return
+        }
         guard var authority = reviewSurfaceAuthority,
               let existingDraft = authority.draft,
               !reviewConfirmationInFlight else {
@@ -464,7 +500,8 @@ class MainViewModel: ObservableObject {
         switch transcriptionReviewState {
         case .editable:
             break
-        case .idle, .streaming, .sealing, .confirming:
+        case .idle, .streaming, .sealing, .confirming,
+             .preparingSubmission, .submittedUnverifiedTerminal:
             return
         }
         cancelReviewPresentationFocus()
@@ -636,16 +673,26 @@ class MainViewModel: ObservableObject {
         cancelReviewPresentationFocus()
         reviewDeliveryTask?.cancel()
         reviewDeliveryTask = nil
+        reviewSubmissionHandle = nil
+        reviewSubmissionRequest = nil
+        reviewSurfaceIdentifier = UUID()
+        pendingReviewCaptureApplication = nil
+        pendingReviewTerminalIdentity = nil
+        pendingReviewTerminalDraft = nil
+        pendingReviewTerminalIncomplete = false
 
         guard !permissionManager.secureInputEnabled else {
             failStartup(identity: identity, message: "安全输入框不支持语音输入")
             return
         }
-        guard prepareReviewDestination(identity: identity) else { return }
         guard settings.isConfigured else {
             failStartup(identity: identity, message: "请先配置 App ID 和 Secret")
             return
         }
+
+        guard beginReviewTargetCapture(identity: identity) else { return }
+        transcriptionReviewState = .streaming(preview: "")
+        status = .streaming
 
         showOverlay(status: status)
         let ingress = ByteBoundedAudioIngress(
@@ -671,20 +718,28 @@ class MainViewModel: ObservableObject {
             await self?.consumeAudio(identity: identity)
         }
 
-        if let authority = reviewSurfaceAuthority {
-            renderReviewReadOnly(
-                phase: .streaming,
-                preview: "",
-                authority: authority
-            )
-        }
+        renderReviewReadOnly(phase: .streaming, preview: "")
     }
 
-    private func prepareReviewDestination(identity: StreamingSessionIdentity) -> Bool {
-        let captureResult = reviewDestinationDelivery.capture(
-            generation: identity.generation
-        )
-        switch captureResult {
+    private func beginReviewTargetCapture(identity: StreamingSessionIdentity) -> Bool {
+        if let reviewSubmissionFacade {
+            guard let application = reviewSubmissionFacade.snapshotFrontmostApplication() else {
+                failStartup(identity: identity, message: "无法确认输入位置")
+                return false
+            }
+            pendingReviewCaptureApplication = application
+            let request = ReviewTargetCaptureRequestDescriptor(
+                generation: identity.generation,
+                application: application
+            )
+            reviewSubmissionFacade.captureTarget(request) { [weak self] result in
+                self?.completeReviewTargetCapture(result, identity: identity)
+            }
+            return true
+        }
+
+        guard let reviewDestinationDelivery else { return false }
+        switch reviewDestinationDelivery.capture(generation: identity.generation) {
         case .rejected(.secureInput):
             failStartup(identity: identity, message: "安全输入框不支持语音输入")
             return false
@@ -692,26 +747,86 @@ class MainViewModel: ObservableObject {
             failStartup(identity: identity, message: "无法确认输入位置")
             return false
         case .captured(let destination):
-            guard isValidReviewDestination(
-                destination,
-                generation: identity.generation
-            ) else {
+            guard isValidReviewDestination(destination, generation: identity.generation) else {
                 failStartup(identity: identity, message: "无法确认输入位置")
                 return false
             }
-
-            let authority = ReviewSurfaceAuthority(
-                identifier: UUID(),
+            let identifier = reviewSurfaceIdentifier ?? UUID()
+            reviewSurfaceIdentifier = identifier
+            reviewSurfaceAuthority = ReviewSurfaceAuthority(
+                identifier: identifier,
                 generation: identity.generation,
-                destination: destination,
+                target: .legacy(destination),
                 draft: nil,
                 revision: 0,
                 confirmationAttempt: 0
             )
-            reviewSurfaceAuthority = authority
-            transcriptionReviewState = .streaming(preview: "")
-            status = .streaming
             return true
+        }
+    }
+
+    private func completeReviewTargetCapture(
+        _ result: Result<CapturedReviewTargetDescriptor, ReviewPreBoundaryFailure>,
+        identity: StreamingSessionIdentity
+    ) {
+        guard activeSessionIdentity == identity,
+              let identifier = reviewSurfaceIdentifier,
+              let capturedApplication = pendingReviewCaptureApplication else {
+            if case .success(let descriptor) = result {
+                reviewSubmissionFacade?.releaseCapturedTarget(descriptor.targetID)
+            }
+            return
+        }
+
+        switch result {
+        case .failure:
+            pendingReviewCaptureApplication = nil
+            Task { @MainActor [weak self] in
+                await self?.terminateAbnormally(
+                    message: "无法确认输入位置",
+                    reportsError: true
+                )
+            }
+        case .success(let descriptor):
+            guard descriptor.generation == identity.generation,
+                  descriptor.application == capturedApplication,
+                  descriptor.securityAtCapture == .safe else {
+                pendingReviewCaptureApplication = nil
+                reviewSubmissionFacade?.releaseCapturedTarget(descriptor.targetID)
+                Task { @MainActor [weak self] in
+                    await self?.terminateAbnormally(
+                        message: "无法确认输入位置",
+                        reportsError: true
+                    )
+                }
+                return
+            }
+            pendingReviewCaptureApplication = nil
+            reviewSurfaceAuthority = ReviewSurfaceAuthority(
+                identifier: identifier,
+                generation: identity.generation,
+                target: .production(descriptor),
+                draft: nil,
+                revision: 0,
+                confirmationAttempt: 0
+            )
+            if let pendingIdentity = pendingReviewTerminalIdentity,
+               pendingIdentity == identity,
+               let pendingDraft = pendingReviewTerminalDraft {
+                scheduleReviewTransition(
+                    identity: identity,
+                    authority: reviewSurfaceAuthority!,
+                    draft: pendingDraft,
+                    isPossiblyIncomplete: pendingReviewTerminalIncomplete
+                )
+            } else {
+                let phase: ReviewReadOnlyPhase = captureClosed ? .sealing : .streaming
+                renderReviewReadOnly(
+                    phase: phase,
+                    preview: responseOutputLedger.latestSnapshot,
+                    authority: reviewSurfaceAuthority
+                )
+            }
         }
     }
 
@@ -746,9 +861,12 @@ class MainViewModel: ObservableObject {
         preview: String,
         authority: ReviewSurfaceAuthority? = nil
     ) {
-        guard let currentAuthority = reviewSurfaceAuthority,
-              currentAuthority.identifier == (authority ?? currentAuthority).identifier,
-              !reviewTerminalPending else {
+        guard !reviewTerminalPending else {
+            return
+        }
+        let currentIdentifier = reviewSurfaceAuthority?.identifier ?? reviewSurfaceIdentifier
+        guard let currentIdentifier,
+              authority?.identifier == nil || authority?.identifier == currentIdentifier else {
             return
         }
         switch transcriptionReviewState {
@@ -760,7 +878,7 @@ class MainViewModel: ObservableObject {
 
         reviewSurfaceRevision &+= 1
         let revision = reviewSurfaceRevision
-        let reviewID = currentAuthority.identifier
+        let reviewID = currentIdentifier
         reviewReadOnlyPresentationTask?.cancel()
         reviewReadOnlyPresentationTask = Task { @MainActor [weak self] in
             // Keep the review surface on its own fire-and-forget lane. This yield gives
@@ -769,7 +887,7 @@ class MainViewModel: ObservableObject {
             await Task.yield()
             guard let self,
                   !Task.isCancelled,
-                  self.reviewSurfaceAuthority?.identifier == reviewID,
+                  self.reviewSurfaceIdentifier == reviewID,
                   self.reviewSurfaceRevision == revision,
                   !self.reviewTerminalPending else {
                 return
@@ -1622,7 +1740,6 @@ class MainViewModel: ObservableObject {
         packetIndex: Int?
     ) -> Bool {
         guard isActive(identity),
-              reviewSurfaceAuthority?.generation == identity.generation,
               !reviewTerminalPending else {
             return false
         }
@@ -1691,9 +1808,12 @@ class MainViewModel: ObservableObject {
         identity: StreamingSessionIdentity
     ) -> Bool {
         guard isActive(identity),
-              reviewSurfaceAuthority?.generation == identity.generation,
               !reviewTerminalPending,
               captureClosed else {
+            return true
+        }
+        guard reviewSurfaceAuthority == nil
+                || reviewSurfaceAuthority?.generation == identity.generation else {
             return true
         }
         switch transcriptionReviewState {
@@ -1724,11 +1844,33 @@ class MainViewModel: ObservableObject {
             isPossiblyIncomplete = false
         }
 
-        guard let authority = reviewSurfaceAuthority else {
+        guard let draft else {
+            revokeReviewAuthority()
             return true
         }
         reviewDraftIsPossiblyIncomplete = isPossiblyIncomplete
-        reviewDraftText = draft ?? ""
+        setReviewDraftProjection(draft)
+        guard let authority = reviewSurfaceAuthority else {
+            pendingReviewTerminalIdentity = identity
+            pendingReviewTerminalDraft = draft
+            pendingReviewTerminalIncomplete = isPossiblyIncomplete
+            return true
+        }
+        scheduleReviewTransition(
+            identity: identity,
+            authority: authority,
+            draft: draft,
+            isPossiblyIncomplete: isPossiblyIncomplete
+        )
+        return true
+    }
+
+    private func scheduleReviewTransition(
+        identity: StreamingSessionIdentity,
+        authority: ReviewSurfaceAuthority,
+        draft: String,
+        isPossiblyIncomplete: Bool
+    ) {
         let transitionID = UUID()
         reviewTransitionTask?.cancel()
         reviewTransitionID = transitionID
@@ -1748,7 +1890,6 @@ class MainViewModel: ObservableObject {
                 transitionID: transitionID
             )
         }
-        return true
     }
 
     private func awaitReviewRecorderBarrier(identity: StreamingSessionIdentity) async -> Bool {
@@ -1774,6 +1915,10 @@ class MainViewModel: ObservableObject {
               reviewTransitionID == transitionID else {
             return
         }
+
+        pendingReviewTerminalIdentity = nil
+        pendingReviewTerminalDraft = nil
+        pendingReviewTerminalIncomplete = false
 
         finishSpeechSessionForReview()
 
@@ -1840,10 +1985,23 @@ class MainViewModel: ObservableObject {
     private func startReviewPresentationFocus(reviewID: UUID, generation: UInt64) {
         reviewPresentationFocusTask?.cancel()
         nextPresentationFocusAttemptID &+= 1
+        guard let authority = reviewSurfaceAuthority,
+              authority.identifier == reviewID,
+              authority.generation == generation else {
+            return
+        }
+        let capturedApplication: StableApplicationIdentity
+        switch authority.target {
+        case .production(let target):
+            capturedApplication = target.application
+        case .legacy(let destination):
+            capturedApplication = destination.application
+        }
         let request = ReviewPresentationFocusRequest(
             reviewID: reviewID,
             generation: generation,
-            focusAttemptID: nextPresentationFocusAttemptID
+            focusAttemptID: nextPresentationFocusAttemptID,
+            capturedApplication: capturedApplication
         )
         reviewPresentationFocusRequest = request
         reviewPresentationFocusTask = Task { @MainActor [weak self] in
@@ -1854,6 +2012,7 @@ class MainViewModel: ObservableObject {
                   let authority = self.reviewSurfaceAuthority,
                   authority.identifier == request.reviewID,
                   authority.generation == request.generation,
+                  self.capturedApplication(for: authority) == request.capturedApplication,
                   case .editable = self.transcriptionReviewState else {
                 return
             }
@@ -1865,6 +2024,17 @@ class MainViewModel: ObservableObject {
         reviewPresentationFocusTask?.cancel()
         reviewPresentationFocusTask = nil
         reviewPresentationFocusRequest = nil
+    }
+
+    private func capturedApplication(
+        for authority: ReviewSurfaceAuthority
+    ) -> StableApplicationIdentity {
+        switch authority.target {
+        case .production(let target):
+            return target.application
+        case .legacy(let destination):
+            return destination.application
+        }
     }
 
     private func logReviewPresentationFocus(
@@ -1982,10 +2152,16 @@ class MainViewModel: ObservableObject {
         reviewSurfaceAuthority = authority
         let confirmationAttempt = authority.confirmationAttempt
         reviewConfirmationInFlight = true
+        reviewSubmissionHandle = nil
+        reviewSubmissionRequest = nil
+        reviewSubmissionEnvelope = nil
+        reviewSubmissionCancellationRequested = false
+        reviewSubmissionStarted = false
         cancelReviewPresentationFocus()
-        transcriptionReviewState = .confirming(
+        transcriptionReviewState = .preparingSubmission(
             draft: frozenText,
-            isPossiblyIncomplete: draft.isPossiblyIncomplete
+            isPossiblyIncomplete: draft.isPossiblyIncomplete,
+            feedback: nil
         )
         cancelReviewReadOnlyPresentation()
         reviewTransitionTask?.cancel()
@@ -2004,19 +2180,57 @@ class MainViewModel: ObservableObject {
             }
         )
 
-        let destination = authority.destination
-        reviewDeliveryTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            let result = await self.reviewDestinationDelivery.deliver(
-                frozenText,
-                to: destination
-            )
-            self.completeReviewDelivery(
+        switch authority.target {
+        case .production(let target):
+            guard let reviewSubmissionFacade,
+                  let handle = reviewSubmissionFacade.issueAttemptHandle() else {
+                restoreReviewDraftAfterPreBoundaryFailure(
+                    reviewID: reviewID,
+                    confirmationAttempt: confirmationAttempt,
+                    frozenText: frozenText,
+                    feedback: .deliveryFailed
+                )
+                return
+            }
+            let request = ReviewSubmissionRequestDescriptor(
                 reviewID: reviewID,
-                confirmationAttempt: confirmationAttempt,
-                frozenText: frozenText,
-                result: result
+                generation: authority.generation,
+                revision: authority.revision,
+                attemptOrdinal: confirmationAttempt,
+                frozenDraft: frozenText,
+                capturedTargetID: target.targetID
             )
+            let envelope = reviewSubmissionFacade.makeAdmissionEnvelope(
+                handle: handle,
+                request: request
+            )
+            reviewSubmissionHandle = handle
+            reviewSubmissionRequest = request
+            reviewSubmissionEnvelope = envelope
+            reviewSubmissionFacade.enqueueAdmission(envelope)
+        case .legacy(let destination):
+            guard let reviewDestinationDelivery else {
+                restoreReviewDraftAfterPreBoundaryFailure(
+                    reviewID: reviewID,
+                    confirmationAttempt: confirmationAttempt,
+                    frozenText: frozenText,
+                    feedback: .deliveryFailed
+                )
+                return
+            }
+            reviewDeliveryTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                let result = await reviewDestinationDelivery.deliver(
+                    frozenText,
+                    to: destination
+                )
+                self.completeReviewDelivery(
+                    reviewID: reviewID,
+                    confirmationAttempt: confirmationAttempt,
+                    frozenText: frozenText,
+                    result: result
+                )
+            }
         }
     }
 
@@ -2033,12 +2247,170 @@ class MainViewModel: ObservableObject {
         callbackRevision: UInt64
     ) {
         guard reviewSurfaceAuthority?.identifier == reviewID,
-              callbackRevision == reviewSurfaceRevision,
-              isReviewDraftState else {
+              callbackRevision == reviewSurfaceRevision else {
             return
         }
+        if let handle = reviewSubmissionHandle {
+            if !reviewSubmissionCancellationRequested {
+                reviewSubmissionCancellationRequested = true
+                reviewSubmissionFacade?.enqueueCancellation(handle)
+            }
+            return
+        }
+        guard isReviewDraftState else { return }
         revokeReviewAuthority()
+    }
+
+    private func isCurrentReviewSubmission(
+        _ handle: ReviewSubmissionAttemptHandle
+    ) -> Bool {
+        guard reviewSubmissionHandle == handle,
+              let request = reviewSubmissionRequest,
+              let authority = reviewSurfaceAuthority,
+              let draft = authority.draft,
+              request.reviewID == authority.identifier,
+              request.generation == authority.generation,
+              request.revision == authority.revision,
+              request.attemptOrdinal == authority.confirmationAttempt,
+              request.frozenDraft == draft.text else {
+            return false
+        }
+        guard case .production(let target) = authority.target else {
+            return false
+        }
+        return request.capturedTargetID == target.targetID
+    }
+
+    private func handleReviewSubmissionEvent(_ event: ReviewSubmissionControlEvent) {
+        guard let handle = reviewSubmissionHandle,
+              isCurrentReviewSubmission(handle) else {
+            return
+        }
+        switch event {
+        case .admissionAccepted(let acceptedHandle):
+            guard acceptedHandle == handle,
+                  !reviewSubmissionCancellationRequested,
+                  !reviewSubmissionStarted else { return }
+            reviewSubmissionStarted = true
+            reviewSubmissionFacade?.enqueueStart(handle)
+        case .admissionRejected(let rejectedHandle, let rejection):
+            guard rejectedHandle == handle else { return }
+            restoreReviewDraftAfterPreBoundaryFailure(
+                reviewID: reviewSurfaceAuthority!.identifier,
+                confirmationAttempt: reviewSurfaceAuthority!.confirmationAttempt,
+                frozenText: reviewSurfaceAuthority!.draft?.text ?? "",
+                feedback: reviewFeedback(for: rejection)
+            )
+        case .cancellationResolved(let resolvedHandle, _):
+            guard resolvedHandle == handle else { return }
+            // The matching terminal receipt, not the cancellation signal, owns
+            // restoration and target cleanup.
+            return
+        case .terminal(let terminalHandle, let receipt):
+            guard terminalHandle == handle else { return }
+            handleReviewSubmissionTerminal(receipt, handle: handle)
+        }
+    }
+
+    private func handleReviewSubmissionTerminal(
+        _ receipt: ReviewCommitReceipt,
+        handle: ReviewSubmissionAttemptHandle
+    ) {
+        guard isCurrentReviewSubmission(handle),
+              let authority = reviewSurfaceAuthority,
+              let draft = authority.draft else {
+            return
+        }
+        reviewSubmissionHandle = nil
+        reviewSubmissionRequest = nil
+        reviewSubmissionEnvelope = nil
+        reviewSubmissionCancellationRequested = false
+        reviewSubmissionStarted = false
+
+        switch receipt {
+        case .notStarted(let failure):
+            restoreReviewDraftAfterPreBoundaryFailure(
+                reviewID: authority.identifier,
+                confirmationAttempt: authority.confirmationAttempt,
+                frozenText: draft.text,
+                feedback: reviewFeedback(for: failure)
+            )
+        case .submittedUnverified:
+            dismissSubmittedUnverifiedReview(authority: authority)
+        }
+    }
+
+    private func dismissSubmittedUnverifiedReview(
+        authority: ReviewSurfaceAuthority?
+    ) {
+        cancelReviewReadOnlyPresentation()
+        cancelReviewPresentationFocus()
+        reviewTransitionTask?.cancel()
+        reviewTransitionTask = nil
+        reviewTransitionID = nil
+        reviewDeliveryTask?.cancel()
+        reviewDeliveryTask = nil
+        if let authority {
+            releaseProductionTarget(from: authority)
+        }
+        reviewSurfaceAuthority = nil
+        reviewSurfaceIdentifier = nil
+        pendingReviewCaptureApplication = nil
+        pendingReviewTerminalIdentity = nil
+        pendingReviewTerminalDraft = nil
+        pendingReviewTerminalIncomplete = false
+        reviewTerminalPending = false
+        reviewConfirmationInFlight = false
+        reviewSubmissionHandle = nil
+        reviewSubmissionRequest = nil
+        reviewSubmissionEnvelope = nil
+        reviewSubmissionCancellationRequested = false
+        reviewSubmissionStarted = false
+        reviewDraftIsPossiblyIncomplete = false
+        reviewSurfaceRevision &+= 1
+        setReviewDraftProjection("")
+        transcriptionReviewState = .idle
+        reviewSurfacePresenter.dismiss()
         hotKeyService.resetToIdle()
+    }
+
+    private func restoreReviewDraftAfterPreBoundaryFailure(
+        reviewID: UUID,
+        confirmationAttempt: UInt64,
+        frozenText: String,
+        feedback: ReviewDraftFeedback
+    ) {
+        guard var authority = reviewSurfaceAuthority,
+              authority.identifier == reviewID,
+              authority.confirmationAttempt == confirmationAttempt else {
+            return
+        }
+        authority.draft = ReviewDraft(
+            text: frozenText,
+            isPossiblyIncomplete: authority.draft?.isPossiblyIncomplete ?? false,
+            feedback: feedback
+        )
+        authority.revision &+= 1
+        reviewSurfaceAuthority = authority
+        reviewConfirmationInFlight = false
+        reviewSubmissionHandle = nil
+        reviewSubmissionRequest = nil
+        reviewSubmissionEnvelope = nil
+        reviewSubmissionCancellationRequested = false
+        reviewSubmissionStarted = false
+        setReviewDraftProjection(frozenText)
+        reviewSurfaceRevision &+= 1
+        transcriptionReviewState = .editable(
+            draft: frozenText,
+            isPossiblyIncomplete: authority.draft?.isPossiblyIncomplete ?? false,
+            feedback: feedback
+        )
+        hotKeyService.resetToIdle()
+        installEditableReviewSurface(reviewID: reviewID)
+        startReviewPresentationFocus(
+            reviewID: reviewID,
+            generation: authority.generation
+        )
     }
 
     private func completeReviewDelivery(
@@ -2055,7 +2427,13 @@ class MainViewModel: ObservableObject {
 
         reviewDeliveryTask = nil
         switch result {
-        case .submittedUnverified, .activationFailed, .identityChanged,
+        case .submittedUnverified:
+            guard let authority = reviewSurfaceAuthority else {
+                return
+            }
+            dismissSubmittedUnverifiedReview(authority: authority)
+            return
+        case .activationFailed, .identityChanged,
              .destinationInvalid, .securityRejected, .unsafeText, .deliveryFailed,
              .deliveryUncertain, .cancelled:
             guard var authority = reviewSurfaceAuthority,
@@ -2087,14 +2465,14 @@ class MainViewModel: ObservableObject {
             )
             return
         }
-        hotKeyService.resetToIdle()
     }
 
     private var isReviewDraftState: Bool {
         switch transcriptionReviewState {
         case .editable:
             return true
-        case .idle, .streaming, .sealing, .confirming:
+        case .idle, .streaming, .sealing, .confirming,
+             .preparingSubmission, .submittedUnverifiedTerminal:
             return false
         }
     }
@@ -2117,6 +2495,33 @@ class MainViewModel: ObservableObject {
             return .deliveryFailed
         case .submittedUnverified:
             return .deliveryUncertain
+        }
+    }
+
+    private func reviewFeedback(
+        for rejection: ReviewSubmissionAdmissionRejection
+    ) -> ReviewDraftFeedback {
+        switch rejection {
+        case .unsafeDraft:
+            return .unsafeText
+        case .deadline, .duplicateActiveAttempt, .invalidHandle, .invalidRequest:
+            return .deliveryFailed
+        }
+    }
+
+    private func reviewFeedback(
+        for failure: ReviewPreBoundaryFailure
+    ) -> ReviewDraftFeedback {
+        switch failure {
+        case .securityRejected:
+            return .securityRejected
+        case .targetIdentityChanged, .frontmostChanged, .activationDrift:
+            return .destinationChanged
+        case .cancellation:
+            return .deliveryCancelled
+        case .deadline, .modifierInstability, .inputDrift, .accessibilityTimeout,
+             .accessibilityFailure, .constructionFailure, .readbackFailure, .gateRejected:
+            return .deliveryFailed
         }
     }
 
@@ -2153,8 +2558,18 @@ class MainViewModel: ObservableObject {
     }
 
     private func revokeReviewAuthority() {
+        if let handle = reviewSubmissionHandle {
+            if !reviewSubmissionCancellationRequested {
+                reviewSubmissionCancellationRequested = true
+                reviewSubmissionFacade?.enqueueCancellation(handle)
+            }
+            return
+        }
         let hadAuthority = reviewSurfaceAuthority != nil ||
             transcriptionReviewState != .idle
+        if let authority = reviewSurfaceAuthority {
+            releaseProductionTarget(from: authority)
+        }
         cancelReviewReadOnlyPresentation()
         cancelReviewPresentationFocus()
         reviewSurfaceRevision &+= 1
@@ -2164,14 +2579,28 @@ class MainViewModel: ObservableObject {
         reviewDeliveryTask?.cancel()
         reviewDeliveryTask = nil
         reviewSurfaceAuthority = nil
+        reviewSurfaceIdentifier = nil
+        pendingReviewCaptureApplication = nil
+        pendingReviewTerminalIdentity = nil
+        pendingReviewTerminalDraft = nil
+        pendingReviewTerminalIncomplete = false
         reviewTerminalPending = false
         reviewConfirmationInFlight = false
+        reviewSubmissionRequest = nil
+        reviewSubmissionEnvelope = nil
+        reviewSubmissionCancellationRequested = false
+        reviewSubmissionStarted = false
         reviewDraftIsPossiblyIncomplete = false
         setReviewDraftProjection("")
         transcriptionReviewState = .idle
         if hadAuthority {
             reviewSurfacePresenter.dismiss()
         }
+    }
+
+    private func releaseProductionTarget(from authority: ReviewSurfaceAuthority) {
+        guard case .production(let descriptor) = authority.target else { return }
+        reviewSubmissionFacade?.releaseCapturedTarget(descriptor.targetID)
     }
 
     private func handleTerminalEvent(
@@ -2351,6 +2780,9 @@ class MainViewModel: ObservableObject {
         reviewTransitionTask?.cancel()
         reviewTransitionTask = nil
         reviewTransitionID = nil
+        if let authority = reviewSurfaceAuthority {
+            releaseProductionTarget(from: authority)
+        }
         reviewSurfaceAuthority = nil
         reviewDraftIsPossiblyIncomplete = true
         reviewConfirmationInFlight = false

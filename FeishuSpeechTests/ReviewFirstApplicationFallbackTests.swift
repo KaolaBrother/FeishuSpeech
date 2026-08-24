@@ -206,7 +206,7 @@ final class ReviewFirstApplicationFallbackTests: XCTestCase {
         XCTAssertEqual(accessibility.captureCallCount, 1)
     }
 
-    func test_applicationBoundReviewDelivery_reactivatesExactIdentityAndInsertsFrozenMultilineDraftOnce() async {
+    func test_applicationBoundReviewDelivery_preservesExactIdentityWithoutActivationAndInsertsFrozenMultilineDraftOnce() async {
         let runtime = Issue40ApplicationRuntime()
         let activator = Issue40ApplicationActivator()
         let secureInput = Issue40SecureInputProvider(
@@ -242,7 +242,11 @@ final class ReviewFirstApplicationFallbackTests: XCTestCase {
         let result = await delivery.deliver(frozenDraft, to: destination)
 
         XCTAssertEqual(result, .submittedUnverified)
-        XCTAssertEqual(activator.activationRequests, [runtime.capturedIdentity])
+        XCTAssertEqual(
+            activator.activationRequests,
+            [],
+            "v5 review delivery must not activate or retarget the captured application"
+        )
         XCTAssertEqual(unicodePoster.requestedTexts, [frozenDraft])
         XCTAssertEqual(unicodePoster.processIdentifiers, [42])
         XCTAssertEqual(pasteboard.writtenTexts, [])
@@ -389,7 +393,9 @@ final class ReviewFirstApplicationFallbackTests: XCTestCase {
 
         let frozenDraft = "trusted capture\nrevoked before confirmation"
         presenter.invokeDraftChange(frozenDraft)
-        presenter.invokeConfirm()
+        guard presenter.invokeConfirm() else {
+            return XCTFail("the retained production panel must accept the qualified Return gesture")
+        }
         await waitUntil { delivery.deliverCallCount == 1 }
         await waitUntil {
             if case .editable(_, _, feedback: .securityRejected) = viewModel.transcriptionReviewState {
@@ -400,7 +406,9 @@ final class ReviewFirstApplicationFallbackTests: XCTestCase {
 
         XCTAssertEqual(delivery.captureCallCount, 1)
         XCTAssertEqual(delivery.deliveredTexts, [frozenDraft])
-        XCTAssertEqual(delivery.deliveredDestinations.count, 1)
+        guard delivery.deliveredDestinations.count == 1 else {
+            return XCTFail("a confirmed fallback must retain exactly one captured destination")
+        }
         guard case .applicationCurrentFocus = delivery.deliveredDestinations[0].binding else {
             XCTFail("coordinator must retain the captured application-current-focus authority")
             return
@@ -467,7 +475,11 @@ final class ReviewFirstApplicationFallbackTests: XCTestCase {
         XCTAssertEqual(result, .securityRejected)
         XCTAssertNotEqual(result, .submittedUnverified)
         XCTAssertEqual(trustProvider.readCount, 5)
-        XCTAssertEqual(activator.activationRequests, [runtime.capturedIdentity])
+        XCTAssertEqual(
+            activator.activationRequests,
+            [],
+            "preflight trust rejection must not request target activation"
+        )
         XCTAssertEqual(snapshotReadCount, 0)
         XCTAssertEqual(changeCountReadCount, 0)
         XCTAssertEqual(restoreCount, 0)
@@ -525,7 +537,11 @@ final class ReviewFirstApplicationFallbackTests: XCTestCase {
         XCTAssertEqual(result, .deliveryUncertain)
         XCTAssertNotEqual(result, .submittedUnverified)
         XCTAssertEqual(trustProvider.readCount, 7)
-        XCTAssertEqual(activator.activationRequests, [runtime.capturedIdentity])
+        XCTAssertEqual(
+            activator.activationRequests,
+            [],
+            "postflight trust uncertainty must not request target activation"
+        )
         XCTAssertEqual(snapshotReadCount, 0)
         XCTAssertEqual(changeCountReadCount, 0)
         XCTAssertEqual(restoreCount, 0)
@@ -668,11 +684,16 @@ final class ReviewFirstApplicationFallbackTests: XCTestCase {
         )
 
         XCTAssertEqual(stableResult, .submittedUnverified)
+        XCTAssertFalse(
+            stableTrace.events.contains("activated"),
+            "v5 review delivery must not activate the captured application"
+        )
         XCTAssertEqual(
-            stableTrace.eventsBetween("activated", and: "unicode"),
+            stableTrace.events.suffix(16),
             [
-                "running", "frontmost",
                 "secure", "pid", "running", "frontmost", "secure",
+                "secure", "pid", "running", "frontmost", "secure",
+                "unicode",
                 "secure", "pid", "running", "frontmost", "secure"
             ],
             "fallback preflight must take two consecutive Secure/PID/identity/Secure samples"
@@ -684,7 +705,7 @@ final class ReviewFirstApplicationFallbackTests: XCTestCase {
         XCTAssertEqual(stableSnapshotCount, 0)
         XCTAssertEqual(stableSecureInput.queryCount, 6)
         XCTAssertEqual(stableFrontmostProcess.queryCount, 3)
-        XCTAssertEqual(stableActivator.activationRequests, [stableRuntime.capturedIdentity])
+        XCTAssertEqual(stableActivator.activationRequests, [])
 
         let transitionTrace = Issue40CompositeSampleTrace()
         let transitionRuntime = Issue40CompositeApplicationRuntime(trace: transitionTrace)
@@ -729,9 +750,15 @@ final class ReviewFirstApplicationFallbackTests: XCTestCase {
         )
 
         XCTAssertEqual(transitionResult, .securityRejected)
+        XCTAssertFalse(
+            transitionTrace.events.contains("activated"),
+            "v5 review delivery must not activate the captured application"
+        )
         XCTAssertEqual(
-            transitionTrace.eventsAfter("activated"),
+            transitionTrace.events.suffix(15),
             [
+                "running",
+                "running", "frontmost",
                 "running", "frontmost",
                 "secure", "pid", "running", "frontmost", "secure",
                 "secure", "pid", "running", "frontmost", "secure"
@@ -745,12 +772,11 @@ final class ReviewFirstApplicationFallbackTests: XCTestCase {
         XCTAssertEqual(transitionSnapshotCount, 0)
         XCTAssertEqual(transitionSecureInput.queryCount, 4)
         XCTAssertEqual(transitionFrontmostProcess.queryCount, 2)
-        XCTAssertEqual(transitionActivator.activationRequests, [transitionRuntime.capturedIdentity])
+        XCTAssertEqual(transitionActivator.activationRequests, [])
     }
 
     func test_applicationBoundReviewDelivery_rejectsActivationIdentityUnsafeAndUncertainWithoutCursorOutput() async {
         let cases: [(String, (Issue40ApplicationRuntime, Issue40ApplicationActivator, Issue40FinalTextOutput) -> Void, String, ReviewDeliveryResult)] = [
-            ("activation failure", { _, activator, _ in activator.result = .timedOut }, "PRIVATE_ACTIVATION", .activationFailed),
             ("identity change", { runtime, _, _ in
                 runtime.runningIdentity = Issue40Fixtures.applicationIdentity(
                     pid: 42,
@@ -872,7 +898,9 @@ final class ReviewFirstApplicationFallbackTests: XCTestCase {
 
         let frozenDraft = "edited first line\nedited second line"
         context.presenter.invokeDraftChange(frozenDraft)
-        context.presenter.invokeConfirm()
+        guard context.presenter.invokeConfirm() else {
+            return XCTFail("the retained production panel must accept the qualified Return gesture")
+        }
         context.presenter.invokeConfirm()
         await waitUntil { delivery.deliveredTexts.count == 1 }
         await waitUntil {
@@ -940,7 +968,7 @@ final class ReviewFirstApplicationFallbackTests: XCTestCase {
     ) async {
         for _ in 0 ..< 300 {
             if predicate() { return }
-            await Task.yield()
+            try? await Task.sleep(nanoseconds: 1_000_000)
         }
         logger.debug("review fallback wait timed out")
         XCTFail("timed out waiting for review fallback state")
@@ -951,11 +979,12 @@ final class ReviewFirstApplicationFallbackTests: XCTestCase {
     ) async {
         for _ in 0 ..< 300 {
             if await predicate() { return }
-            await Task.yield()
+            try? await Task.sleep(nanoseconds: 1_000_000)
         }
         logger.debug("review fallback async wait timed out")
         XCTFail("timed out waiting for review fallback async state")
     }
+
 }
 
 @MainActor
@@ -1725,10 +1754,15 @@ private final class Issue40AudioRecorder: AudioRecorder {
 
 @MainActor
 private final class Issue40ReviewSurfacePresenter: ReviewSurfacePresenting {
+    private var capturedApplication: StableApplicationIdentity?
+    private lazy var productionController = issue40MakeDeterministicReviewWindowController { [weak self] in
+        self?.capturedApplication
+    }
     var readOnlyRenderGateOpen = true
     private(set) var renderReadOnlyCallCount = 0
     private(set) var lastPresentedPreview = ""
     private(set) var renderDraftCallCount = 0
+    private(set) var confirmGestureCount = 0
     private var draftState: TranscriptionReviewState?
     private var onDraftChange: (@MainActor (String) -> Void)?
     private var onConfirm: (@MainActor (ReviewConfirmationIntent) -> Void)?
@@ -1749,15 +1783,27 @@ private final class Issue40ReviewSurfacePresenter: ReviewSurfacePresenting {
         draftState = state
         self.onDraftChange = onDraftChange
         self.onConfirm = onConfirm
+        productionController.renderDraft(
+            state: state,
+            onDraftChange: onDraftChange,
+            onConfirm: { [weak self] intent in
+                self?.confirmGestureCount += 1
+                onConfirm(intent)
+            },
+            onDiscard: onDiscard
+        )
     }
 
     func requestPresentationFocus(
         _ request: ReviewPresentationFocusRequest
     ) async -> ReviewPresentationFocusOutcome {
-        ReviewPresentationFocusOutcome(request: request, result: .focused)
+        capturedApplication = request.capturedApplication
+        return await productionController.requestPresentationFocus(request)
     }
 
-    func dismiss() {}
+    func dismiss() {
+        productionController.dismiss()
+    }
 
     func invokeDraftChange(_ draft: String) {
         onDraftChange?(draft)
@@ -1770,68 +1816,22 @@ private final class Issue40ReviewSurfacePresenter: ReviewSurfacePresenting {
         }
     }
 
-    func invokeConfirm() {
+    @discardableResult
+    func invokeConfirm() -> Bool {
         guard let draftState,
               case .editable = draftState,
-              let onConfirm else { return }
-        let hostingView = NSHostingView(
-            rootView: TranscriptionReviewView(
-                state: draftState,
-                onConfirm: onConfirm
-            )
-        )
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 320),
-            styleMask: [.titled],
-            backing: .buffered,
-            defer: false
-        )
-        window.contentView = hostingView
-        window.isReleasedWhenClosed = false
-        window.makeKeyAndOrderFront(nil)
-        hostingView.layoutSubtreeIfNeeded()
-        window.displayIfNeeded()
-        hostingView.layoutSubtreeIfNeeded()
-        guard let editor = editableTextView(in: hostingView) else {
-            XCTFail("the opaque confirmation path must materialize the real editable editor")
-            window.orderOut(nil)
-            window.close()
-            return
+              let panel = NSApp.windows.compactMap({ $0 as? ReviewPanel }).last else {
+            return false
         }
-        XCTAssertTrue(window.makeFirstResponder(editor))
-        guard let returnEvent = NSEvent.keyEvent(
-            with: .keyDown,
-            location: .zero,
-            modifierFlags: [],
-            timestamp: 0,
-            windowNumber: window.windowNumber,
-            context: nil,
-            characters: "\r",
-            charactersIgnoringModifiers: "\r",
-            isARepeat: false,
-            keyCode: 36
-        ) else {
-            XCTFail("the qualified native Return event must be constructible")
-            window.orderOut(nil)
-            window.close()
-            return
+        // Fallback confirmation is the visible Send action. Native Return
+        // has its own controller/panel arbiter coverage; this path must use
+        // the real SwiftUI button bridge rather than manufacturing intent.
+        let priorConfirmCount = confirmGestureCount
+        for y in stride(from: CGFloat(8), through: CGFloat(280), by: CGFloat(8)) {
+            _ = issue40PerformRealSendClick(on: panel, contentY: y)
+            if confirmGestureCount > priorConfirmCount { return true }
         }
-        editor.keyDown(with: returnEvent)
-        window.orderOut(nil)
-        window.close()
-    }
-
-    private func editableTextView(in view: NSView?) -> NSTextView? {
-        guard let view else { return nil }
-        if let textView = view as? NSTextView, textView.isEditable {
-            return textView
-        }
-        for subview in view.subviews.reversed() {
-            if let textView = editableTextView(in: subview) {
-                return textView
-            }
-        }
-        return nil
+        return false
     }
 }
 

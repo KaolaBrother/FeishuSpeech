@@ -251,16 +251,15 @@ final class WorkspaceReviewApplicationActivator: ReviewApplicationActivating {
 
 /// Review output owns one monitor session for the complete delivery attempt.
 /// Both monitors are armed before activation; their baselines are captured
-/// only after the captured application is live. The activation lock is always
-/// acquired before the input monitor's epoch lock, and that ordering remains
-/// held through the final epoch/modifier gate and the two event-post attempts.
+/// only after the captured application is confirmed frontmost. The accepted
+/// v5 path performs value-only checks outside the monitor callbacks; its raw
+/// pair gate is owned by ReviewSubmissionExecutor.
 @MainActor
-private final class ReviewDeliveryMonitoringSession {
+final class ReviewDeliveryMonitoringSession {
     private let inputMonitor: CurrentFocusInputMonitoring
     private let activationMonitor: CurrentFocusActivationMonitoring
     private let modifierSampler: () -> CGEventFlags
     private let modifierSleeper: (UInt64) async -> Bool
-    private let activationLock = NSLock()
 
     private var isArmed = false
     private var inputBaseline: UInt64?
@@ -375,38 +374,41 @@ private final class ReviewDeliveryMonitoringSession {
             return false
         }
 
-        // Fixed ordering: activation lock first, then CurrentFocusInput's
-        // epoch lock inside postCompleteSyntheticPairIf...(). No recheck is
-        // performed between the poster's down and mandatory up callbacks.
-        activationLock.lock()
-        defer { activationLock.unlock() }
+        // The monitor's epoch gate is used only to reserve a value-sized entry
+        // point.  It must never invoke caller work that can read the epoch
+        // again while its non-recursive lock is held.  The actual pair work is
+        // deliberately outside that callback and is retained only as a
+        // compatibility seam; v5 submission uses the executor-owned concrete
+        // committer instead of this legacy callback API.
         guard activationMonitor.activationEpoch == expectedActivationEpoch else {
             return false
         }
 
-        var postPairEntered = false
+        var gateEntered = false
         let inputGateEntered = inputMonitor
             .postCompleteSyntheticPairIfInterferenceEpochIsUnchanged(
                 expectedEpoch: expectedInputEpoch
             ) {
-                guard activationMonitor.activationEpoch == expectedActivationEpoch,
-                      inputMonitor.interferenceEpoch == expectedInputEpoch,
-                      !inputMonitorObservedDrift,
-                      !activationMonitorObservedDrift,
-                      modifierSampler().isDisjoint(with: [
-                          .maskCommand,
-                          .maskShift,
-                          .maskControl,
-                          .maskAlternate,
-                          .maskSecondaryFn,
-                          .maskAlphaShift
-                      ]) else {
-                    return
-                }
-                postPairEntered = true
-                postPair()
+                gateEntered = true
             }
-        return inputGateEntered && postPairEntered
+        guard inputGateEntered,
+              gateEntered,
+              activationMonitor.activationEpoch == expectedActivationEpoch,
+              inputMonitor.interferenceEpoch == expectedInputEpoch,
+              !inputMonitorObservedDrift,
+              !activationMonitorObservedDrift,
+              modifierSampler().isDisjoint(with: [
+                  .maskCommand,
+                  .maskShift,
+                  .maskControl,
+                  .maskAlternate,
+                  .maskSecondaryFn,
+                  .maskAlphaShift
+              ]) else {
+            return false
+        }
+        postPair()
+        return true
     }
 
     func postflightIsStable() -> Bool {
@@ -425,12 +427,31 @@ private final class ReviewDeliveryMonitoringSession {
             .maskSecondaryFn,
             .maskAlphaShift
         ]
-        activationLock.lock()
-        defer { activationLock.unlock() }
         return activationMonitor.activationEpoch == expectedActivationEpoch
             && inputMonitor.interferenceEpoch == expectedInputEpoch
             && !inputMonitorObservedDrift
             && !activationMonitorObservedDrift
+            && modifierSampler().isDisjoint(with: relevantFlags)
+    }
+
+    func isStableBeforeCommit() -> Bool {
+        guard isArmed,
+              let expectedInputEpoch = inputBaseline,
+              let expectedActivationEpoch = activationBaseline,
+              !inputMonitorObservedDrift,
+              !activationMonitorObservedDrift else {
+            return false
+        }
+        let relevantFlags: CGEventFlags = [
+            .maskCommand,
+            .maskShift,
+            .maskControl,
+            .maskAlternate,
+            .maskSecondaryFn,
+            .maskAlphaShift
+        ]
+        return activationMonitor.activationEpoch == expectedActivationEpoch
+            && inputMonitor.interferenceEpoch == expectedInputEpoch
             && modifierSampler().isDisjoint(with: relevantFlags)
     }
 
@@ -586,12 +607,11 @@ final class SystemReviewDestinationDelivery: ReviewDestinationDelivering {
         }
         defer { monitoring.stop() }
 
-        let activation = await applicationActivator.activateAndWait(
-            for: destination.application,
-            timeoutNanoseconds: Self.activationTimeoutNanoseconds
-        )
         guard !Task.isCancelled else { return .cancelled }
-        guard activation == .activated else { return activationFailure(for: activation) }
+        // v5 never activates or retargets the captured application.  The
+        // nonactivating review surface must leave the captured target
+        // frontmost; a drift is a typed fail-closed result.
+        guard destinationIsCurrent(destination) else { return .identityChanged }
 
         return await deliverAfterActivation(
             frozenText,
@@ -634,6 +654,9 @@ final class SystemReviewDestinationDelivery: ReviewDestinationDelivering {
         to destination: ReviewDestinationToken,
         monitoring: ReviewDeliveryMonitoringSession
     ) -> FinalTextInsertionResult {
+        guard monitoring.isStableBeforeCommit() else {
+            return .deliveryFailed
+        }
         switch destination.binding {
         case .exactCursor(let cursor):
             return finalTextOutput.insertOnce(
@@ -644,8 +667,9 @@ final class SystemReviewDestinationDelivery: ReviewDestinationDelivering {
                 },
                 validateAfterPosting: { [weak self] in
                     self?.validateExactAfterPosting(destination) == .valid
+                        && monitoring.postflightIsStable()
                 },
-                postPairIfPreflightRemainsValid: { [monitoring] postPair in
+                postPairIfPreflightRemainsValid: { postPair in
                     monitoring.performFinalPair(postPair)
                 }
             )
@@ -654,14 +678,20 @@ final class SystemReviewDestinationDelivery: ReviewDestinationDelivering {
                 frozenText,
                 processIdentifier: destination.application.processIdentifier,
                 validateBeforeMutation: { [weak self] in
-                    self?.validateApplicationCurrentFocusBeforeMutation(destination)
-                        ?? .destinationInvalid
+                    guard let validation = self?.validateApplicationCurrentFocusBeforeMutation(
+                        destination
+                    ) else { return .destinationInvalid }
+                    return validation
                 },
                 validateAfterPosting: { [weak self] in
-                    self?.validateApplicationCurrentFocusAfterPosting(destination)
-                        ?? .destinationInvalid
+                    guard let validation = self?.validateApplicationCurrentFocusAfterPosting(
+                        destination
+                    ) else { return .destinationInvalid }
+                    return validation == .valid && monitoring.postflightIsStable()
+                        ? .valid
+                        : validation
                 },
-                postPairIfPreflightRemainsValid: { [monitoring] postPair in
+                postPairIfPreflightRemainsValid: { postPair in
                     monitoring.performFinalPair(postPair)
                 }
             )

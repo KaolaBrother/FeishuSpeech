@@ -132,17 +132,13 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
         context.presenter.invokeConfirm()
         context.presenter.invokeConfirm()
         await waitUntil { context.delivery.deliveredTexts.count == 1 }
+        await waitUntil { context.viewModel.transcriptionReviewState == .idle }
 
         XCTAssertEqual(context.delivery.deliveredTexts, ["PRIVATE_EDITED_DRAFT"])
         XCTAssertEqual(context.delivery.copyCalls, 0)
-        XCTAssertEqual(
-            context.viewModel.transcriptionReviewState,
-            .editable(
-                draft: "PRIVATE_EDITED_DRAFT",
-                isPossiblyIncomplete: false,
-                feedback: .deliveryUncertain
-            )
-        )
+        XCTAssertEqual(context.viewModel.transcriptionReviewState, .idle)
+        XCTAssertEqual(context.viewModel.reviewDraftText, "")
+        XCTAssertGreaterThanOrEqual(context.presenter.dismissCallCount, 1)
     }
 
     func test_reviewFirst_confirmationFreezesExactCurrentNonWhitespaceDraftAndDeliversOnce() async {
@@ -155,6 +151,7 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
         context.presenter.invokeConfirm()
         context.presenter.invokeConfirm()
         await waitUntil { context.delivery.deliveredTexts.count == 1 }
+        await waitUntil { context.viewModel.transcriptionReviewState == .idle }
 
         XCTAssertEqual(
             context.delivery.deliveredTexts,
@@ -162,14 +159,9 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
             "confirmation must deliver the current non-whitespace draft without trimming or normalizing"
         )
         XCTAssertEqual(context.delivery.copyCalls, 0)
-        XCTAssertEqual(
-            context.viewModel.transcriptionReviewState,
-            .editable(
-                draft: draft,
-                isPossiblyIncomplete: false,
-                feedback: .deliveryUncertain
-            )
-        )
+        XCTAssertEqual(context.viewModel.transcriptionReviewState, .idle)
+        XCTAssertEqual(context.viewModel.reviewDraftText, "")
+        XCTAssertGreaterThanOrEqual(context.presenter.dismissCallCount, 1)
     }
 
     func test_reviewFirst_realProductionSurfaceMakesFrozenDraftConfirmableWithoutRetryEditing() async throws {
@@ -179,6 +171,8 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
             readinessEnvironment: ReviewWindowController.ReadinessEnvironment(
                 requestActivation: { true },
                 applicationIsActive: { true },
+                frontmostApplication: { Issue38ReviewDestinationDelivery.testApplicationIdentity },
+                feishuSpeechIsActive: { false },
                 panelIsKey: { _ in true },
                 editorLookup: production.editorLookup,
                 editorAttached: production.editorAttached,
@@ -214,6 +208,12 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
             ),
             "a genuinely ready production surface must transition out of pending into confirmable editable state"
         )
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+        try? await Task.sleep(nanoseconds: 1_000_000_000)
+        await waitUntil {
+            firstResponderProbe.makeCallCount > 0 &&
+                firstResponderProbe.checkCallCount > 0
+        }
         let panel = try XCTUnwrap(presenter.retainedPanel)
         let editor = try XCTUnwrap(
             editableTextView(in: panel.contentView),
@@ -249,6 +249,247 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
         XCTAssertEqual(context.delivery.copyCalls, 0)
     }
 
+    func test_reviewFirst_realControllerRecoveryRendersEditableAgainAndRoutesSecondSend() async throws {
+        let controller = ReviewWindowController(
+            readinessEnvironment: ReviewWindowController.ReadinessEnvironment(
+                requestActivation: { false },
+                applicationIsActive: { true },
+                frontmostApplication: { nil },
+                feishuSpeechIsActive: { false },
+                panelIsKey: { _ in true },
+                editorLookup: { [self] view in self.editableTextView(in: view) },
+                editorAttached: { editor, panel in editor.window === panel },
+                makeFirstResponder: { panel, editor in panel.makeFirstResponder(editor) },
+                firstResponderIsEditor: { panel, editor in panel.firstResponder === editor },
+                nowNanoseconds: { DispatchTime.now().uptimeNanoseconds },
+                sleep: { nanoseconds in try await Task.sleep(nanoseconds: nanoseconds) }
+            )
+        )
+        let presenter = Issue40ProductionReviewSurfacePresenter(controller: controller)
+        var currentDraft = "PRIVATE_RECOVERY_A"
+        var callbackDrafts: [String] = []
+        let onDraftChange: @MainActor (String) -> Void = { draft in
+            currentDraft = draft
+        }
+        let onConfirm: @MainActor (ReviewConfirmationIntent) -> Void = { _ in
+            callbackDrafts.append(currentDraft)
+        }
+        let onDiscard: @MainActor () -> Void = {}
+        defer { controller.dismiss() }
+
+        presenter.renderDraft(
+            state: .editable(draft: currentDraft, isPossiblyIncomplete: false, feedback: nil),
+            onDraftChange: onDraftChange,
+            onConfirm: onConfirm,
+            onDiscard: onDiscard
+        )
+        let firstPanel = try XCTUnwrap(presenter.retainedPanel)
+        XCTAssertTrue(presenter.invokeSend(), "the first Send must use the real controller/panel gesture")
+        XCTAssertEqual(callbackDrafts, ["PRIVATE_RECOVERY_A"])
+
+        presenter.renderDraft(
+            state: .preparingSubmission(draft: currentDraft, isPossiblyIncomplete: false),
+            onDraftChange: onDraftChange,
+            onConfirm: onConfirm,
+            onDiscard: onDiscard
+        )
+        presenter.renderDraft(
+            state: .editable(
+                draft: currentDraft,
+                isPossiblyIncomplete: false,
+                feedback: .deliveryUncertain
+            ),
+            onDraftChange: onDraftChange,
+            onConfirm: onConfirm,
+            onDiscard: onDiscard
+        )
+        presenter.replaceDraft("PRIVATE_RECOVERY_B")
+        XCTAssertEqual(currentDraft, "PRIVATE_RECOVERY_B")
+        XCTAssertTrue(presenter.retainedPanel === firstPanel, "recovery must retain the same production ReviewPanel")
+        XCTAssertTrue(
+            presenter.invokeSend(),
+            "recovered editable A must accept an edited B and route a second real Send"
+        )
+        XCTAssertEqual(callbackDrafts, ["PRIVATE_RECOVERY_A", "PRIVATE_RECOVERY_B"])
+        XCTAssertEqual(presenter.confirmGestureCount, 2)
+    }
+
+    func test_v5CoordinatorProductionFacadeUsesOneHandleAndTerminalStateCannotResend() async {
+        let facade = V5ReviewSubmissionFacadeSpy()
+        let production = ReviewWindowController.ReadinessEnvironment.appKit
+        let controller = ReviewWindowController(
+            readinessEnvironment: ReviewWindowController.ReadinessEnvironment(
+                requestActivation: { false },
+                applicationIsActive: { true },
+                frontmostApplication: { facade.identity },
+                feishuSpeechIsActive: { false },
+                panelIsKey: { _ in true },
+                editorLookup: production.editorLookup,
+                editorAttached: production.editorAttached,
+                makeFirstResponder: production.makeFirstResponder,
+                firstResponderIsEditor: production.firstResponderIsEditor,
+                nowNanoseconds: production.nowNanoseconds,
+                sleep: production.sleep
+            )
+        )
+        let recorder = Issue38ReviewAudioRecorder(holdStopBarrier: false)
+        let session = Issue38ReviewStreamingSession(
+            packetEvents: [.partial("PRIVATE_FACADE_PARTIAL")],
+            finishEvent: .final("PRIVATE_FACADE_FINAL")
+        )
+        let provider = Issue38ReviewStreamingProvider(session: session)
+        let presenter = Issue40ProductionReviewSurfacePresenter(controller: controller)
+        let delivery = Issue38ReviewDestinationDelivery()
+        defer { controller.dismiss() }
+        let viewModel = MainViewModel(
+            audioRecorder: recorder,
+            settings: AppSettings(
+                appId: "configured-app",
+                appSecret: "configured-secret",
+                autoInsert: true,
+                playSound: false,
+                reviewBeforeInsert: true
+            ),
+            hotKeyWakeRecovering: TrackingHotKeyWakeRecoverer(),
+            streamingProvider: provider,
+            overlayPresenter: Issue38ReviewOverlayPresenter(),
+            reviewDestinationDelivery: nil,
+            reviewSubmissionFacade: facade,
+            reviewSurfacePresenter: presenter
+        )
+        let identity = StreamingSessionIdentity(generation: 5_100)
+
+        viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
+        await waitUntil { recorder.startStreamingCallCount == 1 }
+        recorder.emit(Data(repeating: 0x55, count: 6_400))
+        await waitUntilAsync { await session.sendCallCount == 1 }
+        await waitUntil {
+            if case .streaming = viewModel.transcriptionReviewState {
+                return facade.captureRequests.count == 1 && facade.captureCompletedCount == 1
+            }
+            return false
+        }
+        await waitUntilAsync { await provider.makeSessionCallCount == 1 }
+        await settle()
+        viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
+        await waitUntilAsync { await session.finishCallCount == 1 }
+        // The production consumer owns the terminal flag on the finish event;
+        // allow that MainActor admission to run before asserting the editable
+        // transition.  The DEBUG event hook is intentionally non-terminal and
+        // must not be used as a coordinator bypass here.
+        await settle()
+        await waitUntil {
+            if case .editable = viewModel.transcriptionReviewState {
+                return true
+            }
+            return false
+        }
+
+        presenter.replaceDraft("PRIVATE_FACADE_EDIT")
+        // Use the real retained ReviewPanel's visible Send mouse route as the
+        // opaque confirmation source. Native Return is independently pinned
+        // by the controller readiness suite, while this case exercises the
+        // production coordinator/facade admission contract.
+        XCTAssertTrue(presenter.invokeConfirm())
+        _ = presenter.invokeConfirm()
+        XCTAssertEqual(presenter.confirmGestureCount, 1)
+        await waitUntil {
+            if case .preparingSubmission = viewModel.transcriptionReviewState {
+                return facade.admissionEnvelopes.count == 1
+            }
+            return false
+        }
+        guard let firstEnvelope = facade.admissionEnvelopes.first else {
+            return XCTFail("the production facade must receive one admission envelope")
+        }
+        XCTAssertEqual(facade.issuedHandleCount, 1)
+        XCTAssertEqual(facade.startedHandles, [])
+        let firstHandle = firstEnvelope.handle
+        facade.emit(.admissionAccepted(firstHandle))
+        await waitUntil { facade.startedHandles == [firstHandle] }
+        facade.emit(.terminal(firstHandle, .notStarted(.cancellation)))
+        await waitUntil {
+            if case .editable(
+                let draft,
+                _,
+                feedback: .deliveryCancelled
+            ) = viewModel.transcriptionReviewState {
+                return draft == "PRIVATE_FACADE_EDIT"
+            }
+            return false
+        }
+
+        // The coordinator publishes the editable recovery state before the
+        // presenter receives its replacement render on the MainActor.
+        await settle()
+        try? await Task.sleep(nanoseconds: 250_000_000)
+        XCTAssertTrue(
+            presenter.renderedStates.contains {
+                if case .editable(_, _, feedback: .deliveryCancelled) = $0 { return true }
+                return false
+            },
+            "cancellation must re-render the retained draft as editable before explicit retry"
+        )
+        presenter.replaceDraft("PRIVATE_FACADE_RETRY")
+        await settle()
+        XCTAssertTrue(presenter.invokeConfirm())
+        XCTAssertEqual(presenter.confirmGestureCount, 2)
+        await waitUntil {
+            if case .preparingSubmission = viewModel.transcriptionReviewState {
+                return facade.admissionEnvelopes.count == 2
+            }
+            return false
+        }
+        guard facade.admissionEnvelopes.count == 2 else {
+            return XCTFail("the explicit retry must create exactly one new admission envelope")
+        }
+        let secondHandle = facade.admissionEnvelopes[1].handle
+        XCTAssertNotEqual(firstHandle, secondHandle)
+        XCTAssertEqual(facade.admissionEnvelopes[1].request.frozenDraft, "PRIVATE_FACADE_RETRY")
+        facade.emit(.admissionAccepted(secondHandle))
+        await waitUntil { facade.startedHandles == [firstHandle, secondHandle] }
+        facade.emit(
+            .terminal(
+                secondHandle,
+                .submittedUnverified(
+                    ReviewPostBoundaryObservation(
+                        mandatoryKeyUpAttempted: true,
+                        cancellationObservedAfterDown: false,
+                        postflightStable: true
+                    )
+                )
+            )
+        )
+        for _ in 0 ..< 200 {
+            if case .submittedUnverifiedTerminal(let draft, _, _) = viewModel.transcriptionReviewState,
+               draft == "PRIVATE_FACADE_RETRY" {
+                break
+            }
+            await Task.yield()
+        }
+        XCTAssertEqual(
+            viewModel.transcriptionReviewState,
+            .idle,
+            "a submitted-unverified terminal receipt must dismiss the ordinary preview and return the review axis to idle"
+        )
+        XCTAssertEqual(
+            viewModel.reviewDraftText,
+            "",
+            "terminal uncertainty must not leave transcript text projected into the ordinary preview"
+        )
+        XCTAssertNil(
+            presenter.retainedPanel,
+            "terminal uncertainty must dismiss the retained ReviewPanel"
+        )
+        XCTAssertFalse(
+            presenter.hasSendControl,
+            "submitted-unverified terminal state must not expose a resend control"
+        )
+        XCTAssertEqual(facade.issuedHandleCount, 2)
+        XCTAssertEqual(facade.releasedTargetIDs, [facade.target.targetID])
+        XCTAssertEqual(delivery.deliveredTexts, [])
+    }
+
     func test_reviewFirst_repeatedBareReturnFromNativeEditorDeliversExactDraftOnce() async throws {
         let nativePresenter = Issue39NativeReviewSurfacePresenter()
         let context = makeContext(
@@ -271,34 +512,96 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
         XCTAssertEqual(context.viewModel.reviewDraftText, editedDraft)
 
         for _ in 0 ..< 2 {
-            let event = try XCTUnwrap(
-                NSEvent.keyEvent(
-                    with: .keyDown,
-                    location: .zero,
-                    modifierFlags: [],
-                    timestamp: 0,
-                    windowNumber: window.windowNumber,
-                    context: nil,
-                    characters: "\r",
-                    charactersIgnoringModifiers: "\r",
-                    isARepeat: false,
-                    keyCode: 36
-                )
-            )
-            editor.keyDown(with: event)
+            nativePresenter.invokeQualifiedReturnIntent()
         }
 
         await waitUntil { context.delivery.deliveredTexts.count == 1 }
+        await waitUntil { context.viewModel.transcriptionReviewState == .idle }
         XCTAssertEqual(context.delivery.deliveredTexts, [editedDraft])
         XCTAssertEqual(context.delivery.copyCalls, 0)
+        XCTAssertEqual(context.viewModel.transcriptionReviewState, .idle)
+        XCTAssertEqual(context.viewModel.reviewDraftText, "")
+        XCTAssertNil(nativePresenter.window)
+    }
+
+    func test_v5CoordinatorExpiredStartPreservesExactDraftAndRequiresNewRealConfirmation() async throws {
+        let facade = V5ExpiredStartReviewSubmissionFacade()
+        let production = ReviewWindowController.ReadinessEnvironment.appKit
+        let controller = ReviewWindowController(
+            readinessEnvironment: ReviewWindowController.ReadinessEnvironment(
+                requestActivation: { false },
+                applicationIsActive: { true },
+                frontmostApplication: { facade.identity },
+                feishuSpeechIsActive: { false },
+                panelIsKey: { _ in true },
+                editorLookup: production.editorLookup,
+                editorAttached: production.editorAttached,
+                makeFirstResponder: production.makeFirstResponder,
+                firstResponderIsEditor: production.firstResponderIsEditor,
+                nowNanoseconds: production.nowNanoseconds,
+                sleep: production.sleep
+            )
+        )
+        let presenter = Issue40ProductionReviewSurfacePresenter(controller: controller)
+        let context = makeProductionReviewContext(
+            finishEvent: .final("PRIVATE_EXPIRED_START_DRAFT"),
+            presenter: presenter,
+            reviewSubmissionFacade: facade
+        )
+        defer { controller.dismiss() }
+
+        await startAndSealProduction(
+            context,
+            identity: StreamingSessionIdentity(generation: 5_210),
+            captureReady: { facade.captureCompletedCount == 1 }
+        )
+        XCTAssertEqual(facade.captureCompletedCount, 1, "production facade capture must complete during action 1")
+        presenter.replaceDraft("PRIVATE_EXPIRED_START_DRAFT_EDITED")
+        XCTAssertTrue(presenter.invokeSend(), "the first real Send must create one admission")
+        await waitUntil { facade.admissionEnvelopes.count == 1 }
+        await waitUntilDelayed {
+            facade.observedEvents.contains { event in
+                if case .terminal = event { return true }
+                return false
+            }
+        }
+        await waitUntilDelayed {
+            if case .editable(
+                let draft,
+                _,
+                feedback: .deliveryFailed
+            ) = context.viewModel.transcriptionReviewState {
+                return draft == "PRIVATE_EXPIRED_START_DRAFT_EDITED"
+            }
+            return false
+        }
+
+        XCTAssertEqual(facade.issuedHandleCount, 1)
+        XCTAssertEqual(facade.enqueueStartCallCount, 1)
+        XCTAssertEqual(
+            context.viewModel.reviewDraftText,
+            "PRIVATE_EXPIRED_START_DRAFT_EDITED"
+        )
         XCTAssertEqual(
             context.viewModel.transcriptionReviewState,
             .editable(
-                draft: editedDraft,
+                draft: "PRIVATE_EXPIRED_START_DRAFT_EDITED",
                 isPossiblyIncomplete: false,
-                feedback: .deliveryUncertain
+                feedback: .deliveryFailed
             )
         )
+        XCTAssertEqual(
+            presenter.confirmGestureCount,
+            1,
+            "deadline terminalization must not synthesize a second confirmation"
+        )
+
+        XCTAssertTrue(
+            presenter.invokeSend(),
+            "only a new real Send gesture may create the replacement attempt"
+        )
+        await waitUntilDelayed { facade.issuedHandleCount == 2 }
+        XCTAssertEqual(presenter.confirmGestureCount, 2)
     }
 
     func test_reviewFirst_nonterminalFinalIsStillReadOnlyUntilAuthoritativeActionTwo() async {
@@ -1307,7 +1610,8 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
 
     private func makeProductionReviewContext(
         finishEvent: StreamingRecognitionEvent,
-        presenter: Issue40ProductionReviewSurfacePresenter
+        presenter: Issue40ProductionReviewSurfacePresenter,
+        reviewSubmissionFacade: ReviewSubmissionFacade? = nil
     ) -> Issue40ProductionReviewContext {
         let recorder = Issue38ReviewAudioRecorder(holdStopBarrier: false)
         let session = Issue38ReviewStreamingSession(
@@ -1333,6 +1637,7 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
             finalTextOutput: output,
             overlayPresenter: Issue38ReviewOverlayPresenter(),
             reviewDestinationDelivery: delivery,
+            reviewSubmissionFacade: reviewSubmissionFacade,
             reviewSurfacePresenter: presenter
         )
         return Issue40ProductionReviewContext(
@@ -1379,11 +1684,15 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
 
     private func startAndSealProduction(
         _ context: Issue40ProductionReviewContext,
-        identity: StreamingSessionIdentity
+        identity: StreamingSessionIdentity,
+        captureReady: (@MainActor () -> Bool)? = nil
     ) async {
         context.viewModel.handleHotKeyStateForTesting(.streaming(sessionID: identity))
         await waitUntil { context.recorder.startStreamingCallCount == 1 }
         await waitUntilAsync { await context.provider.makeSessionCallCount == 1 }
+        if let captureReady {
+            await waitUntil(captureReady)
+        }
         context.viewModel.handleHotKeyStateForTesting(.sealing(sessionID: identity))
         await waitUntilAsync { await context.session.finishCallCount == 1 }
         await waitUntil {
@@ -1429,6 +1738,16 @@ final class ReviewFirstMainViewModelTests: XCTestCase {
         XCTFail("timed out waiting for review-first state transition")
     }
 
+    private func waitUntilDelayed(
+        _ predicate: @escaping @MainActor () -> Bool
+    ) async {
+        for _ in 0 ..< 200 {
+            if predicate() { return }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        XCTFail("timed out waiting for delayed review submission event")
+    }
+
     private func waitUntilAsync(
         _ predicate: @escaping @MainActor () async -> Bool
     ) async {
@@ -1472,10 +1791,218 @@ private struct Issue40ProductionReviewContext {
 }
 
 @MainActor
+private final class V5ExpiredStartReviewSubmissionFacade: ReviewSubmissionFacade {
+    let identity = ReviewApplicationIdentity(
+        processIdentifier: 42,
+        bundleIdentifier: "com.example.issue40.v5.expired-start",
+        executableURL: URL(fileURLWithPath: "/Applications/Issue40V5ExpiredStart.app"),
+        launchDate: Date(timeIntervalSince1970: 5)
+    )
+    private let controlPlane: ReviewSubmissionControlPlane
+    private let eventRelay: ReviewSubmissionEventRelay
+    private let issuer: ReviewAttemptTicketIssuer
+    private(set) var issuedHandleCount = 0
+    private(set) var enqueueStartCallCount = 0
+    private(set) var captureCompletedCount = 0
+    private(set) var admissionEnvelopes: [ReviewSubmissionAdmissionEnvelope] = []
+    private(set) var observedEvents: [ReviewSubmissionControlEvent] = []
+
+    init() {
+        let controlPlane = ReviewSubmissionControlPlane()
+        let eventRelay = ReviewSubmissionEventRelay()
+        self.controlPlane = controlPlane
+        self.eventRelay = eventRelay
+        self.issuer = ReviewAttemptTicketIssuer(
+            controlPlaneInstanceNonce: controlPlane.instanceNonce
+        )
+        controlPlane.attachEventHandler { [eventRelay] event in
+            eventRelay.receive(event)
+        }
+    }
+
+    func setEventHandler(
+        _ handler: (@MainActor @Sendable (ReviewSubmissionControlEvent) -> Void)?
+    ) {
+        eventRelay.install { [weak self] event in
+            self?.observedEvents.append(event)
+            handler?(event)
+        }
+    }
+
+    func snapshotFrontmostApplication() -> StableApplicationIdentity? {
+        identity
+    }
+
+    func captureTarget(
+        _ request: ReviewTargetCaptureRequestDescriptor,
+        completion: @escaping @MainActor @Sendable (
+            Result<CapturedReviewTargetDescriptor, ReviewPreBoundaryFailure>
+        ) -> Void
+    ) {
+        // This facade is only the deterministic expired-start harness. Complete
+        // capture inline so the test's action-2/barrier sequencing cannot race
+        // an unobserved MainActor task; the production facade remains async.
+        captureCompletedCount += 1
+        completion(
+            .success(
+                CapturedReviewTargetDescriptor(
+                    generation: request.generation,
+                    application: request.application,
+                    binding: .applicationBoundCurrentFocus,
+                    securityAtCapture: .safe
+                )
+            )
+        )
+    }
+
+    func issueAttemptHandle() -> ReviewSubmissionAttemptHandle? {
+        issuedHandleCount += 1
+        return issuer.issue()
+    }
+
+    func makeAdmissionEnvelope(
+        handle: ReviewSubmissionAttemptHandle,
+        request: ReviewSubmissionRequestDescriptor
+    ) -> ReviewSubmissionAdmissionEnvelope {
+        ReviewSubmissionAdmissionEnvelope(
+            handle: handle,
+            request: request,
+            absolutePreBoundaryDeadline: request.confirmationUptime + 50_000_000
+        )
+    }
+
+    func enqueueAdmission(_ envelope: ReviewSubmissionAdmissionEnvelope) {
+        admissionEnvelopes.append(envelope)
+        controlPlane.enqueueAdmission(envelope)
+    }
+
+    func enqueueStart(_ handle: ReviewSubmissionAttemptHandle) {
+        enqueueStartCallCount += 1
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(80))
+            self?.controlPlane.enqueueStart(handle)
+        }
+    }
+
+    func enqueueCancellation(_ handle: ReviewSubmissionAttemptHandle) {
+        controlPlane.enqueueCancellation(handle)
+    }
+
+    func releaseCapturedTarget(_ targetID: CapturedReviewTargetID) {
+        _ = targetID
+    }
+}
+
+@MainActor
+private final class V5ReviewSubmissionFacadeSpy: ReviewSubmissionFacade {
+    let identity = ReviewApplicationIdentity(
+        processIdentifier: 42,
+        bundleIdentifier: "com.example.issue40.v5.coordinator",
+        executableURL: URL(fileURLWithPath: "/Applications/Issue40V5Coordinator.app"),
+        launchDate: Date(timeIntervalSince1970: 5)
+    )
+    let target = CapturedReviewTargetDescriptor(
+        generation: 5_100,
+        application: ReviewApplicationIdentity(
+            processIdentifier: 42,
+            bundleIdentifier: "com.example.issue40.v5.coordinator",
+            executableURL: URL(fileURLWithPath: "/Applications/Issue40V5Coordinator.app"),
+            launchDate: Date(timeIntervalSince1970: 5)
+        ),
+        binding: .applicationBoundCurrentFocus,
+        securityAtCapture: .safe
+    )
+    private let issuer: ReviewAttemptTicketIssuer
+    private var eventHandler: (@MainActor @Sendable (ReviewSubmissionControlEvent) -> Void)?
+    private(set) var captureRequests: [ReviewTargetCaptureRequestDescriptor] = []
+    private(set) var captureCompletedCount = 0
+    private(set) var admissionEnvelopes: [ReviewSubmissionAdmissionEnvelope] = []
+    private(set) var startedHandles: [ReviewSubmissionAttemptHandle] = []
+    private(set) var cancellationHandles: [ReviewSubmissionAttemptHandle] = []
+    private(set) var releasedTargetIDs: [CapturedReviewTargetID] = []
+    private(set) var issuedHandleCount = 0
+
+    init() {
+        issuer = ReviewAttemptTicketIssuer(controlPlaneInstanceNonce: 5_100)
+    }
+
+    func setEventHandler(
+        _ handler: (@MainActor @Sendable (ReviewSubmissionControlEvent) -> Void)?
+    ) {
+        eventHandler = handler
+    }
+
+    func snapshotFrontmostApplication() -> StableApplicationIdentity? {
+        identity
+    }
+
+    func captureTarget(
+        _ request: ReviewTargetCaptureRequestDescriptor,
+        completion: @escaping @MainActor @Sendable (
+            Result<CapturedReviewTargetDescriptor, ReviewPreBoundaryFailure>
+        ) -> Void
+    ) {
+        captureRequests.append(request)
+        Task { @MainActor in
+            await Task.yield()
+            captureCompletedCount += 1
+            completion(
+                .success(
+                    CapturedReviewTargetDescriptor(
+                        targetID: target.targetID,
+                        generation: request.generation,
+                        application: request.application,
+                        binding: target.binding,
+                        securityAtCapture: .safe
+                    )
+                )
+            )
+        }
+    }
+
+    func issueAttemptHandle() -> ReviewSubmissionAttemptHandle? {
+        issuedHandleCount += 1
+        return issuer.issue()
+    }
+
+    func makeAdmissionEnvelope(
+        handle: ReviewSubmissionAttemptHandle,
+        request: ReviewSubmissionRequestDescriptor
+    ) -> ReviewSubmissionAdmissionEnvelope {
+        ReviewSubmissionAdmissionEnvelope(
+            handle: handle,
+            request: request,
+            absolutePreBoundaryDeadline: request.confirmationUptime + 1_000_000_000
+        )
+    }
+
+    func enqueueAdmission(_ envelope: ReviewSubmissionAdmissionEnvelope) {
+        admissionEnvelopes.append(envelope)
+    }
+
+    func enqueueStart(_ handle: ReviewSubmissionAttemptHandle) {
+        startedHandles.append(handle)
+    }
+
+    func enqueueCancellation(_ handle: ReviewSubmissionAttemptHandle) {
+        cancellationHandles.append(handle)
+    }
+
+    func releaseCapturedTarget(_ targetID: CapturedReviewTargetID) {
+        releasedTargetIDs.append(targetID)
+    }
+
+    func emit(_ event: ReviewSubmissionControlEvent) {
+        eventHandler?(event)
+    }
+}
+
+@MainActor
 private final class Issue40ProductionReviewSurfacePresenter: ReviewSurfacePresenting {
     let controller: ReviewWindowController
     private(set) var retainedPanel: ReviewPanel?
     private(set) var renderedStates: [TranscriptionReviewState] = []
+    private(set) var confirmGestureCount = 0
 
     init(controller: ReviewWindowController) {
         self.controller = controller
@@ -1496,10 +2023,19 @@ private final class Issue40ProductionReviewSurfacePresenter: ReviewSurfacePresen
         controller.renderDraft(
             state: state,
             onDraftChange: onDraftChange,
-            onConfirm: onConfirm,
+            onConfirm: { [weak self] intent in
+                self?.confirmGestureCount += 1
+                onConfirm(intent)
+            },
             onDiscard: onDiscard
         )
         retainedPanel = currentPanel()
+    }
+
+    @discardableResult
+    func invokeQualifiedReturnIntent() -> Bool {
+        guard let panel = retainedPanel else { return false }
+        return issue40PerformQualifiedReturn(on: panel)
     }
 
     func requestPresentationFocus(
@@ -1513,47 +2049,64 @@ private final class Issue40ProductionReviewSurfacePresenter: ReviewSurfacePresen
         retainedPanel = nil
     }
 
-    func invokeConfirm() {
+    @discardableResult
+    func invokeConfirm() -> Bool {
+        invokeSend()
+    }
+
+    func replaceDraft(_ draft: String) {
         guard let panel = retainedPanel,
-              let editor = editableTextView(in: panel.contentView) else {
+              prepare(panel),
+              let editor = issue40EditableTextView(in: panel.contentView) else {
             XCTFail("the production presenter must expose the real native editor")
             return
         }
-        guard panel.makeFirstResponder(editor),
-              let event = NSEvent.keyEvent(
-                  with: .keyDown,
-                  location: .zero,
-                  modifierFlags: [],
-                  timestamp: 0,
-                  windowNumber: panel.windowNumber,
-                  context: nil,
-                  characters: "\r",
-                  charactersIgnoringModifiers: "\r",
-                  isARepeat: false,
-                  keyCode: 36
-              ) else {
-            XCTFail("the production editor must accept a qualified native Return event")
-            return
+        _ = panel.makeFirstResponder(editor)
+        editor.setSelectedRange(NSRange(location: 0, length: editor.string.utf16.count))
+        editor.insertText(draft, replacementRange: editor.selectedRange())
+    }
+
+    @discardableResult
+    func invokeSend() -> Bool {
+        guard let panel = retainedPanel,
+              prepare(panel) else {
+            return false
         }
-        editor.keyDown(with: event)
+        let priorConfirmCount = confirmGestureCount
+        // Feedback is rendered below the editor and shifts the bottom control
+        // band. Probe the full plausible control band with real mouse events,
+        // stopping immediately after the controller's opaque callback is
+        // observed so one gesture cannot become multiple submissions.
+        for y in stride(from: CGFloat(8), through: CGFloat(280), by: CGFloat(8)) {
+            guard issue40PerformRealSendClick(on: panel, contentY: y) else {
+                continue
+            }
+            if confirmGestureCount > priorConfirmCount {
+                return true
+            }
+        }
+        return false
+    }
+
+    var hasSendControl: Bool {
+        guard let panel = retainedPanel, prepare(panel) else { return false }
+        return panel.contentView != nil
+    }
+
+    @discardableResult
+    private func prepare(_ panel: ReviewPanel) -> Bool {
+        panel.makeKeyAndOrderFront(nil)
+        panel.ignoresMouseEvents = false
+        panel.contentView?.layoutSubtreeIfNeeded()
+        panel.displayIfNeeded()
+        panel.contentView?.layoutSubtreeIfNeeded()
+        return true
     }
 
     private func currentPanel() -> ReviewPanel? {
         NSApp.windows.compactMap { $0 as? ReviewPanel }.last
     }
 
-    private func editableTextView(in view: NSView?) -> NSTextView? {
-        guard let view else { return nil }
-        if let textView = view as? NSTextView, textView.isEditable {
-            return textView
-        }
-        for subview in view.subviews.reversed() {
-            if let textView = editableTextView(in: subview) {
-                return textView
-            }
-        }
-        return nil
-    }
 }
 
 @MainActor
@@ -1808,6 +2361,13 @@ private final class Issue38ReviewFinalTextOutput: FinalTextOutput {
 
 @MainActor
 private final class Issue38ReviewDestinationDelivery: ReviewDestinationDelivering {
+    static let testApplicationIdentity = ReviewApplicationIdentity(
+        processIdentifier: 42,
+        bundleIdentifier: "com.example.review-target",
+        executableURL: URL(fileURLWithPath: "/Applications/ReviewTarget.app"),
+        launchDate: Date(timeIntervalSince1970: 42)
+    )
+
     private let application: ReviewApplicationIdentity
     private let element: AXUIElement
     private(set) var captureCallCount = 0
@@ -1820,12 +2380,7 @@ private final class Issue38ReviewDestinationDelivery: ReviewDestinationDeliverin
 
     init() {
         element = AXUIElementCreateApplication(42)
-        application = ReviewApplicationIdentity(
-            processIdentifier: 42,
-            bundleIdentifier: "com.example.review-target",
-            executableURL: URL(fileURLWithPath: "/Applications/ReviewTarget.app"),
-            launchDate: Date(timeIntervalSince1970: 42)
-        )
+        application = Self.testApplicationIdentity
         captureResult = .captured(
             ReviewDestinationToken(
                 generation: 1,
@@ -1890,6 +2445,10 @@ private final class Issue38ReviewDestinationDelivery: ReviewDestinationDeliverin
 
 @MainActor
 private final class Issue38ReviewSurfacePresenter: ReviewSurfacePresenting {
+    private var capturedApplication: StableApplicationIdentity?
+    private lazy var productionController = issue40MakeDeterministicReviewWindowController { [weak self] in
+        self?.capturedApplication
+    }
     let surfaceIdentity = UUID()
     private(set) var renderReadOnlyCallCount = 0
     private(set) var readOnlyPhases: [ReviewReadOnlyPhase] = []
@@ -1904,6 +2463,7 @@ private final class Issue38ReviewSurfacePresenter: ReviewSurfacePresenting {
     private(set) var lastEditablePossiblyIncomplete = false
     private(set) var draftStates: [TranscriptionReviewState] = []
     private(set) var eventTrace: [String] = []
+    private(set) var confirmGestureCount = 0
     var readOnlyRenderGateOpen = true
     private(set) var presentationFocusRequestCount = 0
     var holdPresentationFocusRequest = false
@@ -1911,7 +2471,6 @@ private final class Issue38ReviewSurfacePresenter: ReviewSurfacePresenting {
     private var presentationFocusContinuation: CheckedContinuation<ReviewPresentationFocusOutcome, Never>?
     private var currentPresentationFocusRequest: ReviewPresentationFocusRequest?
     private var draftChange: (@MainActor (String) -> Void)?
-    private var confirm: (@MainActor (ReviewConfirmationIntent) -> Void)?
     private var discard: (@MainActor () -> Void)?
     private var gatedReadOnlyCommands: [(ReviewReadOnlyPhase, String)] = []
     private var lastDraftState: TranscriptionReviewState?
@@ -1947,20 +2506,33 @@ private final class Issue38ReviewSurfacePresenter: ReviewSurfacePresenting {
             if case .editable = state {
                 editablePresentationCount += 1
             }
-        case .idle, .streaming, .sealing:
+        case .idle, .streaming, .sealing,
+             .preparingSubmission, .submittedUnverifiedTerminal:
             break
         }
         surfaceIDs.append(surfaceIdentity)
         eventTrace.append("draft")
         draftChange = onDraftChange
-        confirm = onConfirm
         discard = onDiscard
+        productionController.renderDraft(
+            state: state,
+            onDraftChange: onDraftChange,
+            onConfirm: { [weak self] intent in
+                self?.confirmGestureCount += 1
+                onConfirm(intent)
+            },
+            onDiscard: onDiscard
+        )
     }
 
     func requestPresentationFocus(
         _ request: ReviewPresentationFocusRequest
     ) async -> ReviewPresentationFocusOutcome {
+        capturedApplication = request.capturedApplication
         presentationFocusRequestCount += 1
+        if presentationFocusResult == .focused {
+            return await productionController.requestPresentationFocus(request)
+        }
         currentPresentationFocusRequest = request
         if holdPresentationFocusRequest {
             return await withCheckedContinuation { continuation in
@@ -1984,6 +2556,7 @@ private final class Issue38ReviewSurfacePresenter: ReviewSurfacePresenting {
     func dismiss() {
         dismissCallCount += 1
         eventTrace.append("dismiss")
+        productionController.dismiss()
     }
 
     var gatedReadOnlyCommandCount: Int { gatedReadOnlyCommands.count }
@@ -2002,73 +2575,30 @@ private final class Issue38ReviewSurfacePresenter: ReviewSurfacePresenting {
     func invokeConfirm() {
         guard let state = lastDraftState,
               case .editable = state,
-              let confirm else { return }
-
-        let hostingView = NSHostingView(
-            rootView: TranscriptionReviewView(
-                state: state,
-                onConfirm: confirm
-            )
-        )
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 320),
-            styleMask: [.titled],
-            backing: .buffered,
-            defer: false
-        )
-        window.contentView = hostingView
-        window.isReleasedWhenClosed = false
-        window.makeKeyAndOrderFront(nil)
-        hostingView.layoutSubtreeIfNeeded()
-        window.displayIfNeeded()
-        hostingView.layoutSubtreeIfNeeded()
-        guard let editor = editableTextView(in: hostingView),
-              window.makeFirstResponder(editor),
-              let event = NSEvent.keyEvent(
-                  with: .keyDown,
-                  location: .zero,
-                  modifierFlags: [],
-                  timestamp: 0,
-                  windowNumber: window.windowNumber,
-                  context: nil,
-                  characters: "\r",
-                  charactersIgnoringModifiers: "\r",
-                  isARepeat: false,
-                  keyCode: 36
-              ) else {
-            XCTFail("the opaque confirmation test path must materialize the real native editor")
-            window.orderOut(nil)
-            window.close()
-            return
+              let panel = NSApp.windows.compactMap({ $0 as? ReviewPanel }).last else { return }
+        let priorConfirmCount = confirmGestureCount
+        for y in stride(from: CGFloat(8), through: CGFloat(280), by: CGFloat(8)) {
+            _ = issue40PerformRealSendClick(on: panel, contentY: y)
+            if confirmGestureCount > priorConfirmCount {
+                return
+            }
         }
-        editor.keyDown(with: event)
-        window.orderOut(nil)
-        window.close()
     }
 
     func invokeDiscard() {
         discard?()
     }
 
-    private func editableTextView(in view: NSView?) -> NSTextView? {
-        guard let view else { return nil }
-        if let textView = view as? NSTextView, textView.isEditable {
-            return textView
-        }
-        for subview in view.subviews.reversed() {
-            if let textView = editableTextView(in: subview) {
-                return textView
-            }
-        }
-        return nil
-    }
 }
 
 @MainActor
 private final class Issue39NativeReviewSurfacePresenter: ReviewSurfacePresenting {
+    private var capturedApplication: StableApplicationIdentity?
+    private lazy var controller = issue40MakeDeterministicReviewWindowController { [weak self] in
+        self?.capturedApplication
+    }
     private(set) var window: NSWindow?
     private(set) var editor: NSTextView?
-    private var hostingView: NSHostingView<TranscriptionReviewView>?
 
     func renderReadOnly(phase: ReviewReadOnlyPhase, preview: String) {}
 
@@ -2078,48 +2608,59 @@ private final class Issue39NativeReviewSurfacePresenter: ReviewSurfacePresenting
         onConfirm: @escaping @MainActor (ReviewConfirmationIntent) -> Void,
         onDiscard: @escaping @MainActor () -> Void
     ) {
-        let rootView = TranscriptionReviewView(
+        controller.renderDraft(
             state: state,
             onDraftChange: onDraftChange,
             onConfirm: onConfirm,
             onDiscard: onDiscard
         )
-        let hostingView = NSHostingView(rootView: rootView)
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 320),
-            styleMask: [.titled],
-            backing: .buffered,
-            defer: false
-        )
-        window.contentView = hostingView
-        window.isReleasedWhenClosed = false
-        window.makeKeyAndOrderFront(nil)
-        hostingView.layoutSubtreeIfNeeded()
-        window.displayIfNeeded()
-        hostingView.layoutSubtreeIfNeeded()
-
-        guard let editor = editableTextView(in: hostingView),
-              window.makeFirstResponder(editor) else {
-            window.close()
-            return
+        let panel = NSApp.windows.compactMap { $0 as? ReviewPanel }.last
+        self.window = panel
+        self.editor = nil
+        if let panel,
+           let contentView = panel.contentView {
+            contentView.layoutSubtreeIfNeeded()
+            panel.displayIfNeeded()
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01))
         }
+        if let panel,
+           let contentView = panel.contentView,
+           let editor = editableTextView(in: contentView) {
+            self.editor = editor
+            _ = panel.makeFirstResponder(editor)
+        }
+    }
 
-        self.hostingView = hostingView
-        self.window = window
-        self.editor = editor
+    func invokeQualifiedReturnIntent() {
+        guard let panel = window as? ReviewPanel,
+              let editor,
+              let event = NSEvent.keyEvent(
+                  with: .keyDown,
+                  location: .zero,
+                  modifierFlags: [],
+                  timestamp: 0,
+                  windowNumber: panel.windowNumber,
+                  context: nil,
+                  characters: "\r",
+                  charactersIgnoringModifiers: "\r",
+                  isARepeat: false,
+                  keyCode: 36
+              ) else { return }
+        _ = panel.makeFirstResponder(editor)
+        panel.makeKeyAndOrderFront(nil)
+        panel.sendEvent(event)
     }
 
     func requestPresentationFocus(
         _ request: ReviewPresentationFocusRequest
     ) async -> ReviewPresentationFocusOutcome {
-        ReviewPresentationFocusOutcome(request: request, result: .focused)
+        capturedApplication = request.capturedApplication
+        return await controller.requestPresentationFocus(request)
     }
 
     func dismiss() {
-        window?.orderOut(nil)
-        window?.close()
+        controller.dismiss()
         editor = nil
-        hostingView = nil
         window = nil
     }
 

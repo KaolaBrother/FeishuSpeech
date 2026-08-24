@@ -60,6 +60,7 @@ class HotKeyService: ObservableObject {
 
         if !trusted {
             logger.error("Accessibility permission not granted!")
+            CurrentFocusCombinedInterferenceEpoch.shared.advance()
             DispatchQueue.main.async { [weak self] in
                 self?.monitoringState = .failed(.accessibilityNotTrusted)
             }
@@ -93,6 +94,7 @@ class HotKeyService: ObservableObject {
             userInfo: UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
         ) else {
             logger.error("Failed to create event tap")
+            CurrentFocusCombinedInterferenceEpoch.shared.advance()
             DispatchQueue.main.async { [weak self] in
                 self?.monitoringState = .failed(.tapCreationFailed)
             }
@@ -233,7 +235,7 @@ class HotKeyService: ObservableObject {
         
         return Unmanaged.passUnretained(event)
     }
-    
+
     private func handleTapDisabled() {
         stopMonitoring()
         invalidateActiveSession()

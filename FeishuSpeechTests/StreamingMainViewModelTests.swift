@@ -4959,6 +4959,7 @@ private final class CoordinatorReviewSurfacePresenter: ReviewSurfacePresenting {
     private(set) var readOnlyPreviews: [String] = []
     private(set) var readOnlyPhases: [ReviewReadOnlyPhase] = []
     private(set) var renderDraftCallCount = 0
+    private(set) var confirmGestureCount = 0
     private(set) var draftStates: [TranscriptionReviewState] = []
     private(set) var dismissCallCount = 0
     private var onDraftChange: (@MainActor (String) -> Void)?
@@ -4995,7 +4996,10 @@ private final class CoordinatorReviewSurfacePresenter: ReviewSurfacePresenting {
         draftStates.append(state)
         lastDraftState = state
         self.onDraftChange = onDraftChange
-        self.onConfirm = onConfirm
+        self.onConfirm = { [weak self] intent in
+            self?.confirmGestureCount += 1
+            onConfirm(intent)
+        }
         self.onDiscard = onDiscard
     }
 
@@ -5021,36 +5025,7 @@ private final class CoordinatorReviewSurfacePresenter: ReviewSurfacePresenting {
     }
 
     func invokeConfirm() {
-        guard let lastDraftState,
-              case .editable = lastDraftState,
-              let onConfirm else { return }
-        let hostingView = NSHostingView(
-            rootView: TranscriptionReviewView(
-                state: lastDraftState,
-                onConfirm: onConfirm
-            )
-        )
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 320),
-            styleMask: [.titled],
-            backing: .buffered,
-            defer: false
-        )
-        window.contentView = hostingView
-        hostingView.frame = NSRect(x: 0, y: 0, width: 520, height: 320)
-        hostingView.autoresizingMask = [.width, .height]
-        window.isReleasedWhenClosed = false
-        window.makeKeyAndOrderFront(nil)
-        hostingView.layoutSubtreeIfNeeded()
-        window.displayIfNeeded()
-        hostingView.layoutSubtreeIfNeeded()
-        if let sendButton = button(titled: "发送", in: hostingView) {
-            sendButton.performClick(nil)
-        } else {
-            XCTFail("the opaque confirmation path must materialize the real Send button")
-        }
-        window.orderOut(nil)
-        window.close()
+        _ = invokeSendButton()
     }
 
     @discardableResult
@@ -5076,27 +5051,12 @@ private final class CoordinatorReviewSurfacePresenter: ReviewSurfacePresenting {
         panel.displayIfNeeded()
         contentView.layoutSubtreeIfNeeded()
         RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01))
-        if let sendButton = button(titled: "发送", in: contentView) {
-            sendButton.performClick(nil)
-            return true
+        let priorConfirmCount = confirmGestureCount
+        for y in stride(from: CGFloat(8), through: CGFloat(280), by: CGFloat(8)) {
+            _ = issue40PerformRealSendClick(on: panel, contentY: y)
+            if confirmGestureCount > priorConfirmCount { return true }
         }
-        guard let event = NSEvent.keyEvent(
-            with: .keyDown,
-            location: .zero,
-            modifierFlags: [.command],
-            timestamp: 0,
-            windowNumber: panel.windowNumber,
-            context: nil,
-            characters: "\r",
-            charactersIgnoringModifiers: "\r",
-            isARepeat: false,
-            keyCode: 36
-        ) else {
-            XCTFail("the production review panel must materialize the real Send action")
-            return false
-        }
-        NSApp.sendEvent(event)
-        return true
+        return false
     }
 
     @discardableResult
@@ -5104,73 +5064,25 @@ private final class CoordinatorReviewSurfacePresenter: ReviewSurfacePresenting {
         guard let lastDraftState,
               case .editable = lastDraftState,
               let onConfirm else { return false }
-        let hostingView = NSHostingView(
-            rootView: TranscriptionReviewView(
-                state: lastDraftState,
-                onConfirm: onConfirm
-            )
+        let controller = ReviewWindowController()
+        controller.renderDraft(
+            state: lastDraftState,
+            onDraftChange: { _ in },
+            onConfirm: onConfirm,
+            onDiscard: {}
         )
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 320),
-            styleMask: [.titled],
-            backing: .buffered,
-            defer: false
-        )
-        window.contentView = hostingView
-        window.isReleasedWhenClosed = false
-        window.makeKeyAndOrderFront(nil)
-        hostingView.layoutSubtreeIfNeeded()
-        window.displayIfNeeded()
-        hostingView.layoutSubtreeIfNeeded()
-        defer {
-            window.orderOut(nil)
-            window.close()
-        }
-        guard let editor = editableTextView(in: hostingView),
-              window.makeFirstResponder(editor),
-              let event = NSEvent.keyEvent(
-                  with: .keyDown,
-                  location: .zero,
-                  modifierFlags: [],
-                  timestamp: 0,
-                  windowNumber: window.windowNumber,
-                  context: nil,
-                  characters: "\r",
-                  charactersIgnoringModifiers: "\r",
-                  isARepeat: false,
-                  keyCode: 36
-              ) else {
+        defer { controller.dismiss() }
+        guard let panel = NSApp.windows.compactMap({ $0 as? ReviewPanel }).last,
+              let contentView = panel.contentView,
+              issue40EditableTextView(in: contentView) != nil else {
             XCTFail("the qualified native Return path must materialize the real editor")
             return false
         }
-        editor.keyDown(with: event)
-        return true
+        return issue40PerformQualifiedReturn(on: panel)
     }
 
     func invokeDiscard() {
         onDiscard?()
-    }
-
-    private func button(titled title: String, in view: NSView?) -> NSButton? {
-        guard let view else { return nil }
-        if let button = view as? NSButton,
-            button.title == title ||
-            button.accessibilityTitle() == title ||
-            button.accessibilityLabel() == title ||
-            (title == "发送" &&
-                button.keyEquivalent == "\r" &&
-                button.keyEquivalentModifierMask.contains(.command)) ||
-            (title == "发送" &&
-                button.isEnabled &&
-                button.title != "取消") {
-            return button
-        }
-        for subview in view.subviews.reversed() {
-            if let button = button(titled: title, in: subview) {
-                return button
-            }
-        }
-        return nil
     }
 
     private func editableTextView(in view: NSView?) -> NSTextView? {
