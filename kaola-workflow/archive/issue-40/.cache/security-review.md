@@ -1,0 +1,22 @@
+# Issue #40 security and privacy review
+
+candidate: `/Users/ylpromax5/Workspace/feishuspeech/.kw/worktrees/issue-40` production and test diff inspected 2026-08-23
+
+claim: Review-first application-bound fallback must fail closed across Secure Input, original-application identity, PID reuse or relaunch, frontmost drift, pasteboard mutation, process-targeted event delivery, cancellation, and exact-once manual recovery boundaries.
+
+surface: `CursorTextModels.swift`, `AccessibilityClient.swift`, `ReviewDestinationDelivery.swift`, `TextInputSimulator.swift`, `MainViewModel.swift`, all changed Issue #40 tests, Issue #40, and `architecture-blueprint.md`.
+
+finding: id=R1 scope=in_scope action=none status=resolved severity=medium fix_role=security rationale=two-ordered-composite-samples-and-shared-postflight-now-close-the-admitted-secure-input-race
+
+- Resolution evidence: `FeishuSpeech/Services/ReviewDestinationDelivery.swift:489-500` executes two consecutive calls to one sampler. Each call at `FeishuSpeech/Services/ReviewDestinationDelivery.swift:508-543` reads Secure Input at start, raw frontmost PID, running complete identity, frontmost complete identity, and Secure Input at end, then rejects either secure observation before returning valid.
+- First- and second-window behavior: both preflight iterations invoke the same `applicationCurrentFocusSample` implementation. A Secure Input transition during either running/frontmost identity read is therefore observed by that iteration's ending Secure Input read and returns `.securityRejected` before the output layer can snapshot or mutate the pasteboard.
+- Postflight evidence: `FeishuSpeech/Services/ReviewDestinationDelivery.swift:502-505` reuses the same composite sampler after the possible post. `FeishuSpeech/Services/TextInputSimulator.swift:265-280` classifies any post or postflight failure as uncertain, schedules no restore on uncertainty, and contains no retry.
+- Fixed-target and identity evidence: `FeishuSpeech/Services/ReviewDestinationDelivery.swift:297-340` binds and revalidates the original complete application identity before the panel; `FeishuSpeech/Services/ReviewDestinationDelivery.swift:519-542` compares the raw frontmost PID and both complete identities to that captured identity, resisting frontmost drift, relaunch, and PID reuse; `FeishuSpeech/Services/ReviewDestinationDelivery.swift:379-390` passes only the captured PID to the review paste primitive. The exact cursor route remains preferred and retains AX restoration/postflight at `FeishuSpeech/Services/ReviewDestinationDelivery.swift:367-378` and `FeishuSpeech/Services/ReviewDestinationDelivery.swift:453-486`.
+- Strengthened oracle: `FeishuSpeechTests/ReviewFirstApplicationFallbackTests.swift:307-425` records the exact two-composite order, flips Secure Input during the second identity window, and proves zero pasteboard snapshot, zero pasteboard write, and zero Cmd+V. Because both iterations call the same sampler, the first identity window has the same ending-read rejection behavior.
+- Pasteboard and exact-once evidence: `FeishuSpeechTests/ReviewPasteboardLifecycleTests.swift:83-137` covers fallback snapshot/restore and uncertainty without restore or retry; `FeishuSpeechTests/ReviewFirstMainViewModelTests.swift:390-438` covers one manual-recovery copy for terminal non-cancellation failures and zero copy/retry for cancellation; `FeishuSpeech/ViewModels/MainViewModel.swift:2261-2288` freezes and consumes one confirmation before delivery, and `FeishuSpeech/ViewModels/MainViewModel.swift:2305-2328` issues recovery at most once.
+- Input and privacy evidence: review confirmation preserves LF exactly while rejecting NUL, tab, CR, DEL, and C1 controls before mutation at `FeishuSpeech/Services/TextInputSimulator.swift:803-808`; the changed production logging contains no transcript, target-control, clipboard contents, credentials, token, or stream payload.
+- Validation receipt checked: `kaola-workflow/issue-40/test-green.md` and `/tmp/feishuspeech-issue40-focused-r1-strengthened.log` record the focused serialized suite passing 79 of 79 tests with zero failures, including the strengthened R1 trace test. `git diff --check` also passes.
+
+verdict: pass
+findings_blocking: 0
+review_conclusion: The repaired candidate closes R1 with ordered composite Secure Input and identity sampling, preserves fixed-PID exact-once delivery and terminal uncertainty handling, and introduces no remaining security or privacy defect in the reviewed Issue 40 surface.
