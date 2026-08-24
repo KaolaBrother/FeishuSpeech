@@ -1456,7 +1456,16 @@ final class SystemReviewSubmissionFacade: ReviewSubmissionFacade {
         committer: ReviewUnicodeCommitter? = nil,
         lifecycleObserver: ReviewSubmissionLifecycleMonitoring? = nil
     ) {
-        let rawAccessibility = rawAccessibility ?? SystemReviewSubmissionAXRuntime()
+        let rawAccessibility = rawAccessibility ?? SystemReviewSubmissionAXRuntime(
+            stepObserver: { step, result in
+                logger.debug(
+                    """
+                    Review AX step=\(step.rawValue, privacy: .public) \
+                    result=\(result.rawValue, privacy: .public)
+                    """
+                )
+            }
+        )
         let committer = committer ?? ReviewUnicodeCommitter()
         let eventRelay = ReviewSubmissionEventRelay()
         let controlPlane = ReviewSubmissionControlPlane()

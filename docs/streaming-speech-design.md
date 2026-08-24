@@ -1,16 +1,17 @@
 # Streaming speech and review-first design
 
-Status: Issue #40 v6 one-route review-first plus issue #39 editable keyboard policy, application-bound
+Status: Issue #40 v7 one-route review-first plus issue #39 editable keyboard policy, application-bound
 non-secure AX-miss fallback, snapshot replacement, release-drain lifecycle, resilience watchdogs,
 and the atomic HID interference gate are implemented locally. V5 adds the nonblocking submission
 executor/control-plane, fixed opaque target lease, final security sandwich, and per-AX cancellation/
 deadline checkpoints; v6 retries lifecycle observer installation when Accessibility authorization lands
-after initialization. The former issue #27 direct/compatibility output branch remains historical/dormant
+after initialization, and v7 reads initial focus only from the frozen original-application AX root rather
+than ambient system-wide focus. The former issue #27 direct/compatibility output branch remains historical/dormant
 and cannot be restored through settings. The final focused matrix passes 324 executed / 0 skipped /
 0 failures; all 105 streaming tests execute, and the full serialized target passes 537 tests with 1
 expected live-TCP environmental skip / 0 failures.
-The Apple Development-signed replacement Release is installed as the sole application copy.
-Accessibility reauthorization and owner UAT remain pending; no target-consumption or general
+The authorized Apple Development-signed v6 Release failed original-target capture and was stopped.
+V7 replacement installation and owner UAT remain pending; no target-consumption or general
 compatibility claim is made.
 
 ## 1. Outcome
@@ -810,7 +811,7 @@ No cursor destination survives the process lifetime or is persisted to UserDefau
    - Credential-bearing abort/retry/replay, real same-panel WindowServer/focus behavior, original-
      target AX restoration, process-targeted Unicode-pair consumption, and exact versus
      application-bound current-focus review delivery must be tested in the installed Release before
-     general availability. No v5 replacement Release is installed yet.
+     general availability. No v7 replacement Release is installed yet.
 
 Test/production custody separation was preserved for the automated implementation cycle.
 
@@ -1016,7 +1017,8 @@ units, read back for provenance, and reports terminal submitted-unverified after
 resend or ordinary confirmation re-exposure. V6 additionally repairs the delayed-Accessibility-grant
 ordering defect by verifying the complete lifecycle observer set and reinstalling it immediately before
 original-target capture when initialization preceded authorization. A failed bounded retry remains
-pre-boundary and cannot emit any target signal. The final v6 focused matrix passes 324 executed tests,
+pre-boundary and cannot emit any target signal. V7 then constrains initial focus capture to the frozen
+application AX root. The final v7 focused matrix passes 324 executed tests,
 skips 0 tests, and has 0 failures; all 105 streaming tests execute, and the full serialized target
 passes 537 tests with 1 expected live-TCP environmental skip and 0 failures. The issue #27 writer remains historical
 dormant service code only; persisted settings cannot disable review-first or restore it. The repaired
@@ -1027,11 +1029,11 @@ Unsafe, oversized, empty, or stale previews still use fixed failure/preservation
 
 General-availability closure remains intentionally separate: the owner will self-test the replacement
 installed Release with real Feishu credentials and the live target-application matrix above. Until
-the installed v6 replacement is reauthorized for Accessibility and passes owner UAT, snapshot replacement, review WindowServer
+the installed v7 replacement passes owner UAT, snapshot replacement, review WindowServer
 activation/focus, original-target Accessibility restoration, actual Unicode-pair consumption,
 action-3 acceptance, retry/replay recovery, release races, PCM/tail behavior, slow-network handling,
 same-PID caret risk, and broad cross-application compatibility remain unverified. No
 cumulative/delta/revision provider semantic is inferred beyond complete opaque replacement. Local
 `CGEventPostToPid` transaction submission cannot substitute for the visible target-acceptance
 observation required from owner UAT and never authorizes an uncertainty retry. The rejected v3
-installed candidate was stopped; the v6 replacement and sole-copy audit are complete.
+installed candidate was stopped; the authorized v6 replacement was also rejected after capture failure.

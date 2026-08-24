@@ -805,18 +805,10 @@ final class SystemReviewSubmissionAXRuntime: ReviewSubmissionRawAccessibilityRun
             return .failure(.accessibilityTimeout)
         }
 
-        let systemWide = AXUIElementCreateSystemWide()
-        guard case .success = sendTimeout(
-            to: systemWide,
-            deadline: deadline,
-            cancellationProbe: { false }
-        ) else {
-            return .failure(.accessibilityTimeout)
-        }
         let focused: AXUIElement
         switch copyAttribute(
             kAXFocusedUIElementAttribute as CFString,
-            from: systemWide,
+            from: applicationElement,
             deadline: deadline,
             cancellationProbe: { false }
         ) {
