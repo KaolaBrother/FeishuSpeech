@@ -13,6 +13,79 @@ private let logger = Logger(
 
 @MainActor
 final class FinalTextOutputSecurityTests: XCTestCase {
+    func test_v8CaptureTraceIdentifiesSecureInputBeforeAnyAXMessage() {
+        let identity = V5SystemAXFixtures.identity(processIdentifier: 42)
+        let trace = V5SystemAXStepTrace()
+        let runtime = SystemReviewSubmissionAXRuntime(
+            stepObserver: trace.observe,
+            securitySamples: ReviewAXSecuritySamples(
+                secureInputEnabled: { true },
+                accessibilityTrusted: { true },
+                runningIdentity: { processIdentifier in
+                    processIdentifier == identity.processIdentifier ? identity : nil
+                },
+                frontmostProcessIdentifier: { identity.processIdentifier }
+            )
+        )
+
+        let result = runtime.capture(
+            ReviewTargetCaptureRequestDescriptor(
+                generation: 7,
+                application: identity
+            )
+        )
+
+        guard case .failure(let failure) = result else {
+            return XCTFail("Secure Input capture must fail before AX messaging")
+        }
+        XCTAssertEqual(failure, .securityRejected)
+        XCTAssertEqual(
+            trace.snapshot().map { $0.0.rawValue + ":" + $0.1.rawValue },
+            [
+                "runningIdentity:success",
+                "frontmost:success",
+                "secureInput:secureInputEnabled"
+            ]
+        )
+    }
+
+    func test_v8CaptureTraceIdentifiesLostAccessibilityTrustBeforeAnyAXMessage() {
+        let identity = V5SystemAXFixtures.identity(processIdentifier: 42)
+        let trace = V5SystemAXStepTrace()
+        let runtime = SystemReviewSubmissionAXRuntime(
+            stepObserver: trace.observe,
+            securitySamples: ReviewAXSecuritySamples(
+                secureInputEnabled: { false },
+                accessibilityTrusted: { false },
+                runningIdentity: { processIdentifier in
+                    processIdentifier == identity.processIdentifier ? identity : nil
+                },
+                frontmostProcessIdentifier: { identity.processIdentifier }
+            )
+        )
+
+        let result = runtime.capture(
+            ReviewTargetCaptureRequestDescriptor(
+                generation: 7,
+                application: identity
+            )
+        )
+
+        guard case .failure(let failure) = result else {
+            return XCTFail("lost Accessibility trust must fail before AX messaging")
+        }
+        XCTAssertEqual(failure, .securityRejected)
+        XCTAssertEqual(
+            trace.snapshot().map { $0.0.rawValue + ":" + $0.1.rawValue },
+            [
+                "runningIdentity:success",
+                "frontmost:success",
+                "secureInput:success",
+                "accessibilityTrust:accessibilityUntrusted"
+            ]
+        )
+    }
+
     func test_v5ExactCursorCaptureOwnsOriginalFocusAndSelectionThroughSubmission() throws {
         let accessibilitySource = try productionSource(
             relativePath: "FeishuSpeech/Services/AccessibilityClient.swift"

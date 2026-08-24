@@ -1458,7 +1458,7 @@ final class SystemReviewSubmissionFacade: ReviewSubmissionFacade {
     ) {
         let rawAccessibility = rawAccessibility ?? SystemReviewSubmissionAXRuntime(
             stepObserver: { step, result in
-                logger.debug(
+                logger.info(
                     """
                     Review AX step=\(step.rawValue, privacy: .public) \
                     result=\(result.rawValue, privacy: .public)

@@ -782,16 +782,8 @@ final class SystemReviewSubmissionAXRuntime: ReviewSubmissionRawAccessibilityRun
         )
         let deadline = captureDeadline.overflow ? UInt64.max : captureDeadline.partialValue
         guard isWithin(deadline) else { return .failure(.accessibilityTimeout) }
-        guard let running = NSRunningApplication(
-            processIdentifier: request.application.processIdentifier
-        ),
-        applicationIdentity(for: running) == request.application,
-        NSWorkspace.shared.frontmostApplication?.processIdentifier
-            == request.application.processIdentifier else {
-            return .failure(.targetIdentityChanged)
-        }
-        guard !IsSecureEventInputEnabled(), AXIsProcessTrusted() else {
-            return .failure(.securityRejected)
+        if let failure = capturePreflight(request.application) {
+            return .failure(failure)
         }
 
         let applicationElement = AXUIElementCreateApplication(
@@ -832,6 +824,52 @@ final class SystemReviewSubmissionAXRuntime: ReviewSubmissionRawAccessibilityRun
             applicationElement: applicationElement,
             deadline: deadline
         )
+    }
+
+    private func capturePreflight(
+        _ application: ReviewApplicationIdentity
+    ) -> ReviewPreBoundaryFailure? {
+        guard let runningIdentity = securitySamples.runningIdentity(
+            application.processIdentifier
+        ) else {
+            observe(.runningIdentity, result: .missingIdentity)
+            return .targetIdentityChanged
+        }
+        observe(
+            .runningIdentity,
+            result: runningIdentity == application ? .success : .wrongIdentity
+        )
+        guard runningIdentity == application else {
+            return .targetIdentityChanged
+        }
+        let frontmost = securitySamples.frontmostProcessIdentifier()
+        observe(
+            .frontmost,
+            result: frontmost == application.processIdentifier
+                ? .success
+                : .wrongFrontmost
+        )
+        guard frontmost == application.processIdentifier else {
+            return .targetIdentityChanged
+        }
+
+        let secureInputEnabled = securitySamples.secureInputEnabled()
+        observe(
+            .secureInput,
+            result: secureInputEnabled ? .secureInputEnabled : .success
+        )
+        guard !secureInputEnabled else {
+            return .securityRejected
+        }
+        let accessibilityTrusted = securitySamples.accessibilityTrusted()
+        observe(
+            .accessibilityTrust,
+            result: accessibilityTrusted ? .success : .accessibilityUntrusted
+        )
+        guard accessibilityTrusted else {
+            return .securityRejected
+        }
+        return nil
     }
 
     func validate(
@@ -1996,21 +2034,6 @@ final class SystemReviewSubmissionAXRuntime: ReviewSubmissionRawAccessibilityRun
         return .value(value)
     }
 
-    private func applicationIdentity(
-        for application: NSRunningApplication
-    ) -> ReviewApplicationIdentity? {
-        guard let bundleIdentifier = application.bundleIdentifier,
-              let executableURL = application.executableURL,
-              let launchDate = application.launchDate else {
-            return nil
-        }
-        return ReviewApplicationIdentity(
-            processIdentifier: application.processIdentifier,
-            bundleIdentifier: bundleIdentifier,
-            executableURL: executableURL,
-            launchDate: launchDate
-        )
-    }
 }
 
 /// Naming retained from the v5 architecture so tests and diagnostics can
