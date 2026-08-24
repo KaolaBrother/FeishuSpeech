@@ -13,6 +13,25 @@ private let logger = Logger(
 
 @MainActor
 final class FinalTextOutputSecurityTests: XCTestCase {
+    func test_v9NonNativeFocusedRolesUseOrdinaryApplicationFallback() {
+        XCTAssertEqual(
+            ReviewAXEditableRolePolicy.classify("AXWebArea"),
+            .ordinaryCapabilityMiss
+        )
+        XCTAssertEqual(
+            ReviewAXEditableRolePolicy.classify(kAXButtonRole as String),
+            .ordinaryCapabilityMiss
+        )
+        XCTAssertEqual(
+            ReviewAXEditableRolePolicy.classify(kAXTextFieldRole as String),
+            .nativeTextInput
+        )
+        XCTAssertEqual(
+            ReviewAXEditableRolePolicy.classify(kAXTextAreaRole as String),
+            .nativeTextInput
+        )
+    }
+
     func test_v8CaptureTraceIdentifiesSecureInputBeforeAnyAXMessage() {
         let identity = V5SystemAXFixtures.identity(processIdentifier: 42)
         let trace = V5SystemAXStepTrace()

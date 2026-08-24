@@ -97,6 +97,19 @@ typealias ReviewAXStepObserver = @Sendable (
     _ result: ReviewAXResultCategory
 ) -> Void
 
+enum ReviewAXEditableRolePolicy {
+    enum Classification: Equatable {
+        case nativeTextInput
+        case ordinaryCapabilityMiss
+    }
+
+    static func classify(_ role: String) -> Classification {
+        [kAXTextFieldRole as String, kAXTextAreaRole as String].contains(role)
+            ? .nativeTextInput
+            : .ordinaryCapabilityMiss
+    }
+}
+
 /// Injectable security reads keep the production composite directly backed by
 /// AppKit/ApplicationServices while allowing deterministic raw-runtime tests.
 /// They contain values and closures only; no AX object crosses this seam.
@@ -1932,8 +1945,8 @@ final class SystemReviewSubmissionAXRuntime: ReviewSubmissionRawAccessibilityRun
         case .failure(let failure):
             return failure
         }
-        guard [kAXTextFieldRole as String, kAXTextAreaRole as String].contains(role) else {
-            return .unverifiable
+        guard ReviewAXEditableRolePolicy.classify(role) == .nativeTextInput else {
+            return .ordinaryCapabilityMiss
         }
         let subrole: String
         switch editableStringValue(

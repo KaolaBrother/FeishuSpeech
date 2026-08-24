@@ -1,17 +1,22 @@
 # Streaming speech and review-first design
 
-Status: Issue #40 v7 one-route review-first plus issue #39 editable keyboard policy, application-bound
+Status: Issue #40 v9 one-route review-first plus issue #39 editable keyboard policy, application-bound
 non-secure AX-miss fallback, snapshot replacement, release-drain lifecycle, resilience watchdogs,
 and the atomic HID interference gate are implemented locally. V5 adds the nonblocking submission
 executor/control-plane, fixed opaque target lease, final security sandwich, and per-AX cancellation/
 deadline checkpoints; v6 retries lifecycle observer installation when Accessibility authorization lands
 after initialization, and v7 reads initial focus only from the frozen original-application AX root rather
-than ambient system-wide focus. The former issue #27 direct/compatibility output branch remains historical/dormant
+than ambient system-wide focus. V8 changes no behavior: it persists the existing value-only capture
+identity, frontmost, Secure Input, trust, and AX step/result trace at info level so an installed failure
+identifies one exact fail-closed branch without reading transcript or target text. V9 classifies a
+successfully read non-native focus role such as `AXWebArea` as an ordinary non-secure AX capability miss,
+so the already-designed frozen-application fallback is used instead of rejecting preview startup. Secure
+Input, trust, identity, cancellation, and deadline failures remain fail closed. The former issue #27 direct/compatibility output branch remains historical/dormant
 and cannot be restored through settings. The final focused matrix passes 324 executed / 0 skipped /
-0 failures; all 105 streaming tests execute, and the full serialized target passes 537 tests with 1
+0 failures; all 105 streaming tests execute, and the v9 full serialized target passes 539 tests with 1
 expected live-TCP environmental skip / 0 failures.
 The authorized Apple Development-signed v6 Release failed original-target capture and was stopped.
-The signed v7 replacement is installed as the sole application copy; owner UAT remains pending and no
+The signed v9 replacement is installed as the sole application copy; owner UAT remains pending and no
 target-consumption or general compatibility claim is made.
 
 ## 1. Outcome

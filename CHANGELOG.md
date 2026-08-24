@@ -49,6 +49,7 @@
 ### Fixed
 > 以下 issue #26/#27 条目保留此前实现的历史记录。直接/连续/final-only/剪贴板恢复输出部分不是当前 Issue #40 v4 路线；当前路线要求同一面板保留精确草稿，任何再次投递都必须由用户重新显式确认。
 
+- 修复 Issue #40 安装版在浏览器/Electron/Codex 类输入区按 Fn 时误报“无法确认输入位置”：已成功读取但不是原生 `AXTextField` / `AXTextArea` 的焦点角色（实机为 `AXWebArea`）现在归类为普通非安全 AX capability miss，并进入既有的冻结原应用绑定预览。Secure Input、辅助功能权限、进程身份、前台应用、取消和 deadline 仍在任何输出前 fail closed；录音、识别、流式预览、Fn release、编辑、显式 Send/Return 和一次性 Unicode 输出边界不变（issue #40 v9）。
 - [v2 historical; v4 superseded] 审阅确认在开始音频/网络前捕获 PID、bundle ID、executable URL、launch date、精确 AX 元素和原选区；v4 仍保留身份/焦点/选区/Secure Input fail-closed，但不再使用 Cmd+V 或 pasteboard。
 - [v2 historical; v4 superseded] 普通非安全 final-only/可编辑 AX 目标的 fallback 曾向固定 PID 发送 Cmd+V；v4 改为固定 PID 的一次 Unicode 文本 pair，不递归发现当前焦点、不跨应用、不自动重试。
 - [v2 historical; v4 removed] 审阅 pasteboard item/type snapshot、changeCount 恢复和 Cmd+V 交易已删除；图片残留诊断证明目标消费不可由 changeCount 可靠确认，当前任何审阅阶段都不读取、写入或恢复用户剪贴板。
@@ -122,6 +123,7 @@
 
 - issue #27 的最终候选 Release 1.0 build 8 已通过 316/316 完整测试、strict SwiftLint、Debug 与 Release 构建。发布 drain、权威 final、重复 `10024` 恢复、watchdog、deadline race、迟到回调和 fixed-target 安全边界均有自动化覆盖；这些本地门槛不证明真实凭据服务或目标控件实际接受 PID-targeted 事件。
 - Issue #40 v5 final focused serialized matrix passed 324 tests with 0 skipped and 0 failures; the full macOS target passed 537 tests with 1 expected live-TCP environmental skip and 0 failures. Coverage includes direct freeze-to-editable, real Send/qualified Return intent, rejection of blank/IME/modified/repeated/wrong-window Return, zero pre-confirm side effects, no-pasteboard/no-Cmd+V output, opaque fixed-target leases, 16,384 UTF-16 limits, pair readback, final security sandwich, per-AX cancellation/deadline, mandatory up, terminal submitted-unverified semantics, and independent async roots. This automated result does not replace replacement Release installation or owner UAT.
+- Issue #40 v9 focused security/delivery validation passed 100/100; the full macOS target passed 539 tests with 1 expected live-TCP environmental skip and 0 failures; strict SwiftLint reported 0 violations. The Apple Development-signed v9 Release is installed as the sole application copy. Owner Fn → durable editable preview → explicit Send/Return UAT is still required before closure.
 
 ### Verification pending
 

@@ -59,6 +59,18 @@ pre-boundary failure posts zero and retains the exact draft. Exactly one Unicode
 up is mandatory. Once down is attempted, the only terminal delivery result is `submitted-unverified`: it
 never claims consumption, retries, resends, or re-exposes ordinary confirmation.
 
+V8 leaves this behavior unchanged. It persists only value-only capture step/result enums for original-app
+identity, frontmost PID, Secure Input, Accessibility trust, and AX operations at info level. The observer
+receives no AX object, transcript, draft, target text, or selection value; it exists so installed owner UAT
+can identify one exact fail-closed capture branch instead of the aggregate `securityRejected` label.
+
+V9 corrects the installed failure exposed by that diagnosis: a successfully read focused role outside the
+native `AXTextField` / `AXTextArea` pair (notably browser/Electron `AXWebArea`) is an ordinary non-secure AX
+capability miss, not an unverifiable security failure. Capture therefore retains the already-designed
+application-bound current-focus fallback for the frozen application identity. Global Secure Input,
+Accessibility trust, process generation, frontmost identity, cancellation, and deadline checks remain
+fail-closed before any output.
+
 The production hot-key state is `idle -> pending -> streaming -> sealing -> idle | error`.
 `pending` retains the 0.3-second gate. `streaming` owns one recorder/ingress, one ordered packet
 journal, one generation-scoped snapshot/replay ledger, at most one active Feishu session, and no
@@ -770,5 +782,7 @@ Unicode pair with no visible target text remains PARTIAL and must not trigger gl
 retries, rollback, retargeting, or a second automatic delivery path after uncertainty. The D-40
 fallback proves the original application only, not the original control or caret within it. The v3
 installed candidate was stopped after its Cancel-only/Return failure and residual image-paste risk.
-The authorized v6 candidate also failed original-target capture and was stopped. The signed v7 Release is
+The authorized v6 candidate also failed original-target capture and was stopped. Installed v7 owner UAT
+still failed twice as `securityRejected`; its debug-level step observer was not persisted. V8 made that
+diagnosis observable, and v9 corrected the unsupported-role classification. The signed v9 Release is
 installed as the sole application copy; owner UAT remains required.
