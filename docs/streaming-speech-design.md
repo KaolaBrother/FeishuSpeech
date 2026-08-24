@@ -11,8 +11,8 @@ and cannot be restored through settings. The final focused matrix passes 324 exe
 0 failures; all 105 streaming tests execute, and the full serialized target passes 537 tests with 1
 expected live-TCP environmental skip / 0 failures.
 The authorized Apple Development-signed v6 Release failed original-target capture and was stopped.
-V7 replacement installation and owner UAT remain pending; no target-consumption or general
-compatibility claim is made.
+The signed v7 replacement is installed as the sole application copy; owner UAT remains pending and no
+target-consumption or general compatibility claim is made.
 
 ## 1. Outcome
 
@@ -811,7 +811,7 @@ No cursor destination survives the process lifetime or is persisted to UserDefau
    - Credential-bearing abort/retry/replay, real same-panel WindowServer/focus behavior, original-
      target AX restoration, process-targeted Unicode-pair consumption, and exact versus
      application-bound current-focus review delivery must be tested in the installed Release before
-     general availability. No v7 replacement Release is installed yet.
+     general availability. The v7 replacement is installed, but owner UAT remains open.
 
 Test/production custody separation was preserved for the automated implementation cycle.
 

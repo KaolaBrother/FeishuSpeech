@@ -770,5 +770,5 @@ Unicode pair with no visible target text remains PARTIAL and must not trigger gl
 retries, rollback, retargeting, or a second automatic delivery path after uncertainty. The D-40
 fallback proves the original application only, not the original control or caret within it. The v3
 installed candidate was stopped after its Cancel-only/Return failure and residual image-paste risk.
-The authorized v6 candidate also failed original-target capture and was stopped; v7 replacement
-installation, sole-copy audit, and owner UAT remain required.
+The authorized v6 candidate also failed original-target capture and was stopped. The signed v7 Release is
+installed as the sole application copy; owner UAT remains required.
