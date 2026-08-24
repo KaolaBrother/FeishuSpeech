@@ -9,8 +9,9 @@ after initialization. The former issue #27 direct/compatibility output branch re
 and cannot be restored through settings. The final focused matrix passes 324 executed / 0 skipped /
 0 failures; all 105 streaming tests execute, and the full serialized target passes 537 tests with 1
 expected live-TCP environmental skip / 0 failures.
-The replacement Release has not been installed and owner UAT remains pending; no target-consumption
-or general compatibility claim is made.
+The Apple Development-signed replacement Release is installed as the sole application copy.
+Accessibility reauthorization and owner UAT remain pending; no target-consumption or general
+compatibility claim is made.
 
 ## 1. Outcome
 
@@ -1026,11 +1027,11 @@ Unsafe, oversized, empty, or stale previews still use fixed failure/preservation
 
 General-availability closure remains intentionally separate: the owner will self-test the replacement
 installed Release with real Feishu credentials and the live target-application matrix above. Until
-the v6 replacement build is installed and passes owner UAT, snapshot replacement, review WindowServer
+the installed v6 replacement is reauthorized for Accessibility and passes owner UAT, snapshot replacement, review WindowServer
 activation/focus, original-target Accessibility restoration, actual Unicode-pair consumption,
 action-3 acceptance, retry/replay recovery, release races, PCM/tail behavior, slow-network handling,
 same-PID caret risk, and broad cross-application compatibility remain unverified. No
 cumulative/delta/revision provider semantic is inferred beyond complete opaque replacement. Local
 `CGEventPostToPid` transaction submission cannot substitute for the visible target-acceptance
 observation required from owner UAT and never authorizes an uncertainty retry. The rejected v3
-installed candidate was stopped; no v6 replacement Release is installed yet.
+installed candidate was stopped; the v6 replacement and sole-copy audit are complete.

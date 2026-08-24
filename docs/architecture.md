@@ -767,5 +767,6 @@ In particular, `CGEventPostToPid` has no target acceptance acknowledgement. A lo
 Unicode pair with no visible target text remains PARTIAL and must not trigger global HID posting,
 retries, rollback, retargeting, or a second automatic delivery path after uncertainty. The D-40
 fallback proves the original application only, not the original control or caret within it. The v3
-installed candidate was stopped after its Cancel-only/Return failure and residual image-paste risk;
-no v6 replacement Release is installed yet.
+installed candidate was stopped after its Cancel-only/Return failure and residual image-paste risk.
+The v6 Apple Development-signed Release is installed as the sole application copy; Accessibility
+reauthorization and owner UAT remain required.
