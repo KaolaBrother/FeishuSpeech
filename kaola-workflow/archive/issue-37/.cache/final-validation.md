@@ -1,0 +1,3 @@
+verdict: pass
+validation_command: swiftlint
+validated_candidate_hash: ac0b09ae0bbf07b674ea12583e6bf323cc266c3263f9302a57d9a2c1f96bf3a9
